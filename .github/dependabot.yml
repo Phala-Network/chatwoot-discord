@@ -2,6 +2,9 @@ version: 2
 updates:
   # Dependabot updates bun.lock (text lockfile). The bun ecosystem gets version updates only, not
   # security updates (https://docs.github.com/en/code-security/dependabot/ecosystems-supported-by-dependabot/supported-ecosystems-and-repositories).
+  # Dependabot cannot parse Bun 1.4's lockfile (lockfileVersion 2) yet
+  # (https://github.com/dependabot/dependabot-core/issues/16026); until it can, update with
+  # `bun update` by hand. A wrangler update also needs `bun run types` (see CONTRIBUTING.md).
   - package-ecosystem: bun
     directory: /
     schedule:

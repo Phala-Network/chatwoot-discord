@@ -29,21 +29,22 @@
     "dev": "wrangler dev",
     "lint": "biome check .",
     "format": "biome check --write .",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
+    "types": "wrangler types --include-env=false",
+    "typecheck": "wrangler types --include-env=false --check && tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
     "test": "vitest run",
-    "build": "wrangler deploy --dry-run --outdir dist --config wrangler.example.jsonc",
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "deploy": "wrangler deploy",
     "gen:chatwoot": "openapi-typescript https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/swagger/swagger.json --empty-objects-unknown -o src/chatwoot/schema.d.ts",
     "register-commands": "bun scripts/register-commands.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.14",
     "@cloudflare/vitest-pool-workers": "0.22.0",
-    "@cloudflare/workers-types": "^5.20260927.1",
     "@types/node": "^24.19.0",
     "openapi-typescript": "^7.13.0",
     "typescript": "~5.9.3",
     "vitest": "^4.1.11",
-    "wrangler": "^4.141.0"
+    "wrangler": "^4.142.0"
   },
   "dependencies": {
     "discord-api-types": "^0.38.55",
@@ -55,5 +56,27 @@
   "trustedDependencies": [
     "esbuild",
     "workerd"
-  ]
+  ],
+  "cloudflare": {
+    "bindings": {
+      "CONFIG": {
+        "description": "Non-secret settings (JSON): Chatwoot URL, accounts and their forum channels, linked agents, and the optional triage bot. The committed values are placeholders; see the [configuration reference](https://github.com/Phala-Network/chatwoot-discord#configuration-reference)."
+      },
+      "DISCORD_BOT_TOKEN": {
+        "description": "Bot token of your Discord application (Developer Portal > your application > **Bot**)."
+      },
+      "DISCORD_PUBLIC_KEY": {
+        "description": "**Public Key** of your Discord application (Developer Portal > your application > **General Information**), 64 hex characters."
+      },
+      "CHATWOOT_RELAY_TOKEN": {
+        "description": "Access token (Profile > Access Token) of a Chatwoot user that is an agent in every relayed inbox, or an administrator."
+      },
+      "CHATWOOT_WEBHOOK_SECRETS": {
+        "description": "JSON object of Chatwoot webhook secrets by account id, e.g. `{\"1\":\"<secret>\"}` (Settings > Integrations > Webhooks)."
+      },
+      "CHATWOOT_AGENT_TOKENS": {
+        "description": "JSON object of each linked agent's own Chatwoot access token by Discord user id, e.g. `{\"<Discord user id>\":\"<token>\"}`. Use `{}` until agents are linked."
+      }
+    }
+  }
 }
