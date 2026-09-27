@@ -272,7 +272,7 @@ replace:
 | `relay.linkAttribute` | `discord_thread` | Conversation attribute that receives the post URL (`""` disables). |
 | `relay.startAfterMessageId` | `0` | Messages with an id at or below this are never relayed (cutover watermark). |
 | `relay.maxAttempts` | `5` | Attempts before a message is skipped with a notice. |
-| `relay.subrequestBudget` | `45` | Outbound requests per alarm invocation (Free plan limit: 50). Must exceed `relay.maxChunks` + 14, one message's worst case. |
+| `relay.subrequestBudget` | `45` | Outbound requests per alarm invocation (Free plan limit: 50). At least `relay.maxChunks` + 19: a run's setup and one message's worst case (`src/relay/limits.ts`). |
 | `reconcile.lookbackSeconds` | `3600` | Minimum sweep window (conversations with activity within it are checked). Messages older than this are relayed without notifications. |
 | `reconcile.maxCatchUpSeconds` | `604800` | Maximum sweep window after downtime. |
 | `avatars.chatwoot` | `<Chatwoot URL>/favicon-512x512.png` | Avatar of activity lines, cards, notices, agent bots, and agents with neither a linked Discord user nor a Chatwoot avatar (https). |

@@ -1,0 +1,37 @@
+// Worst-case subrequest counts of one conversation run (relay/processor.ts), kept in one place so
+// the run's checks and the configuration's validation agree. A run starts a message only when
+// the message's worst case fits in what is left of the invocation's budget (see budget.ts).
+
+/**
+ * Before the first message: the conversation, a check that the post linked from it exists
+ * (recovery), the latest messages (an adopted post's starting point), and the first page.
+ */
+const SETUP_REQUESTS = 4;
+
+/** Reading the next page of messages. */
+export const PAGE_REQUESTS = 1;
+
+/**
+ * One message besides its parts: the account's agents (mentions and the sender) and the linked
+ * sender's Discord avatar; for a new post, the inbox name, the forum's tags, the webhook's lookup
+ * and creation, and the ticket card; a failed attempt into a post deleted in Discord; the
+ * truncation note; and the notice when the message is skipped.
+ */
+const MESSAGE_REQUESTS = 10;
+
+/**
+ * After the messages: linking the post from its conversation (the forum's guild and the
+ * attribute update), and bringing the post's tags, title, and archived flag up to date (the
+ * forum's tags, the update, and archiving).
+ */
+export const FINISH_REQUESTS = 2 + 3;
+
+/** What one message may need, with room left to finish the run afterwards. */
+export function requestsPerMessage(maxChunks: number): number {
+  return maxChunks + MESSAGE_REQUESTS + FINISH_REQUESTS;
+}
+
+/** The smallest budget in which a run is sure to relay a message: the setup and one message. */
+export function minimumBudget(maxChunks: number): number {
+  return SETUP_REQUESTS + requestsPerMessage(maxChunks);
+}

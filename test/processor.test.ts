@@ -9,13 +9,8 @@ import { chatwootClient } from "../src/chatwoot/api.ts";
 import type { Settings } from "../src/config.ts";
 import { DiscordForum } from "../src/discord/forum.ts";
 import { DiscordRest } from "../src/discord/rest.ts";
-import {
-  type ProcessOutcome,
-  processConversation,
-  processMessageUpdate,
-  relayFor,
-  requestsPerMessage,
-} from "../src/relay/processor.ts";
+import { minimumBudget, requestsPerMessage } from "../src/relay/limits.ts";
+import { type ProcessOutcome, processConversation, processMessageUpdate, relayFor } from "../src/relay/processor.ts";
 import { Store } from "../src/store.ts";
 import { ALICE, BOB, FORUM, json, mockFetch, on, type Recorded, TRIAGE, testSettings } from "./helpers.ts";
 
@@ -44,6 +39,8 @@ class World {
   };
   messages: FakeMessage[] = [];
   failLinks = 0;
+  /** Posts deleted in Discord. */
+  goneThreads = new Set<string>();
   /** Discord users by id; others are unknown to Discord. */
   discordUsers: Record<string, { avatar: string | null; discriminator: string }> = {};
   private threads = 0;
@@ -85,9 +82,12 @@ class World {
       on("GET", `discord.com/api/v10/channels/${FORUM}`, () =>
         json({ id: FORUM, guild_id: GUILD, available_tags: [] }),
       ),
-      on("GET", /^discord\.com\/api\/v10\/channels\/\d+$/, (request) =>
-        json({ id: request.url.pathname.split("/").at(-1), parent_id: FORUM }),
-      ),
+      on("GET", /^discord\.com\/api\/v10\/channels\/\d+$/, (request) => {
+        const id = request.url.pathname.split("/").at(-1) ?? "";
+        return this.goneThreads.has(id)
+          ? json({ message: "Unknown Channel", code: 10003 }, { status: 404 })
+          : json({ id, parent_id: FORUM });
+      }),
       on("PATCH", /^discord\.com\/api\/v10\/channels\/\d+$/, () => json({})),
       on("GET", /^discord\.com\/api\/v10\/users\/\d+$/, (request) => {
         const id = request.url.pathname.split("/").at(-1) ?? "";
@@ -224,6 +224,24 @@ describe("processConversation", () => {
       expect(outcomes.length).toBeGreaterThan(2);
       expect(outcomes.slice(0, -1).every((outcome) => outcome === "yield")).toBe(true);
       expect(world.replies()).toEqual(world.messages.map((message) => message.content));
+    });
+  });
+
+  it("relays a message in its worst case within the smallest budget the configuration accepts", async () => {
+    const settings = testSettings({ relay: { maxChunks: 10, subrequestBudget: minimumBudget(10) } });
+    const world = new World();
+    // The link attribute names a post deleted in Discord: checked, then a new post is opened.
+    world.goneThreads.add("300000000000000009");
+    world.conversation.custom_attributes = { discord_thread: `https://discord.com/channels/${GUILD}/300000000000000009` };
+    world.discordUsers = { [BOB]: { avatar: "a_bob", discriminator: "0" } };
+    world.messages = [
+      { id: 1, content: "x\n".repeat(15_000), message_type: 1, sender: { id: 43, type: "user", name: "Bob" } },
+    ];
+    await withStore(async (store) => {
+      expect(await sync(store, settings)).toEqual(["done"]);
+      const replies = world.replies();
+      expect(replies).toHaveLength(11);
+      expect(replies.at(-1)).toMatch(/^-# Message truncated/);
     });
   });
 

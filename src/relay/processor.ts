@@ -21,6 +21,7 @@ import { parseJson } from "../json.ts";
 import { errorFields, log } from "../log.ts";
 import type { Store } from "../store.ts";
 import { clip, mentionedUserIds } from "./format.ts";
+import { FINISH_REQUESTS, PAGE_REQUESTS, requestsPerMessage } from "./limits.ts";
 import { type ForumClient, Relay, type RelayStore } from "./relay.ts";
 import { interactiveMessage, responseText } from "./response.ts";
 import type { RelayConversation } from "./types.ts";
@@ -31,26 +32,6 @@ const AGENTS_CACHE_MS = 60 * 60 * 1000;
 const AVATAR_CACHE_MS = 24 * 60 * 60 * 1000;
 /** After a failed avatar lookup, the agent's Chatwoot avatar is used this long before trying again. */
 const AVATAR_RETRY_MS = 60 * 60 * 1000;
-/**
- * Worst case for relaying one message besides its parts: the inbox name and the forum's tags
- * for a new post, webhook lookup and creation, the ticket card, the account's agents (for
- * mentions and the sender), the linked sender's Discord avatar, the truncation note, and a
- * failure notice.
- */
-const MESSAGE_REQUESTS = 9;
-/** Linking a new post from its conversation: the forum's guild and the attribute update. */
-const LINK_REQUESTS = 2;
-/** Bringing a post's tags and archived flag up to date: the forum's tags and two updates. */
-const SYNC_REQUESTS = 3;
-
-/**
- * Requests one message may need in the worst case, with room left for linking and syncing the
- * post afterwards. A message only starts when this much budget remains.
- */
-export function requestsPerMessage(maxChunks: number): number {
-  return maxChunks + MESSAGE_REQUESTS + LINK_REQUESTS + SYNC_REQUESTS;
-}
-
 /** The relay as configured by `settings`. */
 export function relayFor(settings: Settings, forum: ForumClient, store: RelayStore): Relay {
   const triageUserId = settings.config.triage.userId;
@@ -130,7 +111,7 @@ export async function processConversation(
 
   let inboxName: string | null | undefined;
   for (;;) {
-    if (budget.remaining < perMessage + 1) return "yield";
+    if (budget.remaining < perMessage + PAGE_REQUESTS) return "yield";
     const page = await chatwoot.listMessages(accountId, conversationId, cursor);
     for (const message of page) {
       if (message.id <= cursor) continue;
@@ -172,7 +153,7 @@ export async function processConversation(
 
   const threadId = store.thread(accountId, conversationId);
   if (threadId) {
-    if (budget.remaining < LINK_REQUESTS + SYNC_REQUESTS) return "yield";
+    if (budget.remaining < FINISH_REQUESTS) return "yield";
     await linkPost(context, accountId, account.forumChannelId, conversation, threadId);
     await relay.sync(accountId, conversation, threadId);
   }
