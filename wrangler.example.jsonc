@@ -5,8 +5,6 @@
   "name": "chatwoot-discord",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-01",
-  // Needed by @sentry/cloudflare (AsyncLocalStorage).
-  "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
   // Reconciliation sweep. The Free plan allows 5 cron triggers per account; this uses one.
   "triggers": { "crons": ["*/5 * * * *"] },

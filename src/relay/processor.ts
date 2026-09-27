@@ -10,7 +10,7 @@ import {
   toRelayMessage,
 } from "../chatwoot/api.js";
 import type { Settings } from "../config.js";
-import { errorFields, log, report } from "../log.js";
+import { errorFields, log } from "../log.js";
 import type { Store } from "../store.js";
 import type { ForumClient, Relay } from "./relay.js";
 import type { RelayConversation } from "./types.js";
@@ -94,7 +94,6 @@ export async function processConversation(
           attempts,
           ...errorFields(error),
         });
-        report(error);
         await relay.notifyFailure(accountId, conversationId, message.id);
       }
       cursor = message.id;
@@ -127,7 +126,7 @@ async function recoverThread(
   const threadId = threadIdFromUrl(conversation.customAttributes[attribute]);
   if (!threadId || store.ticketForThread(threadId)) return;
   if (!(await forum.threadExists(forumChannelId, threadId))) return;
-  store.importMapping(accountId, conversation.id, threadId, undefined);
+  store.adoptThread(accountId, conversation.id, threadId);
   log.info("recovered post from conversation link", { accountId, conversationId: conversation.id, threadId });
 }
 

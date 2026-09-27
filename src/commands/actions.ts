@@ -3,7 +3,7 @@
 
 import { ChatwootError, chatwootClient, type Fetch } from "../chatwoot/api.js";
 import type { Settings } from "../config.js";
-import { errorFields, log, report } from "../log.js";
+import { errorFields, log } from "../log.js";
 import { downloadAttachment } from "./attachments.js";
 import { FAILED, NOT_LINKED, UserError } from "./handler.js";
 import type { CommandJob } from "./job.js";
@@ -77,7 +77,6 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
       return "❌ You do not have access to this conversation.";
     }
     log.error("command failed", { action: action.type, accountId, conversationId, ...errorFields(error) });
-    report(error);
     return FAILED;
   }
 }

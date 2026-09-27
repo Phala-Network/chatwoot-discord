@@ -183,7 +183,7 @@ returns 503 when invalid):
 
 Secrets (Worker secrets, never in config): `DISCORD_BOT_TOKEN`, `DISCORD_PUBLIC_KEY`,
 `CHATWOOT_RELAY_TOKEN`, `CHATWOOT_WEBHOOK_SECRETS` (JSON by account id), `CHATWOOT_AGENT_TOKENS`
-(JSON by Discord user id), optional `ADMIN_TOKEN` and `SENTRY_DSN`.
+(JSON by Discord user id).
 
 ## Limits and the Workers Free plan
 
@@ -219,9 +219,7 @@ allowance.
 - Attachments are fetched only from Discord's CDN over HTTPS, without following redirects, with
   size caps.
 - Logs carry ids and outcomes only, never message bodies or tokens. Errors shown to users are
-  generic; details go to logs and (optionally) Sentry.
-- `POST /admin/import` is disabled unless `ADMIN_TOKEN` is set, compares the bearer token in
-  constant time, and should be disabled again after use.
+  generic; details go to Workers Logs (`observability` in `wrangler.jsonc`).
 
 See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
@@ -230,23 +228,14 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 If posts already exist (for example from an earlier relay), the service must not open a second
 post for those conversations.
 
-1. **Recommended: links.** If the previous relay stored each post URL in the conversation's
-   `discord_thread` attribute, nothing needs importing. When a conversation without a mapping has
+1. Store each existing post URL in its conversation's `discord_thread` attribute
+   (`https://discord.com/channels/<guild id>/<thread id>`). When a conversation without a mapping has
    a link, the service checks that the thread still exists in that account's forum and adopts it.
-2. Set `relay.startAfterMessageId` to the last message id the previous relay handled. Adopted and
-   imported posts continue after it; new conversations only relay messages after it. (With `0`,
+2. Set `relay.startAfterMessageId` to the last message id the previous relay handled. Adopted posts
+   continue after it; new conversations only relay messages after it. (With `0`,
    adopted posts continue after their latest message.)
 3. Stop the previous relay, deploy this service, and point the Chatwoot webhooks at it. The
    sweep catches up on anything changed in the meantime.
-4. **Fallback: import.** For posts without a link attribute, load the mappings once:
-   ```sh
-   pnpm wrangler secret put ADMIN_TOKEN   # 32+ random characters
-   ADMIN_TOKEN=... pnpm import-state --url https://<worker> --file mappings.jsonl [--after-message-id <id>]
-   pnpm wrangler secret delete ADMIN_TOKEN
-   ```
-   Each line is `{"accountId":1,"conversationId":12,"threadId":"<post id>","lastMessageId":345}`
-   (`lastMessageId` optional). Mappings for unknown accounts, or posts already mapped to another
-   conversation, are skipped.
 
 ## Development
 

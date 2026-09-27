@@ -122,9 +122,6 @@ export const secretsSchema = z.object({
   CHATWOOT_WEBHOOK_SECRETS: jsonRecord,
   /** JSON: {"<Discord user id>": "<that agent's Chatwoot access token>"} */
   CHATWOOT_AGENT_TOKENS: jsonRecord.default({}),
-  /** Enables POST /admin/import when set. */
-  ADMIN_TOKEN: z.string().min(32).optional(),
-  SENTRY_DSN: z.string().optional(),
 });
 
 export type Secrets = z.infer<typeof secretsSchema>;
@@ -164,8 +161,6 @@ export function loadSettings(env: Env): Settings {
     CHATWOOT_RELAY_TOKEN: env.CHATWOOT_RELAY_TOKEN,
     CHATWOOT_WEBHOOK_SECRETS: env.CHATWOOT_WEBHOOK_SECRETS,
     CHATWOOT_AGENT_TOKENS: env.CHATWOOT_AGENT_TOKENS,
-    ADMIN_TOKEN: env.ADMIN_TOKEN || undefined,
-    SENTRY_DSN: env.SENTRY_DSN || undefined,
   });
   if (!secrets.success) throw new ConfigError(`Invalid secrets: ${describe(secrets.error)}`);
 

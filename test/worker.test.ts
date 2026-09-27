@@ -442,24 +442,6 @@ describe("worker", () => {
     const toggled = world.requests.find((request) => request.url.pathname.endsWith("/toggle_status"));
     expect(toggled?.headers.get("api_access_token")).toBe("token-alice");
   });
-
-  it("imports mappings only with the admin token", async () => {
-    const lines = [
-      JSON.stringify({ accountId: 3, conversationId: 40, threadId: "100000000000040001", lastMessageId: 5 }),
-      JSON.stringify({ accountId: 99, conversationId: 41, threadId: "100000000000040002" }),
-      "not json",
-    ].join("\n");
-    const url = "https://relay.example.com/admin/import";
-    expect((await call(new Request(url, { method: "POST", body: lines }))).status).toBe(401);
-    expect(
-      (await call(new Request(url, { method: "POST", body: lines, headers: { authorization: "Bearer nope" } }))).status,
-    ).toBe(401);
-    const response = await call(
-      new Request(url, { method: "POST", body: lines, headers: { authorization: `Bearer ${env.ADMIN_TOKEN}` } }),
-    );
-    expect(await response.json()).toEqual({ imported: 1, skipped: 1, invalidLines: [3] });
-    expect(await hub().ticketForThread("100000000000040001")).toEqual({ accountId: 3, conversationId: 40 });
-  });
 });
 
 function cursorOf(conversationId: number): Promise<number | null> {

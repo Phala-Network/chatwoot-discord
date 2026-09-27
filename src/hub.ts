@@ -15,7 +15,7 @@ import type { CommandJob } from "./commands/job.js";
 import { loadSettings, type Settings } from "./config.js";
 import { DiscordForum } from "./discord/forum.js";
 import { DiscordRest } from "./discord/rest.js";
-import { errorFields, log, report } from "./log.js";
+import { errorFields, log } from "./log.js";
 import { latestMessageId, processConversation } from "./relay/processor.js";
 import { Relay } from "./relay/relay.js";
 import { type Job, Store } from "./store.js";
@@ -34,13 +34,6 @@ const SWEEP_BUDGET = 2;
 const MAX_BACKOFF_MS = 30 * 60 * 1000;
 /** Stop draining and continue in a new invocation after this long (alarms may run 15 minutes). */
 const RUN_WALL_MS = 5 * 60 * 1000;
-
-export interface ImportRow {
-  accountId: number;
-  conversationId: number;
-  threadId: string;
-  lastMessageId?: number | undefined;
-}
 
 export class Hub extends DurableObject<Env> {
   private readonly store: Store;
@@ -79,19 +72,6 @@ export class Hub extends DurableObject<Env> {
 
   async ticketForThread(threadId: string): Promise<{ accountId: number; conversationId: number } | null> {
     return this.store.ticketForThread(threadId) ?? null;
-  }
-
-  /** Loads conversation -> post mappings created elsewhere (e.g. by a previous relay). */
-  async importMappings(rows: ImportRow[]): Promise<{ imported: number; skipped: number }> {
-    const settings = loadSettings(this.env);
-    let imported = 0;
-    this.ctx.storage.transactionSync(() => {
-      for (const row of rows) {
-        if (!settings.account(row.accountId)) continue;
-        if (this.store.importMapping(row.accountId, row.conversationId, row.threadId, row.lastMessageId)) imported += 1;
-      }
-    });
-    return { imported, skipped: rows.length - imported };
   }
 
   override async alarm(): Promise<void> {
@@ -161,13 +141,14 @@ export class Hub extends DurableObject<Env> {
         return "done";
       }
       const delay = Math.min(5000 * 2 ** job.attempts, MAX_BACKOFF_MS);
-      log.warn("job failed; will retry", {
+      // Transient failures are warnings; a job that keeps failing is an error.
+      const logAt = job.attempts + 1 >= 3 ? log.error : log.warn;
+      logAt("job failed; will retry", {
         job: job.key,
         attempts: job.attempts + 1,
         delayMs: delay,
         ...errorFields(error),
       });
-      if (job.attempts + 1 >= 3) report(error);
       this.store.retryJob(job, delay);
       return "done";
     }
@@ -183,7 +164,6 @@ export class Hub extends DurableObject<Env> {
       });
     } catch (error) {
       log.error("command follow-up failed", { interactionId: job.interactionId, ...errorFields(error) });
-      report(error);
     }
   }
 
@@ -248,8 +228,7 @@ export class Hub extends DurableObject<Env> {
           }
         : {}),
       onIgnoredError: (error) => {
-        log.warn("could not link post from conversation", errorFields(error));
-        report(error);
+        log.error("could not link post from conversation", errorFields(error));
       },
     });
     return { settings, store: this.store, relay, forum, chatwoot, budget, rest };

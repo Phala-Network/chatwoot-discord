@@ -152,7 +152,7 @@ export class Relay {
         threadId,
       );
     } catch {
-      // Best effort: the failure is already logged and reported by the caller.
+      // Best effort: the failure is already logged by the caller.
     }
   }
 
