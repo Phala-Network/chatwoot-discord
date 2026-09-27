@@ -38,7 +38,7 @@ Cron (every 5 min) ─▶ Worker ──▶ Hub Durable Object ──▶ sweep: r
   It opens with a ticket card (channel, inbox, customer email, "Open in Chatwoot" link), and every
   message follows under its sender's name: customers, agents, 🔒 private notes, activity lines.
 - Forum tags follow the conversation: account, status (`open`, `pending`, `snoozed`,
-  `resolved`), assignee or `unassigned`, and topic. Resolved posts are archived.
+  `resolved`), assignee or `unassigned`, topic, priority, and labels. Resolved posts are archived.
 - Agents answer inside the post with `/reply`, `/note`, `/resolve`, `/assign`, and
   [other commands](#commands). Each runs in Chatwoot as the agent who used it.
 - An optional AI agent (a Discord bot) is called on each customer message and posts a draft;
@@ -61,7 +61,7 @@ and a Discord server where you can add an application and a forum channel.
 - **Chatwoot stays the system of record.** Customers, channels, history, and CSAT live in
   Chatwoot; Discord is where the team, people and bots alike, works. One post per conversation
   gives humans and an AI agent the whole ticket in one thread.
-- **An AI agent joins without code changes.** Each customer message ends with a literal
+- **An AI agent joins without code changes.** Each new customer message ends with a literal
   `<@bot>` mention of the bot set in `triage.userId`. Discord bots commonly react to other bots'
   messages only when mentioned inline, so the agent wakes up for customer messages and nothing
   else: agent replies, private notes, and activity lines carry no mention. The relay's
@@ -94,6 +94,7 @@ To connect an AI agent, see [Connecting an AI agent](docs/ai-agent.md).
 - [Limits and the Workers Free plan](#limits-and-the-workers-free-plan)
 - [Security model](#security-model)
 - [Internals](#internals)
+- [Installing on an existing Chatwoot](#installing-on-an-existing-chatwoot)
 - [Cutover from an existing relay](#cutover-from-an-existing-relay)
 - [Development](#development)
 - [Getting help](#getting-help)
@@ -110,7 +111,10 @@ To connect an AI agent, see [Connecting an AI agent](docs/ai-agent.md).
    and *Manage Webhooks* (it creates a webhook named `Chatwoot` that posts the messages).
 4. Create the forum tags you want (names up to 20 characters; missing tags are skipped): one per
    account (its name, or its `tag`), one per status (`open`, `pending`, `snoozed`, `resolved`),
-   `unassigned`, one per agent (their Chatwoot `name`), and one per topic value.
+   `unassigned`, one per agent (their Chatwoot `name`), one per topic value, and any priorities
+   (`urgent`, `high`, `medium`, `low`) and Chatwoot labels you want to see. A forum has at most 20
+   tags. If the forum's **Require tags** setting is on, make sure every post matches at least one
+   tag (for example the account tag), or Discord rejects the new post.
 
 ### 2. Chatwoot
 
@@ -174,8 +178,9 @@ are supported); you provide TLS, the cron trigger, and storage persistence.
    ```
 3. In each Chatwoot account, add a webhook (Settings → Integrations → Webhooks) for
    `https://<worker>/chatwoot/webhook`, subscribed to `message_created`, `message_updated`
-   (deleted messages and responses to interactive messages), `conversation_updated` (assignee and
-   topic), and `conversation_status_changed`. Then store the webhook secrets by account id,
+   (deleted messages, responses to interactive messages, and replies that could not be
+   delivered), `conversation_updated` (assignee, topic, priority, and labels), and
+   `conversation_status_changed`. Then store the webhook secrets by account id,
    `{"<account id>":"<webhook secret>"}`, in the `CHATWOOT_WEBHOOK_SECRETS` secret.
 
 ## Commands
@@ -185,9 +190,9 @@ Used inside a ticket post, by Discord users linked in `agents[]` who have a toke
 
 | Command | Effect in Chatwoot |
 |---|---|
-| `/reply` | Editor with a message field and an optional upload field; sends to the customer. An unassigned conversation is assigned to the sender. |
-| Apps → **Reply with this** (message menu) | Same editor, prefilled: from the triage bot, the code block after a draft label; from anyone else, the last code block or the whole message. |
-| `/note` | Same editor, for a private note. |
+| `/reply [message] [attachment]` | Without options, an editor with a message field and an optional upload field; with either option, sends it at once. Sends to the customer; an unassigned conversation is assigned to the sender. Refused when the channel does not accept a reply (Chatwoot's `can_reply`, e.g. after WhatsApp's 24-hour window). |
+| Apps → **Reply with this** (message menu) | The `/reply` editor, prefilled: from the triage bot, the code block after a draft label; from anyone else, the last code block or the whole message. |
+| `/note [message] [attachment]` | Like `/reply`, for a private note. |
 | `/resolve`, `/reopen` | Change the status. |
 | `/pending` | Like Chatwoot's "Mark as pending". |
 | `/snooze [until]` | Snooze until the next reply (default) or for an hour. A reply from the contact always reopens it. |
@@ -196,7 +201,9 @@ Used inside a ticket post, by Discord users linked in `agents[]` who have a toke
 | `/block` | Like Chatwoot's "Block contact": resolves the conversation and blocks the contact, so their future messages are muted. |
 | `/unblock` | Like Chatwoot's "Unblock contact": their new messages are posted again (messages received while blocked are not). The status is unchanged. |
 
-The invoker sees an ephemeral "thinking…" that is replaced by the result. Chatwoot's other
+The invoker sees an ephemeral "thinking…" that is replaced by the result. A slash command's
+`message` option is a single line of text and `attachment` is one file: use the editor (no
+options) for multi-line text or several files. Chatwoot's other
 snooze options reopen at a time of day in the agent's browser time zone, which Discord does not
 share; use Chatwoot for those. Discord does not allow commands in an archived post: in a resolved
 post, first send any message, which unarchives it. The relay archives it again on its next update
@@ -207,37 +214,53 @@ while the conversation is resolved.
 - Messages are posted through the forum webhook, so each shows its sender's name and avatar:
   customers (their Chatwoot avatar or `avatars.contact`), agents as `Name · Account`, and
   everything else as `Chatwoot` (`avatars.chatwoot`). Templates (greetings, CSAT) are skipped.
-- Tags are matched by name, case-insensitively; at most 5 are applied. The assignee tag is the
+- Tags are matched by name, case-insensitively. Discord applies at most 5 per post, taken in
+  this order: account, status, assignee, topic, priority, then labels. The assignee tag is the
   agent's Chatwoot `name`; the topic tag is the conversation's `topic` custom attribute
   (`relay.topicAttribute`). A resolved conversation's post is archived; any other status
   unarchives it.
+- The post title follows the contact's name when it changes (on the conversation's next sync);
+  posts adopted from another relay or created by earlier versions keep their title.
 - A newly assigned agent who is linked in `agents[]` is pinged once (`-# Assigned to @name`).
   After that, every customer message pings the linked assignee, on the same line as the triage
-  mention. Nothing else pings anyone.
+  mention. A linked agent @mentioned in a private note is pinged there; other Chatwoot mentions
+  show as `@name`. Nothing else pings anyone.
+- Notification lines (the triage mention, pings, budget notes) go on the last Discord message of
+  a split message, so a bot they call sees all of it. Only live messages carry them: messages
+  created more than `reconcile.lookbackSeconds` ago (the history of an older conversation, or a
+  catch-up after downtime) are posted without them.
 - Messages longer than Discord's 2000 characters are split at line breaks, at most
   `relay.maxChunks` (4) Discord messages, then a "Message truncated … Full text: <link>" note.
-- A message deleted in Chatwoot is deleted from the post once Chatwoot's API confirms it.
+- Shared contacts and locations, which have no file, are shown as a 📇 or 📍 line.
+- A message deleted in Chatwoot is deleted from the post once Chatwoot's API confirms it. This
+  uses the forum webhook that posted it; if that webhook was deleted in Discord (the relay then
+  creates a new one), its messages stay, because the bot has no permission to delete others'
+  messages.
 - A customer's response to an interactive message (option pick, form, CSAT rating, email
   request) is posted under the customer's name, formatted like Chatwoot's Slack integration. A
   changed response is posted again; an unchanged one is not.
+- A reply the channel could not deliver (Chatwoot marks it failed, e.g. outside WhatsApp's
+  24-hour window) gets one ⚠️ notice in the post with the channel's reason.
 - A conversation deleted in Chatwoot gets a notice in its post, which is archived and forgotten.
-  Chatwoot sends no webhook for a deletion, so this happens on the next event for it.
+  Chatwoot sends no webhook for a deletion (v4.18.0), so this happens when the next event for it
+  arrives or a command in the post finds it gone.
 - A post deleted in Discord is recreated on the next message. A message that still fails after
   `relay.maxAttempts` (5) attempts is skipped with a ⚠️ notice in its post.
 
 ## Configuration reference
 
-Non-secret settings live in the `CONFIG` var in `wrangler.jsonc`, validated at startup. The
-committed values are placeholders to replace:
+Non-secret settings live in the `CONFIG` var in `wrangler.jsonc`, validated at startup; an
+unknown key (for example a typo) makes it invalid. The committed values are placeholders to
+replace:
 
 | Key | Default | Meaning |
 |---|---|---|
 | `chatwoot.baseUrl` | required | Chatwoot base URL for API calls. |
 | `chatwoot.publicUrl` | `baseUrl` | Base URL for dashboard links posted in Discord. |
-| `accounts[]` | required | `{ id, name, forumChannelId, tag? }`: Chatwoot account id, the name shown in titles and confirmations, its forum, and its forum tag (default `name`). Accounts may share a forum. |
+| `accounts[]` | required | `{ id, name, forumChannelId, tag?, inboxIds? }`: Chatwoot account id, the name shown in titles and confirmations, its forum, its forum tag (default `name`), and the inboxes to relay (default: all). Accounts may share a forum. |
 | `agents[]` | `[]` | `{ discordUserId, email }`: links Discord users to Chatwoot agents (commands, assignee pings, `/assign` targets). |
 | `triage.userId` | unset | Discord user id of an AI agent (triage bot) to mention on customer messages. |
-| `triage.name` | `Triage bot` | Name used in budget notes. |
+| `triage.name` | `Triage bot` | Name used in budget notes (at most 100 characters). |
 | `triage.perConversationPerHour` / `perHour` | `5` / `30` | Mention budgets. |
 | `triage.draftLabels` | `["Draft"]` | Labels before the triage bot's draft code block. |
 | `relay.maxChunks` | `4` | Discord messages per Chatwoot message before truncation. |
@@ -245,8 +268,8 @@ committed values are placeholders to replace:
 | `relay.linkAttribute` | `discord_thread` | Conversation attribute that receives the post URL (`""` disables). |
 | `relay.startAfterMessageId` | `0` | Messages with an id at or below this are never relayed (cutover watermark). |
 | `relay.maxAttempts` | `5` | Attempts before a message is skipped with a notice. |
-| `relay.subrequestBudget` | `45` | Outbound requests per alarm invocation (Free plan limit: 50). |
-| `reconcile.lookbackSeconds` | `3600` | Minimum sweep window (conversations with activity within it are checked). |
+| `relay.subrequestBudget` | `45` | Outbound requests per alarm invocation (Free plan limit: 50). Must exceed `relay.maxChunks` + 13, one message's worst case. |
+| `reconcile.lookbackSeconds` | `3600` | Minimum sweep window (conversations with activity within it are checked). Messages older than this are relayed without notifications. |
 | `reconcile.maxCatchUpSeconds` | `604800` | Maximum sweep window after downtime. |
 | `avatars.chatwoot` | `<Chatwoot URL>/favicon-512x512.png` | Avatar of agent replies, notes, activity lines, cards, and notices (https). |
 | `avatars.contact` | Gravatar "mystery person" | Avatar of customers who have no avatar in Chatwoot (https). |
@@ -306,7 +329,12 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
   work serialized per conversation and makes the triage budget and post lookups coordination-free;
   support volumes are far below its throughput. Jobs run by priority (commands first), failures
   retry with exponential backoff (5 s … 30 min), and a run yields before the subrequest limit.
-- **Relaying** (`src/relay/`): a webhook only queues "sync conversation N". The job fetches the
+  A job that fails 10 times (about 70 minutes) is dropped: the sweep queues its conversation
+  again while it is behind, and its next webhook starts a new job. While a conversation's job is
+  backing off, new events for it wait for its next attempt.
+- **Relaying** (`src/relay/`): a webhook only queues "sync conversation N" (conversation events
+  wait 10 seconds first, for Chatwoot to create the change's activity message, which sends no
+  webhook). The job fetches the
   conversation and the messages after its cursor, posts them in order, then corrects tags and the
   archived flag once. Each Discord message is recorded as soon as it is accepted and the cursor
   moves past a Chatwoot message once all its parts are posted, so duplicate, reordered, or lost
@@ -315,17 +343,27 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 - **Sweep**: the cron trigger queues a sweep per account that pages through conversations, most
   recent activity first, back to the last sweep (at least `reconcile.lookbackSeconds`, at most
   `reconcile.maxCatchUpSeconds`, and at most 10 pages), and queues any conversation whose post is
-  behind or whose tags or state differ. Activity means a new message; a change without one (for
+  behind or whose tags or state differ. When it stops at 10 pages, the next sweep reaches back
+  to the oldest activity it read. Activity means a new message; a change without one (for
   example only the topic attribute), deletions, and interactive responses rely on their webhooks.
 - **Commands** (`src/commands/`): deferred commands run at most once, never retried, so a reply is
   never sent twice; one that cannot start within 12 minutes is dropped, because Discord's
-  interaction token (valid 15 minutes) could no longer report its result.
+  interaction token (valid 15 minutes) could soon no longer report its result, and the invoker is
+  told that nothing was done.
 - **Clients**: Discord calls use a small fetch-based client (`src/discord/rest.ts`), typed with
   `discord-api-types`, that follows per-route and global rate limits (`@discordjs/rest` keeps
   timers and queues across calls, which does not fit per-invocation subrequest accounting).
   Chatwoot calls use only routes in Chatwoot's published OpenAPI spec, typed by `openapi-fetch`
   and generated types; messages are validated with zod because the spec's `message` schema does
   not describe the fields the API returns (see `src/chatwoot/api.ts`).
+
+## Installing on an existing Chatwoot
+
+Conversations have no post until their next message; that post then relays the conversation's
+whole history (without notifications, see [Relay details](#relay-details)). To start with new
+messages only, set `relay.startAfterMessageId` to the newest message id in Chatwoot when you
+install (for example the id in the newest conversation's `messages` from
+`GET /api/v1/accounts/<id>/conversations`).
 
 ## Cutover from an existing relay
 
