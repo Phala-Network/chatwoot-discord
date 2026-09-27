@@ -72,22 +72,32 @@ export function customerName(customer: Customer): string {
 }
 
 export interface Avatars {
-  /** For everything Chatwoot posts: agent replies, notes, activity lines, cards, and notices. */
+  /** For everything Chatwoot posts: agent bots, activity lines, cards, and notices. */
   chatwoot: string;
   /** For customers without an https avatar in Chatwoot. */
   contact: string;
 }
 
-/** A customer's own https avatar or the contact default; everything else uses the Chatwoot avatar. */
+/**
+ * A customer's own https avatar or the contact default. An agent's message shows the linked
+ * agent's Discord avatar, else the agent's own https avatar in Chatwoot. Everything else uses the
+ * Chatwoot avatar.
+ */
 export function senderAvatar(message: RelayMessage, avatars: Avatars): string {
-  if (message.messageType !== "incoming") return avatars.chatwoot;
-  return customerAvatar(message.sender?.avatarUrl, avatars);
+  if (message.messageType === "incoming") return customerAvatar(message.sender?.avatarUrl, avatars);
+  if (message.messageType === "outgoing" && message.sender?.type === "user") {
+    return message.discordAvatarUrl ?? httpsUrl(message.sender.avatarUrl) ?? avatars.chatwoot;
+  }
+  return avatars.chatwoot;
 }
 
 /** A customer's own https avatar, else the contact default. */
 export function customerAvatar(avatarUrl: string | null | undefined, avatars: Avatars): string {
-  const url = filled(avatarUrl);
-  return url?.startsWith("https://") ? url : avatars.contact;
+  return httpsUrl(avatarUrl) ?? avatars.contact;
+}
+
+function httpsUrl(url: string | null | undefined): string | undefined {
+  return url?.startsWith("https://") ? url : undefined;
 }
 
 /** What a post's title says after the customer: the email subject or the first message. */

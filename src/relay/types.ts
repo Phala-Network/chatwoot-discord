@@ -42,6 +42,8 @@ export interface RelayMessage {
   attachments: RelayAttachment[];
   /** Chatwoot user id -> Discord user id of the linked agents a private note mentions. */
   mentionedAgents?: ReadonlyMap<number, string>;
+  /** The Discord avatar of the linked agent who sent the message, if any. */
+  discordAvatarUrl?: string;
   sender?:
     | {
         name?: string | null | undefined;

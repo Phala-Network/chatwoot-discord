@@ -88,7 +88,7 @@ describe("Relay", () => {
     ]);
   });
 
-  it("posts follow-ups into the same post under the sender's name, with the Chatwoot avatar", async () => {
+  it("posts follow-ups into the same post under the sender's name and avatar", async () => {
     await relay.relay(message());
     await relay.relay(
       message({
@@ -100,8 +100,32 @@ describe("Relay", () => {
     );
     const [thread, payload] = forum.calls.at(-1) ?? [];
     expect(thread).toBe("thread-1");
-    expect(payload).toMatchObject({ username: "Sam · Acme", avatar_url: AVATARS.chatwoot });
+    expect(payload).toMatchObject({ username: "Sam · Acme", avatar_url: "https://files.example.com/sam.png" });
     expect(forum.patches).toEqual([]);
+  });
+
+  it("gives agents their linked Discord avatar, else their https Chatwoot avatar, else the Chatwoot avatar", async () => {
+    const discord = "https://cdn.discordapp.com/avatars/100000000000000012/abc.png";
+    const agent = (id: number, avatarUrl: string, extra: { discordAvatarUrl?: string; private?: boolean } = {}) =>
+      message({ id, messageType: "outgoing", sender: { name: "Sam", type: "user", avatarUrl }, ...extra });
+    await relay.relay(agent(101, "https://files.example.com/sam.png", { discordAvatarUrl: discord }));
+    await relay.relay(agent(102, "https://files.example.com/sam.png", { private: true }));
+    await relay.relay(agent(103, ""));
+    await relay.relay(agent(104, "http://files.example.com/sam.png"));
+    await relay.relay(
+      message({
+        id: 105,
+        messageType: "outgoing",
+        sender: { name: "Helper", type: "agent_bot", avatarUrl: "https://files.example.com/bot.png" },
+      }),
+    );
+    expect(forum.calls.slice(1).map(([, payload]) => payload.avatar_url)).toEqual([
+      discord,
+      "https://files.example.com/sam.png",
+      AVATARS.chatwoot,
+      AVATARS.chatwoot,
+      AVATARS.chatwoot,
+    ]);
   });
 
   it("resolving posts the activity, then retags and archives; a new message reopens", async () => {

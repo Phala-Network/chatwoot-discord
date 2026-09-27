@@ -17,7 +17,7 @@ import {
   requestsPerMessage,
 } from "../src/relay/processor.ts";
 import { Store } from "../src/store.ts";
-import { BOB, FORUM, json, mockFetch, on, type Recorded, TRIAGE, testSettings } from "./helpers.ts";
+import { ALICE, BOB, FORUM, json, mockFetch, on, type Recorded, TRIAGE, testSettings } from "./helpers.ts";
 
 const GUILD = "100000000000000044";
 const now = () => Math.floor(Date.now() / 1000);
@@ -30,6 +30,7 @@ interface FakeMessage {
   created_at?: number;
   status?: string;
   content_attributes?: Record<string, unknown>;
+  sender?: { id: number; type: string; name?: string; thumbnail?: string };
 }
 
 /** One Chatwoot conversation (#12 in account 3) and its messages, and the Discord forum. */
@@ -43,6 +44,8 @@ class World {
   };
   messages: FakeMessage[] = [];
   failLinks = 0;
+  /** Discord users by id; others are unknown to Discord. */
+  discordUsers: Record<string, { avatar: string | null; discriminator: string }> = {};
   private threads = 0;
   readonly requests: Recorded[];
 
@@ -86,6 +89,13 @@ class World {
         json({ id: request.url.pathname.split("/").at(-1), parent_id: FORUM }),
       ),
       on("PATCH", /^discord\.com\/api\/v10\/channels\/\d+$/, () => json({})),
+      on("GET", /^discord\.com\/api\/v10\/users\/\d+$/, (request) => {
+        const id = request.url.pathname.split("/").at(-1) ?? "";
+        const user = this.discordUsers[id];
+        return user
+          ? json({ id, username: "agent", ...user })
+          : json({ message: "Unknown User", code: 10013 }, { status: 404 });
+      }),
       on("POST", "discord.com/api/v10/webhooks/1/tok", (request) => {
         const thread = request.url.searchParams.get("thread_id");
         if (thread) return json({ id: `m-${this.requests.length}`, channel_id: thread });
@@ -126,8 +136,9 @@ async function withStore<T>(run: (store: Store) => Promise<T>): Promise<T> {
 function context(store: Store, settings: Settings, limit = settings.config.relay.subrequestBudget) {
   const budget = new Budget(limit);
   const chatwoot = chatwootClient(settings.config.chatwoot.baseUrl, "relay-token", budget.fetch);
-  const forum = new DiscordForum(new DiscordRest("bot", budget.fetch), store);
-  return { settings, store, forum, budget, chatwoot, relay: relayFor(settings, forum, store) };
+  const rest = new DiscordRest("bot", budget.fetch);
+  const forum = new DiscordForum(rest, store);
+  return { settings, store, forum, rest, budget, chatwoot, relay: relayFor(settings, forum, store) };
 }
 
 /** Runs the conversation job until it is done, each run with a fresh budget, like the Hub does. */
@@ -273,6 +284,79 @@ describe("processConversation", () => {
         ["@Bob in a reply", { parse: [] }],
       ]);
       expect(world.sent("GET", "/agents")).toHaveLength(1);
+    });
+  });
+});
+
+describe("agent avatars", () => {
+  const cdn = "https://cdn.discordapp.com";
+  const agent = (id: number, userId: number, thumbnail = "") => ({
+    id,
+    content: `reply ${id}`,
+    message_type: 1,
+    sender: { id: userId, type: "user", thumbnail },
+  });
+
+  function avatars(world: World): unknown[] {
+    return world
+      .posts()
+      .filter((post) => post.thread)
+      .map((post) => post.body.avatar_url);
+  }
+
+  it("shows linked agents' Discord avatars, looked up once a day, else their Chatwoot avatar", async () => {
+    const world = new World();
+    world.discordUsers = {
+      [BOB]: { avatar: "a_bob", discriminator: "0" },
+      [ALICE]: { avatar: null, discriminator: "0" },
+    };
+    world.messages = [
+      agent(1, 43, "https://chatwoot.example.com/bob.png"),
+      agent(2, 42),
+      agent(3, 44, "https://chatwoot.example.com/dana.png"), // Dana is not linked.
+      agent(4, 44),
+      {
+        id: 5,
+        content: "bot reply",
+        message_type: 1,
+        sender: { id: 7, type: "agent_bot", thumbnail: "https://x.example/b.png" },
+      },
+      {
+        id: 6,
+        content: "customer",
+        message_type: 0,
+        sender: { id: 9, type: "contact", thumbnail: "https://x.example/c.png" },
+      },
+    ];
+    await withStore(async (store) => {
+      await sync(store, testSettings());
+      world.messages.push(agent(7, 43));
+      await sync(store, testSettings());
+      expect(avatars(world)).toEqual([
+        `${cdn}/avatars/${BOB}/a_bob.png`,
+        `${cdn}/embed/avatars/${(BigInt(ALICE) >> 22n) % 6n}.png`,
+        "https://chatwoot.example.com/dana.png",
+        "https://chatwoot.example.com/favicon-512x512.png",
+        "https://chatwoot.example.com/favicon-512x512.png",
+        "https://x.example/c.png",
+        `${cdn}/avatars/${BOB}/a_bob.png`,
+      ]);
+      // Cached: one lookup per agent.
+      expect(world.sent("GET", `/users/${BOB}`)).toHaveLength(1);
+      expect(world.sent("GET", `/users/${ALICE}`)).toHaveLength(1);
+    });
+  });
+
+  it("falls back to the Chatwoot avatar when Discord will not say, without asking again for a while", async () => {
+    const world = new World();
+    world.messages = [agent(1, 43, "https://chatwoot.example.com/bob.png"), agent(2, 43)];
+    await withStore(async (store) => {
+      expect(await sync(store, testSettings())).toEqual(["done"]);
+      expect(avatars(world)).toEqual([
+        "https://chatwoot.example.com/bob.png",
+        "https://chatwoot.example.com/favicon-512x512.png",
+      ]);
+      expect(world.sent("GET", `/users/${BOB}`)).toHaveLength(1);
     });
   });
 });

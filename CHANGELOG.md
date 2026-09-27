@@ -34,6 +34,10 @@ post's stored state no longer matches its new format, so the next sync of each c
   pinged.
 - Shared contacts and locations are shown instead of being dropped.
 - `accounts[].inboxIds` limits an account to some of its inboxes.
+- An agent's replies and notes show the agent's own avatar instead of the Chatwoot icon: the
+  Discord avatar of the linked Discord user (`agents[]`, looked up at most once a day per agent),
+  else the agent's Chatwoot avatar. Agent bots, activity lines, cards, and notices keep
+  `avatars.chatwoot`.
 - A command dropped because it could not start in time tells the invoker.
 - README: installing on an existing Chatwoot (`relay.startAfterMessageId`), forum tag limits and
   the "Require tags" setting.
@@ -54,7 +58,8 @@ post's stored state no longer matches its new format, so the next sync of each c
   that could not be written is retried on a later sync.
 - A command that finds its conversation deleted closes its post.
 - `CONFIG` rejects unknown keys, a `relay.subrequestBudget` too small for `relay.maxChunks`, and
-  a `triage.name` over 100 characters.
+  a `triage.name` over 100 characters. One message's worst case counts one more request (the
+  sender's Discord avatar), so the budget must exceed `relay.maxChunks` + 14.
 - `wrangler.jsonc` is committed with placeholder `CONFIG` (it replaces `wrangler.example.jsonc`);
   edit it in place, and `npm run deploy` deploys it. `package.json` describes each secret for the
   Cloudflare dashboard.
