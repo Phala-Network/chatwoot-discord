@@ -3,6 +3,9 @@
 
 import { z } from "zod";
 
+/** Gravatar's built-in "mp" default image, forced (it does not depend on any email). */
+const DEFAULT_CONTACT_AVATAR = "https://gravatar.com/avatar/?d=mp&f=y&s=256";
+
 const snowflake = z.string().regex(/^\d{17,20}$/, "must be a Discord snowflake id");
 const MB = 1024 * 1024;
 
@@ -62,6 +65,14 @@ export const configSchema = z.object({
       maxAttempts: z.number().int().min(1).default(5),
       /** Outbound requests per Durable Object alarm run (the Workers Free limit is 50). */
       subrequestBudget: z.number().int().min(20).max(1000).default(45),
+    })
+    .prefault({}),
+  avatars: z
+    .object({
+      /** Avatar of messages from Chatwoot (agents, notes, activity). Default: the instance's own icon. */
+      chatwoot: z.url({ protocol: /^https$/ }).optional(),
+      /** Avatar of customers who have none in Chatwoot. Default: Gravatar's "mystery person" image. */
+      contact: z.url({ protocol: /^https$/ }).default(DEFAULT_CONTACT_AVATAR),
     })
     .prefault({}),
   reconcile: z
@@ -127,6 +138,7 @@ export interface Settings {
   config: Config;
   secrets: Secrets;
   frontendUrl: string;
+  avatars: { chatwoot: string; contact: string };
   account(id: number): AccountConfig | undefined;
   /** Discord user id -> agent email (lower-cased). */
   agentEmail(discordUserId: string): string | undefined;
@@ -170,10 +182,16 @@ export function buildSettings(config: Config, secrets: Secrets): Settings {
   const accounts = new Map(config.accounts.map((account) => [account.id, account]));
   const emails = new Map(config.agents.map((agent) => [agent.discordUserId, agent.email.toLowerCase()]));
   const discordByEmail = new Map(config.agents.map((agent) => [agent.email.toLowerCase(), agent.discordUserId]));
+  const frontendUrl = config.chatwoot.publicUrl ?? config.chatwoot.baseUrl;
   return {
     config,
     secrets,
-    frontendUrl: config.chatwoot.publicUrl ?? config.chatwoot.baseUrl,
+    frontendUrl,
+    avatars: {
+      // Chatwoot serves its logo at /favicon-512x512.png (public/ in the Chatwoot repository).
+      chatwoot: config.avatars.chatwoot ?? `${frontendUrl.replace(/\/+$/, "")}/favicon-512x512.png`,
+      contact: config.avatars.contact,
+    },
     account: (id) => accounts.get(id),
     agentEmail: (discordUserId) => emails.get(discordUserId),
     discordUserForEmail: (email) => (email ? discordByEmail.get(email.toLowerCase()) : undefined),

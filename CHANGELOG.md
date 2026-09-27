@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Avatars: customers show their Chatwoot avatar or a generic person image (`avatars.contact`,
+  Gravatar's "mystery person" by default); everything Chatwoot posts shows the Chatwoot icon
+  (`avatars.chatwoot`, the instance's `/favicon-512x512.png` by default).
 - `/pending` marks the conversation pending, `/snooze [until]` snoozes it until the next reply or
   for an hour (the dashboard's options that do not depend on the agent's time zone), and
   `/priority <level>` sets or clears its priority, and `/unblock` unblocks the contact.

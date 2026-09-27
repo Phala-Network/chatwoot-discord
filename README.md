@@ -225,6 +225,8 @@ returns 503 when invalid):
 | `relay.subrequestBudget` | `45` | Outbound requests per alarm invocation (Free plan limit: 50). |
 | `reconcile.lookbackSeconds` | `3600` | Minimum sweep window (conversations with activity within it are checked). |
 | `reconcile.maxCatchUpSeconds` | `604800` | Maximum sweep window after downtime. |
+| `avatars.chatwoot` | `<Chatwoot URL>/favicon-512x512.png` | Avatar of agent replies, notes, activity lines, cards, and notices (https). |
+| `avatars.contact` | Gravatar "mystery person" | Avatar of customers who have no avatar in Chatwoot (https). |
 | `attachments.maxFiles` | `10` | Files per `/reply` or `/note` (0 hides the upload field). |
 | `attachments.maxFileBytes` / `maxTotalBytes` | 25 MB / 50 MB | Size caps (files are held in memory). |
 

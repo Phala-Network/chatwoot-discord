@@ -243,6 +243,7 @@ export class Hub extends DurableObject<Env> {
       forum,
       store: this.store,
       frontendUrl: settings.frontendUrl,
+      avatars: settings.avatars,
       target: (accountId) => {
         const account = settings.account(accountId);
         if (!account) throw new Error(`Account ${accountId} is not configured`);

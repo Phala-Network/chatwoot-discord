@@ -4,6 +4,7 @@
 
 import type { RESTPostAPIWebhookWithTokenJSONBody } from "discord-api-types/v10";
 import {
+  type Avatars,
   assigneeTag,
   body,
   CONTENT_LIMIT,
@@ -89,6 +90,7 @@ export interface RelayOptions {
   forum: ForumClient;
   store: RelayStore;
   frontendUrl: string;
+  avatars: Avatars;
   target(accountId: number): AccountTarget;
   topicAttribute: string;
   maxChunks: number;
@@ -241,12 +243,12 @@ export class Relay {
       ];
     }
     const username = senderName(message);
-    const avatar = senderAvatar(message);
+    const avatar = senderAvatar(message, this.options.avatars);
     const pinged = announced ?? assignee;
     return chunks.map((chunk, index) => ({
       content: index === 0 ? [chunk, ...lines].join("\n") : chunk,
       username,
-      ...(avatar ? { avatar_url: avatar } : {}),
+      avatar_url: avatar,
       // Only the notified assignee may be pinged; the triage mention stays a literal token.
       allowed_mentions: index === 0 && pinged ? { parse: [], users: [pinged] } : { parse: [] },
     }));
@@ -320,6 +322,7 @@ export class Relay {
       thread_name: threadTitle(message),
       content: [header, `[Open in Chatwoot](<${link}>)`].filter((line) => line !== "").join("\n"),
       username: SYSTEM_USERNAME,
+      avatar_url: this.options.avatars.chatwoot,
       allowed_mentions: { parse: [] },
     };
     const tags = await this.postTags(accountId, conversation);
@@ -336,7 +339,12 @@ export class Relay {
     const forumChannelId = this.options.target(accountId).forumChannelId;
     await this.options.forum.execute(
       forumChannelId,
-      { content, username: SYSTEM_USERNAME, allowed_mentions: { parse: [] } },
+      {
+        content,
+        username: SYSTEM_USERNAME,
+        avatar_url: this.options.avatars.chatwoot,
+        allowed_mentions: { parse: [] },
+      },
       threadId,
     );
   }
