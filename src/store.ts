@@ -1,10 +1,10 @@
-// Durable Object SQLite storage: conversation <-> post mappings, the job queue, webhook
-// delivery dedupe, hourly counters, and a small cache.
+// Durable Object SQLite storage: conversation <-> post mappings, the Discord messages posted
+// for each Chatwoot message, the job queue, hourly counters, and a small cache.
 
 import type { Cache } from "./discord/forum.js";
 import type { RelayStore } from "./relay/relay.js";
 
-const MIGRATIONS: string[] = [
+export const MIGRATIONS: string[] = [
   `CREATE TABLE conversations (
      account_id INTEGER NOT NULL,
      conversation_id INTEGER NOT NULL,
@@ -29,18 +29,33 @@ const MIGRATIONS: string[] = [
    CREATE TABLE deliveries (id TEXT PRIMARY KEY, received_at INTEGER NOT NULL);
    CREATE TABLE counters (name TEXT PRIMARY KEY, count INTEGER NOT NULL, expires_at INTEGER NOT NULL);
    CREATE TABLE cache (key TEXT PRIMARY KEY, value TEXT NOT NULL, expires_at INTEGER);`,
+  // posted_messages checkpoints relaying (a retry resumes after the parts already posted) and
+  // finds the Discord messages to delete when a message is deleted in Chatwoot.
+  // announced_assignee starts from the assignee field of the stored state, which was used for
+  // this before. Webhook deliveries are no longer deduplicated; the table is emptied but kept so
+  // that a previous version still runs if it is deployed again.
+  `CREATE TABLE posted_messages (
+     account_id INTEGER NOT NULL,
+     conversation_id INTEGER NOT NULL,
+     message_id INTEGER NOT NULL,
+     part INTEGER NOT NULL,
+     discord_message_id TEXT NOT NULL,
+     PRIMARY KEY (account_id, conversation_id, message_id, part)
+   );
+   ALTER TABLE conversations ADD COLUMN announced_assignee TEXT;
+   UPDATE conversations
+     SET announced_assignee = substr(substr(state, instr(state, '|') + 1), 1, instr(substr(state, instr(state, '|') + 1), '|') - 1)
+     WHERE state LIKE '%|%|%';
+   DELETE FROM deliveries;`,
 ];
 
 const COUNTER_TTL_MS = 2 * 60 * 60 * 1000;
-const DELIVERY_TTL_MS = 24 * 60 * 60 * 1000;
 
 export interface ConversationRow {
   threadId: string | undefined;
   state: string | undefined;
   /** Id of the last message handled; undefined for an adopted post until its first run. */
   cursor: number | undefined;
-  failMessageId: number | undefined;
-  failCount: number;
 }
 
 export interface Job {
@@ -73,26 +88,14 @@ export class Store implements RelayStore, Cache {
 
   conversation(accountId: number, conversationId: number): ConversationRow | undefined {
     const row = this.sql
-      .exec<{
-        thread_id: string | null;
-        state: string | null;
-        cursor: number | null;
-        fail_message_id: number | null;
-        fail_count: number;
-      }>(
-        "SELECT thread_id, state, cursor, fail_message_id, fail_count FROM conversations WHERE account_id = ? AND conversation_id = ?",
+      .exec<{ thread_id: string | null; state: string | null; cursor: number | null }>(
+        "SELECT thread_id, state, cursor FROM conversations WHERE account_id = ? AND conversation_id = ?",
         accountId,
         conversationId,
       )
       .toArray()[0];
     if (!row) return undefined;
-    return {
-      threadId: row.thread_id ?? undefined,
-      state: row.state ?? undefined,
-      cursor: row.cursor ?? undefined,
-      failMessageId: row.fail_message_id ?? undefined,
-      failCount: row.fail_count,
-    };
+    return { threadId: row.thread_id ?? undefined, state: row.state ?? undefined, cursor: row.cursor ?? undefined };
   }
 
   ticketForThread(threadId: string): { accountId: number; conversationId: number } | undefined {
@@ -131,10 +134,8 @@ export class Store implements RelayStore, Cache {
     return row?.fail_count ?? 1;
   }
 
-  /** Maps a conversation to a post created elsewhere (e.g. by a previous relay). Returns false if the thread is taken. */
-  adoptThread(accountId: number, conversationId: number, threadId: string): boolean {
-    const owner = this.ticketForThread(threadId);
-    if (owner && (owner.accountId !== accountId || owner.conversationId !== conversationId)) return false;
+  /** Maps a conversation to an existing post that no other conversation is mapped to. */
+  adoptThread(accountId: number, conversationId: number, threadId: string): void {
     this.sql.exec(
       `INSERT INTO conversations (account_id, conversation_id, thread_id) VALUES (?, ?, ?)
        ON CONFLICT (account_id, conversation_id) DO UPDATE SET thread_id = excluded.thread_id, state = NULL`,
@@ -142,7 +143,6 @@ export class Store implements RelayStore, Cache {
       conversationId,
       threadId,
     );
-    return true;
   }
 
   // RelayStore
@@ -175,9 +175,68 @@ export class Store implements RelayStore, Cache {
     );
   }
 
+  announcedAssignee(accountId: number, conversationId: number): string | undefined {
+    const row = this.sql
+      .exec<{ announced_assignee: string | null }>(
+        "SELECT announced_assignee FROM conversations WHERE account_id = ? AND conversation_id = ?",
+        accountId,
+        conversationId,
+      )
+      .toArray()[0];
+    return row?.announced_assignee ?? undefined;
+  }
+
+  saveAnnouncedAssignee(accountId: number, conversationId: number, assignee: string): void {
+    this.ensureRow(accountId, conversationId);
+    this.sql.exec(
+      "UPDATE conversations SET announced_assignee = ? WHERE account_id = ? AND conversation_id = ?",
+      assignee,
+      accountId,
+      conversationId,
+    );
+  }
+
+  postedParts(accountId: number, conversationId: number, messageId: number): string[] {
+    return this.sql
+      .exec<{ discord_message_id: string }>(
+        "SELECT discord_message_id FROM posted_messages WHERE account_id = ? AND conversation_id = ? AND message_id = ? ORDER BY part",
+        accountId,
+        conversationId,
+        messageId,
+      )
+      .toArray()
+      .map((row) => row.discord_message_id);
+  }
+
+  savePostedPart(accountId: number, conversationId: number, messageId: number, part: number, discordId: string): void {
+    this.sql.exec(
+      "INSERT OR REPLACE INTO posted_messages (account_id, conversation_id, message_id, part, discord_message_id) VALUES (?, ?, ?, ?, ?)",
+      accountId,
+      conversationId,
+      messageId,
+      part,
+      discordId,
+    );
+  }
+
+  deletePostedPart(accountId: number, conversationId: number, messageId: number, discordId: string): void {
+    this.sql.exec(
+      "DELETE FROM posted_messages WHERE account_id = ? AND conversation_id = ? AND message_id = ? AND discord_message_id = ?",
+      accountId,
+      conversationId,
+      messageId,
+      discordId,
+    );
+  }
+
   forgetThread(accountId: number, conversationId: number): void {
     this.sql.exec(
-      "UPDATE conversations SET thread_id = NULL, state = NULL WHERE account_id = ? AND conversation_id = ?",
+      "UPDATE conversations SET thread_id = NULL, state = NULL, announced_assignee = NULL WHERE account_id = ? AND conversation_id = ?",
+      accountId,
+      conversationId,
+    );
+    this.sql.exec(
+      "DELETE FROM posted_messages WHERE account_id = ? AND conversation_id = ?",
       accountId,
       conversationId,
     );
@@ -226,16 +285,6 @@ export class Store implements RelayStore, Cache {
 
   delete(key: string): void {
     this.sql.exec("DELETE FROM cache WHERE key = ?", key);
-  }
-
-  // Webhook deliveries
-
-  /** False when this delivery id was already seen. */
-  recordDelivery(id: string): boolean {
-    return (
-      this.sql.exec("INSERT INTO deliveries (id, received_at) VALUES (?, ?) ON CONFLICT DO NOTHING", id, this.now())
-        .rowsWritten > 0
-    );
   }
 
   // Jobs
@@ -301,7 +350,6 @@ export class Store implements RelayStore, Cache {
   prune(): void {
     const now = this.now();
     this.sql.exec("DELETE FROM counters WHERE expires_at <= ?", now);
-    this.sql.exec("DELETE FROM deliveries WHERE received_at <= ?", now - DELIVERY_TTL_MS);
     this.sql.exec("DELETE FROM cache WHERE expires_at IS NOT NULL AND expires_at <= ?", now);
   }
 

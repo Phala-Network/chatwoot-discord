@@ -24,7 +24,7 @@ export function filled(value: unknown): string | undefined {
   return text.trim() === "" ? undefined : text;
 }
 
-/** Length in code points, which is how Discord and the original relay count characters. */
+/** Length in code points. */
 export function charLength(text: string): number {
   return Array.from(text).length;
 }
@@ -126,25 +126,18 @@ export function split(input: string, limit = CONTENT_LIMIT): string[] {
 }
 
 export function conversationUrl(frontendUrl: string, accountId: number, conversationId: number): string {
-  if (frontendUrl === "") return "";
   return `${frontendUrl.replace(/\/+$/, "")}/app/accounts/${accountId}/conversations/${conversationId}`;
 }
 
+/** A customer message: the kind that calls the triage bot and pings the assignee. */
+export function fromCustomer(message: RelayMessage): boolean {
+  return message.messageType === "incoming" && !message.private;
+}
+
 /**
- * Only customer messages tag the triage bot. The mention is a literal token that pings nobody,
- * because webhook messages are sent with mentions disabled.
+ * Tag for the assignee so the forum can be filtered by owner: the agent's `name`, which is what
+ * Chatwoot's dashboard shows as the assignee and in assignment activity messages.
  */
-export function triageMention(message: RelayMessage, userId: string | undefined): string | undefined {
-  if (!userId || message.messageType !== "incoming") return undefined;
-  return `-# <@${userId}>`;
-}
-
-/** Chatwoot statuses are open, pending, snoozed, and resolved; the post is either open or resolved. */
-export function postState(conversation: RelayConversation): "open" | "resolved" {
-  return conversation.status === "resolved" ? "resolved" : "open";
-}
-
-/** Tag for the assignee (the agent's name) so the forum can be filtered by owner. */
 export function assigneeTag(conversation: RelayConversation): string {
   return filled(conversation.assignee?.name) ?? "unassigned";
 }

@@ -12,7 +12,8 @@ export interface RelayAssignee {
 export interface RelayConversation {
   /** The conversation's display id (the number shown in Chatwoot). */
   id: number;
-  status: string;
+  /** open, pending, snoozed, or resolved. */
+  status?: string | undefined;
   channel?: string | null;
   inboxId?: number | null;
   contact: { name?: string | null; email?: string | null; blocked?: boolean };
@@ -24,6 +25,8 @@ export interface RelayMessage {
   id: number;
   messageType: MessageType;
   private: boolean;
+  /** Deleted in Chatwoot (its content is replaced by a placeholder). */
+  deleted?: boolean;
   content: string;
   emailSubject?: string | null;
   attachmentUrls: string[];

@@ -5,6 +5,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Only propose versions pnpm will install: pnpm's minimumReleaseAge defaults to 1 day since
+    # pnpm 11 (https://pnpm.io/settings#minimumreleaseage). Cooldown applies to version updates,
+    # not security updates (https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#cooldown-).
+    cooldown:
+      default-days: 3
     groups:
       npm-minor-and-patch:
         update-types: [minor, patch]

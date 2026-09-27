@@ -4,7 +4,11 @@
 //   DISCORD_BOT_TOKEN=... pnpm register-commands --application <app id> --guild <guild id>
 
 import { parseArgs } from "node:util";
-import { Routes } from "discord-api-types/v10";
+import {
+  type RESTPutAPIApplicationGuildCommandsJSONBody,
+  type RESTPutAPIApplicationGuildCommandsResult,
+  Routes,
+} from "discord-api-types/v10";
 import { COMMANDS } from "../src/commands/definitions.js";
 import { DiscordRest } from "../src/discord/rest.js";
 
@@ -30,11 +34,11 @@ if (
 
 try {
   const rest = new DiscordRest(token, (request) => fetch(request));
-  const registered = await rest.put(Routes.applicationGuildCommands(values.application, values.guild), {
-    body: COMMANDS,
-  });
-  const count = Array.isArray(registered) ? registered.length : 0;
-  console.log(`Registered ${count} commands in guild ${values.guild}.`);
+  const registered = await rest.put<
+    RESTPutAPIApplicationGuildCommandsResult,
+    RESTPutAPIApplicationGuildCommandsJSONBody
+  >(Routes.applicationGuildCommands(values.application, values.guild), { body: COMMANDS });
+  console.log(`Registered ${registered.length} commands in guild ${values.guild}.`);
 } catch (error) {
   console.error(`Registration failed: ${error instanceof Error ? error.message : String(error)}`);
   process.exit(1);

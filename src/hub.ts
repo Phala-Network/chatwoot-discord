@@ -7,30 +7,41 @@
 // delivery succeeding.
 
 import { DurableObject } from "cloudflare:workers";
-import { type RESTPatchAPIWebhookWithTokenMessageJSONBody, Routes } from "discord-api-types/v10";
+import {
+  type RESTPatchAPIWebhookWithTokenMessageJSONBody,
+  type RESTPatchAPIWebhookWithTokenMessageResult,
+  Routes,
+} from "discord-api-types/v10";
+import { z } from "zod";
 import { Budget, BudgetExhaustedError } from "./budget.js";
-import { ChatwootError, chatwootClient, toRelayConversation } from "./chatwoot/api.js";
+import { chatwootClient, toRelayConversation } from "./chatwoot/api.js";
 import { executeCommand } from "./commands/actions.js";
-import type { CommandJob } from "./commands/job.js";
+import { type CommandJob, commandJobSchema } from "./commands/job.js";
 import { loadSettings, type Settings } from "./config.js";
 import { DiscordForum } from "./discord/forum.js";
 import { DiscordRest } from "./discord/rest.js";
 import { errorFields, log } from "./log.js";
-import { latestMessageId, processConversation } from "./relay/processor.js";
+import { latestMessageId, processConversation, processDeletedMessage } from "./relay/processor.js";
 import { Relay } from "./relay/relay.js";
 import { type Job, Store } from "./store.js";
 
 export const HUB_NAME = "global";
 
-type JobPayload =
-  | { type: "command"; job: CommandJob }
-  | { type: "sweep"; accountId: number }
-  | { type: "conversation"; accountId: number; conversationId: number };
+const id = z.number().int().positive();
+const payloadSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("command"), job: commandJobSchema }),
+  z.object({ type: z.literal("sweep"), accountId: id }),
+  z.object({ type: z.literal("conversation"), accountId: id, conversationId: id }),
+  z.object({ type: z.literal("deleted-message"), accountId: id, conversationId: id, messageId: id }),
+]);
+type JobPayload = z.infer<typeof payloadSchema>;
 
-const PRIORITY = { command: 0, sweep: 1, conversation: 2 } as const;
+const PRIORITY = { command: 0, sweep: 1, conversation: 2, "deleted-message": 3 } as const;
 /** Requests a job may need before it can start without being cut short. */
 const COMMAND_BUDGET = 20;
-const SWEEP_BUDGET = 2;
+const MIN_BUDGET = 2;
+/** Pages of conversations (25 each by default) a sweep reads at most. */
+const SWEEP_PAGES = 10;
 const MAX_BACKOFF_MS = 30 * 60 * 1000;
 /** Stop draining and continue in a new invocation after this long (alarms may run 15 minutes). */
 const RUN_WALL_MS = 5 * 60 * 1000;
@@ -43,8 +54,6 @@ const COMMAND_START_DEADLINE_MS = 12 * 60 * 1000;
 
 export class Hub extends DurableObject<Env> {
   private readonly store: Store;
-  /** Guards against overlapping drains (e.g. an alarm invoked while another is still running). */
-  private draining = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -52,16 +61,16 @@ export class Hub extends DurableObject<Env> {
     ctx.blockConcurrencyWhile(async () => this.store.migrate());
   }
 
-  /** Queues a conversation for syncing. Returns "duplicate" for an already-seen webhook delivery. */
-  async enqueueConversation(
-    accountId: number,
-    conversationId: number,
-    deliveryId?: string,
-  ): Promise<"queued" | "duplicate"> {
-    if (deliveryId && !this.store.recordDelivery(deliveryId)) return "duplicate";
+  /** Queues a conversation for syncing. */
+  async enqueueConversation(accountId: number, conversationId: number): Promise<void> {
     this.enqueue({ type: "conversation", accountId, conversationId });
     await this.schedule();
-    return "queued";
+  }
+
+  /** Queues a check of a message reported as deleted, which removes its Discord messages. */
+  async enqueueDeletedMessage(accountId: number, conversationId: number, messageId: number): Promise<void> {
+    this.enqueue({ type: "deleted-message", accountId, conversationId, messageId });
+    await this.schedule();
   }
 
   async enqueueCommand(job: CommandJob): Promise<void> {
@@ -80,14 +89,9 @@ export class Hub extends DurableObject<Env> {
     return this.store.ticketForThread(threadId) ?? null;
   }
 
+  /** Cloudflare runs at most one alarm() at a time per Durable Object. */
   override async alarm(): Promise<void> {
-    if (this.draining) return;
-    this.draining = true;
-    try {
-      await this.drain();
-    } finally {
-      this.draining = false;
-    }
+    await this.drain();
   }
 
   private async drain(): Promise<void> {
@@ -101,6 +105,7 @@ export class Hub extends DurableObject<Env> {
     for (let job = this.store.nextDueJob(); job; job = this.store.nextDueJob()) {
       const payload = parsePayload(job.payload);
       if (!payload) {
+        log.warn("unreadable job dropped", { job: job.key });
         this.store.deleteJob(job.key);
         continue;
       }
@@ -142,17 +147,13 @@ export class Hub extends DurableObject<Env> {
           if (outcome === "done") this.store.completeJob(job);
           return outcome;
         }
+        case "deleted-message":
+          await processDeletedMessage(services, payload.accountId, payload.conversationId, payload.messageId);
+          this.store.completeJob(job);
+          return "done";
       }
     } catch (error) {
       if (error instanceof BudgetExhaustedError) return "yield";
-      if (error instanceof ChatwootError && error.status === 404 && payload.type === "conversation") {
-        log.warn("conversation not found; dropping job", {
-          accountId: payload.accountId,
-          conversationId: payload.conversationId,
-        });
-        this.store.deleteJob(job.key);
-        return "done";
-      }
       const delay = Math.min(5000 * 2 ** job.attempts, MAX_BACKOFF_MS);
       // Transient failures are warnings; a job that keeps failing is an error.
       const logAt = job.attempts + 1 >= 3 ? log.error : log.warn;
@@ -169,12 +170,11 @@ export class Hub extends DurableObject<Env> {
 
   private async runCommand(job: CommandJob, services: Services): Promise<void> {
     const content = await executeCommand(job, services.settings, services.budget.fetch);
-    const body: RESTPatchAPIWebhookWithTokenMessageJSONBody = { content, allowed_mentions: { parse: [] } };
     try {
-      await services.rest.patch(Routes.webhookMessage(job.applicationId, job.token, "@original"), {
-        body,
-        auth: false,
-      });
+      await services.rest.patch<RESTPatchAPIWebhookWithTokenMessageResult, RESTPatchAPIWebhookWithTokenMessageJSONBody>(
+        Routes.webhookMessage(job.applicationId, job.token, "@original"),
+        { body: { content, allowed_mentions: { parse: [] } }, auth: false },
+      );
     } catch (error) {
       log.error("command follow-up failed", { interactionId: job.interactionId, ...errorFields(error) });
     }
@@ -183,6 +183,9 @@ export class Hub extends DurableObject<Env> {
   /**
    * Finds conversations whose post is behind (new messages, or tags/status/archive state that
    * differ) and queues them. Covers webhooks that were never delivered and service downtime.
+   * Reads conversations newest activity first and stops at the window's start. Activity means a
+   * new message (Chatwoot's `last_activity_at`); a change that creates none, such as only a
+   * custom attribute, relies on its webhook.
    */
   private async sweep(accountId: number, { settings, chatwoot, relay }: Services): Promise<void> {
     const key = `sweep:${accountId}:last`;
@@ -191,24 +194,39 @@ export class Hub extends DurableObject<Env> {
     const { lookbackSeconds, maxCatchUpSeconds } = settings.config.reconcile;
     const sinceLast = last > 0 ? (now - last) / 1000 + 60 : lookbackSeconds;
     const window = Math.min(Math.max(sinceLast, lookbackSeconds), maxCatchUpSeconds);
+    const cutoff = now / 1000 - window;
 
-    const conversations = await chatwoot.listUpdatedConversations(accountId, window);
+    let seen = 0;
     let queued = 0;
-    for (const conversation of conversations) {
-      const row = this.store.conversation(accountId, conversation.id);
-      const latest = latestMessageId(conversation);
-      // An adopted post without a cursor needs one run to pick its starting point.
-      const needsCursor = row?.threadId !== undefined && row.cursor === undefined;
-      const cursor = row?.cursor ?? settings.config.relay.startAfterMessageId;
-      const behind = needsCursor || (latest !== undefined && latest > cursor);
-      const stale = row?.threadId !== undefined && row.state !== relay.stateOf(toRelayConversation(conversation));
-      if (behind || stale) {
-        this.enqueue({ type: "conversation", accountId, conversationId: conversation.id });
-        queued += 1;
+    let reachedCutoff = false;
+    for (let page = 1; page <= SWEEP_PAGES && !reachedCutoff; page += 1) {
+      const conversations = await chatwoot.listConversations(accountId, page);
+      if (conversations.length === 0) reachedCutoff = true;
+      for (const conversation of conversations) {
+        if ((conversation.last_activity_at ?? 0) < cutoff) {
+          reachedCutoff = true;
+          break;
+        }
+        const conversationId = conversation.id;
+        if (conversationId === undefined) continue;
+        seen += 1;
+        const row = this.store.conversation(accountId, conversationId);
+        const latest = latestMessageId(conversation);
+        // An adopted post without a cursor needs one run to pick its starting point.
+        const needsCursor = row?.threadId !== undefined && row.cursor === undefined;
+        const cursor = row?.cursor ?? settings.config.relay.startAfterMessageId;
+        const behind = needsCursor || (latest !== undefined && latest > cursor);
+        const stale =
+          row?.threadId !== undefined && row.state !== relay.stateOf(toRelayConversation(conversationId, conversation));
+        if (behind || stale) {
+          this.enqueue({ type: "conversation", accountId, conversationId });
+          queued += 1;
+        }
       }
     }
+    if (!reachedCutoff) log.warn("sweep stopped at its page limit", { accountId, pages: SWEEP_PAGES });
     this.store.set(key, String(now));
-    log.info("sweep done", { accountId, windowSeconds: Math.round(window), seen: conversations.length, queued });
+    log.info("sweep done", { accountId, windowSeconds: Math.round(window), seen, queued });
   }
 
   private services(settings: Settings, budget: Budget): Services {
@@ -253,7 +271,9 @@ export class Hub extends DurableObject<Env> {
         ? `command:${payload.job.interactionId}`
         : payload.type === "sweep"
           ? `sweep:${payload.accountId}`
-          : `conversation:${payload.accountId}:${payload.conversationId}`;
+          : payload.type === "conversation"
+            ? `conversation:${payload.accountId}:${payload.conversationId}`
+            : `deleted-message:${payload.accountId}:${payload.conversationId}:${payload.messageId}`;
     this.store.enqueue(key, PRIORITY[payload.type], JSON.stringify(payload));
   }
 
@@ -277,15 +297,16 @@ interface Services {
 }
 
 function minimumBudget(payload: JobPayload): number {
-  return payload.type === "command" ? COMMAND_BUDGET : SWEEP_BUDGET;
+  if (payload.type === "command") return COMMAND_BUDGET;
+  return payload.type === "sweep" ? SWEEP_PAGES : MIN_BUDGET;
 }
 
+/** A stored job, or undefined for one that is unreadable or of an unknown kind. */
 function parsePayload(raw: string): JobPayload | undefined {
   try {
-    const value: unknown = JSON.parse(raw);
-    if (typeof value === "object" && value !== null && "type" in value) return value as JobPayload;
+    const parsed = payloadSchema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : undefined;
   } catch {
-    // Fall through: an unreadable job is dropped.
+    return undefined;
   }
-  return undefined;
 }

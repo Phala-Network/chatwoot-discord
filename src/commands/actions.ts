@@ -17,8 +17,9 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
 
   try {
     const profile = await chatwoot.getProfile();
-    if (!profile.accounts.some((account) => account.id === accountId)) throw new UserError(NOT_LINKED);
-    const agentName = profile.available_name || profile.name;
+    if (profile.id === undefined || !profile.accounts?.some((account) => account.id === accountId)) {
+      throw new UserError(NOT_LINKED);
+    }
 
     let message: string;
     switch (action.type) {
@@ -26,16 +27,23 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
         await chatwoot.setStatus(accountId, conversationId, action.status);
         message = action.status === "resolved" ? "Resolved." : "Reopened.";
         break;
-      case "block":
-        await chatwoot.mute(accountId, conversationId);
+      case "block": {
+        // What Chatwoot's "Block contact" does (Conversation#mute!), through the documented API:
+        // resolve the conversation and set the contact's `blocked` flag.
+        const contactId = (await existing(chatwoot.getConversation(accountId, conversationId))).meta?.sender?.id;
+        if (contactId === undefined) throw new UserError("This conversation has no contact to block.");
+        await chatwoot.setStatus(accountId, conversationId, "resolved");
+        await chatwoot.blockContact(accountId, contactId);
         message = "Contact blocked and conversation resolved. Their new messages will not be posted here.";
         break;
+      }
       case "assign": {
         const agents = await chatwoot.listAgents(accountId);
-        const assignee = agents.find((agent) => agent.email.toLowerCase() === action.email);
-        if (!assignee) throw new UserError("That agent is not in this Chatwoot account.");
+        const assignee = agents.find((agent) => agent.email?.toLowerCase() === action.email);
+        if (assignee?.id === undefined) throw new UserError("That agent is not in this Chatwoot account.");
         await chatwoot.assign(accountId, conversationId, assignee.id);
-        message = `Assigned to ${assignee.available_name || assignee.name}.`;
+        // The name Chatwoot shows as the assignee, which is also the post's assignee tag.
+        message = `Assigned to ${assignee.name ?? action.email}.`;
         break;
       }
       case "message": {
@@ -54,7 +62,7 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
         }
         if (!action.private) {
           // A public reply to an unassigned conversation assigns it to the replying agent.
-          const conversation = await chatwoot.getConversation(accountId, conversationId);
+          const conversation = await existing(chatwoot.getConversation(accountId, conversationId));
           if (!conversation.meta?.assignee) await chatwoot.assign(accountId, conversationId, profile.id);
         }
         await chatwoot.createMessage(accountId, conversationId, {
@@ -62,7 +70,8 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
           private: action.private,
           files,
         });
-        message = action.private ? "Note added." : `Sent to the customer as ${agentName}.`;
+        // Customers see an agent's display name (`available_name`).
+        message = action.private ? "Note added." : `Sent to the customer as ${profile.available_name || profile.name}.`;
         break;
       }
     }
@@ -79,4 +88,10 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
     log.error("command failed", { action: action.type, accountId, conversationId, ...errorFields(error) });
     return FAILED;
   }
+}
+
+async function existing<T>(conversation: Promise<T | undefined>): Promise<T> {
+  const found = await conversation;
+  if (found === undefined) throw new UserError("This conversation no longer exists in Chatwoot.");
+  return found;
 }

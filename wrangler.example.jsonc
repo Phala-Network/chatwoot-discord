@@ -15,7 +15,6 @@
   "vars": {
     "CONFIG": {
       "chatwoot": { "baseUrl": "https://chatwoot.example.com" },
-      "discord": { "applicationId": "100000000000000001" },
       "accounts": [
         { "id": 1, "name": "Acme", "forumChannelId": "100000000000000002" },
         { "id": 2, "name": "Globex", "forumChannelId": "100000000000000002", "tag": "Globex" }

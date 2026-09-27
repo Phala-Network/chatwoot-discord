@@ -44,7 +44,10 @@ describe("DiscordForum", () => {
       on("POST", `${api}/webhooks/1/abc`, () => json({ id: "m1", channel_id: "thread-9" })),
     );
     const client = forum();
-    expect(await client.execute("55", { content: "hi", thread_name: "Ticket" })).toEqual({ channelId: "thread-9" });
+    expect(await client.execute("55", { content: "hi", thread_name: "Ticket" })).toEqual({
+      channelId: "thread-9",
+      messageId: "m1",
+    });
     await client.execute("55", { content: "again" }, "thread-9");
     expect(requests.filter((request) => request.method === "GET")).toHaveLength(1); // webhook cached
     const posts = requests.filter((request) => request.url.pathname.startsWith("/api/v10/webhooks/"));
@@ -84,6 +87,22 @@ describe("DiscordForum", () => {
     await expect(forum().execute("55", { content: "hi" }, "thread-1")).rejects.toBeInstanceOf(UnknownThreadError);
   });
 
+  it("deletes a webhook message in its thread, treating an already deleted one as done", async () => {
+    const { requests } = mockFetch(
+      on("GET", `${api}/channels/55/webhooks`, () => json([{ id: "1", token: "abc", type: 1, name: "Chatwoot" }])),
+      on("DELETE", `${api}/webhooks/1/abc/messages/m1`, () => new Response(null, { status: 204 })),
+      on("DELETE", `${api}/webhooks/1/abc/messages/m2`, () =>
+        json({ message: "Unknown Message", code: 10008 }, { status: 404 }),
+      ),
+    );
+    const client = forum();
+    await client.deleteMessage("55", "thread-1", "m1");
+    await client.deleteMessage("55", "thread-1", "m2");
+    const deletes = requests.filter((request) => request.method === "DELETE");
+    expect(deletes.map((request) => request.url.search)).toEqual(["?thread_id=thread-1", "?thread_id=thread-1"]);
+    expect(deletes.every((request) => request.headers.get("authorization") === null)).toBe(true);
+  });
+
   it("checks that a thread still exists in the forum", async () => {
     mockFetch(
       on("GET", `${api}/channels/111`, () => json({ id: "111", type: 11, parent_id: "55" })),
@@ -115,7 +134,10 @@ describe("DiscordRest", () => {
       async (ms) => void waits.push(ms),
     );
     expect(await rest.get("/channels/1")).toEqual({ id: "1" });
-    expect(waits).toEqual([250]);
+    // The wait runs until the time Discord gave, measured from when the 429 arrived.
+    expect(waits).toHaveLength(1);
+    expect(waits[0]).toBeGreaterThan(200);
+    expect(waits[0]).toBeLessThanOrEqual(250);
   });
 
   it("waits out an exhausted bucket before reusing the route", async () => {
@@ -134,6 +156,57 @@ describe("DiscordRest", () => {
     await rest.get("/channels/1");
     expect(waits).toHaveLength(1);
     expect(waits[0]).toBeGreaterThan(1000);
+  });
+
+  it("shares an exhausted bucket across routes that report it, per top-level resource", async () => {
+    const limited = { "x-ratelimit-bucket": "b1", "x-ratelimit-remaining": "0", "x-ratelimit-reset-after": "2" };
+    mockFetch(
+      on(
+        "DELETE",
+        /^discord\.com\/api\/v10\/webhooks\/1\/abc\/messages\/\w+$/,
+        () => new Response(null, { status: 204, headers: limited }),
+      ),
+      on(
+        "DELETE",
+        /^discord\.com\/api\/v10\/webhooks\/2\/xyz\/messages\/\w+$/,
+        () => new Response(null, { status: 204 }),
+      ),
+    );
+    const waits: number[] = [];
+    const rest = new DiscordRest(
+      "t",
+      (request) => fetch(request),
+      async (ms) => void waits.push(ms),
+    );
+    await rest.delete("/webhooks/1/abc/messages/m1");
+    await rest.delete("/webhooks/1/abc/messages/m2"); // same bucket: waits
+    await rest.delete("/webhooks/2/xyz/messages/m3"); // another webhook: does not
+    expect(waits).toHaveLength(1);
+    expect(waits[0]).toBeGreaterThan(1000);
+  });
+
+  it("pauses every route after a global rate limit", async () => {
+    let calls = 0;
+    mockFetch(
+      on("GET", `${api}/channels/1`, () => {
+        calls += 1;
+        return calls === 1
+          ? json({ message: "You are being rate limited.", retry_after: 0.5, global: true }, { status: 429 })
+          : json({ id: "1" });
+      }),
+      on("GET", `${api}/channels/2`, () => json({ id: "2" })),
+    );
+    const waits: number[] = [];
+    const rest = new DiscordRest(
+      "t",
+      (request) => fetch(request),
+      async (ms) => void waits.push(ms),
+    );
+    expect(await rest.get("/channels/1")).toEqual({ id: "1" });
+    expect(waits).toHaveLength(1);
+    // The test's sleep returns at once, so the global limit is still in force for another route.
+    await rest.get("/channels/2");
+    expect(waits).toHaveLength(2);
   });
 
   it("gives up on long rate limits and surfaces Discord's error code", async () => {

@@ -13,9 +13,6 @@ export const configSchema = z.object({
     /** Base URL for dashboard links in Discord. Defaults to baseUrl. */
     publicUrl: z.url({ protocol: /^https?$/ }).optional(),
   }),
-  discord: z.object({
-    applicationId: snowflake,
-  }),
   accounts: z
     .array(
       z.object({
@@ -69,7 +66,7 @@ export const configSchema = z.object({
     .prefault({}),
   reconcile: z
     .object({
-      /** The sweep looks at conversations updated within at least this window. */
+      /** The sweep looks at conversations with activity within at least this window. */
       lookbackSeconds: z.number().int().min(60).default(3600),
       /** After downtime, the sweep catches up at most this far back. */
       maxCatchUpSeconds: z

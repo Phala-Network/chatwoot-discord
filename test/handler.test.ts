@@ -41,7 +41,7 @@ function interaction(fields: {
   );
 }
 
-function submission(kind: string, text?: string, files: Record<string, unknown> = {}) {
+function submission(kind: string, text = "", files: Record<string, unknown> = {}) {
   return interaction({
     type: 5,
     data: {
