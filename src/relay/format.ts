@@ -276,20 +276,45 @@ export function tagNames(accountTag: string, conversation: RelayConversation, to
   ];
 }
 
-/** Extracts the draft a triage bot wrote after one of `labels`, e.g. "**Draft**:\n```\n...\n```". */
+/**
+ * Extracts the draft a triage bot wrote after one of `labels`: the first code block whose
+ * previous non-blank line contains a label, e.g. "**Draft**:\n```\n...\n```".
+ */
 export function draftFromTriage(content: string, labels: readonly string[]): string | undefined {
-  const usable = labels.filter((label) => label !== "").map(escapeRegExp);
-  if (usable.length === 0) return undefined;
-  const pattern = new RegExp(`(?:${usable.join("|")})[^\\n]*\\n\\s*\`\`\`[^\\n]*\\n(.*?)\`\`\``, "s");
-  return pattern.exec(content)?.[1]?.trim();
+  const usable = labels.filter((label) => label !== "");
+  const lines = content.split("\n");
+  for (const block of codeBlocks(lines)) {
+    const before = lines.slice(0, block.line).findLast((line) => line.trim() !== "");
+    if (before !== undefined && usable.some((label) => before.includes(label))) return block.text.trim();
+  }
+  return undefined;
 }
 
 /** The last fenced code block of a message, or the whole message when it has none. */
 export function draftFromMessage(content: string): string {
-  const blocks = Array.from(content.matchAll(/```[^\n]*\n(.*?)```/gs), (match) => match[1] ?? "");
-  return (blocks.at(-1) ?? content).trim();
+  return (codeBlocks(content.split("\n")).at(-1)?.text ?? content).trim();
 }
 
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/**
+ * Fenced code blocks with the line each opens on, by CommonMark's rules (spec 0.31, "Fenced code
+ * blocks"): a fence of at least three backticks or tildes, indented at most three spaces, opens a
+ * block (a backtick fence's info string has no backticks); a fence of the same character, at
+ * least as long, alone on its line, closes it; an unclosed block runs to the end.
+ */
+function codeBlocks(lines: string[]): Array<{ line: number; text: string }> {
+  const blocks: Array<{ line: number; text: string }> = [];
+  for (let line = 0; line < lines.length; line += 1) {
+    const open = /^( {0,3})(`{3,}(?!.*`)|~{3,})/.exec(lines[line] ?? "");
+    if (!open) continue;
+    const [, indent = "", fence = ""] = open;
+    const close = new RegExp(`^ {0,3}${fence[0]}{${fence.length},}[ \\t]*$`);
+    let end = line + 1;
+    while (end < lines.length && !close.test(lines[end] ?? "")) end += 1;
+    // Content lines lose as much indentation as the opening fence had.
+    const unindent = new RegExp(`^ {0,${indent.length}}`);
+    const text = lines.slice(line + 1, end).map((row) => row.replace(unindent, ""));
+    blocks.push({ line, text: text.join("\n") });
+    line = end;
+  }
+  return blocks;
 }

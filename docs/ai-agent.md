@@ -72,6 +72,9 @@ I have issued a corrected copy; you will find it under Billing → Invoices.
 
 - Only the first code block after a draft label counts, so the agent may post other code
   blocks (logs, progress) in the same or other messages.
+- Code blocks follow CommonMark: a fence of three or more backticks or tildes, closed by the same
+  character, at least as many, on a line of its own. When the draft itself contains a code block,
+  fence it with more backticks (`` ```` ``) or with tildes (`~~~`).
 - The label may be decorated (`**Draft**:`, `Draft (English):`); any configured label in
   `triage.draftLabels` works.
 - Keep the draft under 4,000 characters, the reply editor's limit.

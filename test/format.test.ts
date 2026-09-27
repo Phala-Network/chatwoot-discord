@@ -153,6 +153,20 @@ describe("format", () => {
     expect(draftFromTriage("**Draft**:\n```\nx\n```", ["D.aft"])).toBeUndefined();
   });
 
+  it("reads code blocks by CommonMark's fence rules, so a draft may contain code", () => {
+    const draft = "Run this:\n```sh\nagent restart\n```\nThen try again.";
+    // A longer fence around a draft that has its own code block.
+    expect(draftFromTriage(`**Draft**:\n\`\`\`\`\n${draft}\n\`\`\`\`\n-# done`, ["Draft"])).toBe(draft);
+    // Tildes, closed by at least as many tildes; backticks inside do not close them.
+    expect(draftFromTriage(`Draft:\n~~~text\n${draft}\n~~~~\nafter`, ["Draft"])).toBe(draft);
+    // A fence may be indented up to three spaces; its content loses that indentation.
+    expect(draftFromMessage("   ```\n   Hi,\n    indented\n   ```")).toBe("Hi,\n indented");
+    // An unclosed block runs to the end of the message.
+    expect(draftFromMessage("```\nHi there")).toBe("Hi there");
+    // Inline code is not a block.
+    expect(draftFromMessage("Use ```this``` inline")).toBe("Use ```this``` inline");
+  });
+
   it("uses the last code block, or the whole message, from anyone else", () => {
     expect(draftFromMessage("Try this:\n```\nold\n```\nor\n```\nHi, please log in again.\n```")).toBe(
       "Hi, please log in again.",
