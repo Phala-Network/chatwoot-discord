@@ -14,7 +14,9 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-24.04
+    # Same-repo changes use the organization's runner when the CI_RUNNER variable names one;
+    # pull requests from forks always run on GitHub-hosted runners.
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.CI_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 15
     env:
       WRANGLER_SEND_METRICS: "false"
