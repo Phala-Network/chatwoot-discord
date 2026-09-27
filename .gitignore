@@ -6,4 +6,3 @@ wrangler.jsonc
 coverage/
 *.log
 .DS_Store
-.pnpm-store/

@@ -1,5 +1,5 @@
-# Local secrets for `wrangler dev`. Copy to .dev.vars (git-ignored). In production set each
-# with `wrangler secret put <NAME>`. All values here are placeholders.
+# Local secrets for `bun run dev`. Copy to .dev.vars (git-ignored). In production set each with
+# `bun run wrangler secret put <NAME>`. All values here are placeholders.
 
 # Discord application: bot token and the application's public key (hex).
 DISCORD_BOT_TOKEN=replace-with-bot-token

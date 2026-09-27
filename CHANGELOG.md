@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Bun replaces pnpm as the package manager and script runner (`bun install`, `bun run <script>`,
+  lockfile `bun.lock`); `register-commands` runs with Bun instead of tsx. Vitest and wrangler still
+  run on Node 24.
 - The status tag is the conversation's Chatwoot status (`open`, `pending`, `snoozed`, or
   `resolved`); only resolved posts are archived.
 - Every Chatwoot call uses a route listed in the published OpenAPI spec: `/block` resolves the

@@ -1,7 +1,7 @@
 // Registers the slash commands and the "Reply with this" message command in one guild (bulk
 // overwrite). Run manually after changing src/commands/definitions.ts:
 //
-//   DISCORD_BOT_TOKEN=... pnpm register-commands --application <app id> --guild <guild id>
+//   DISCORD_BOT_TOKEN=... bun run register-commands --application <app id> --guild <guild id>
 
 import { parseArgs } from "node:util";
 import {
@@ -28,7 +28,7 @@ if (
   !snowflake.test(values.application) ||
   !snowflake.test(values.guild)
 ) {
-  console.error("Usage: DISCORD_BOT_TOKEN=... pnpm register-commands --application <app id> --guild <guild id>");
+  console.error("Usage: DISCORD_BOT_TOKEN=... bun run register-commands --application <app id> --guild <guild id>");
   process.exit(2);
 }
 
