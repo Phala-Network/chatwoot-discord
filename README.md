@@ -48,6 +48,13 @@ record.
   relay continues and the error is reported.
 - A message deleted in Chatwoot is deleted from the post too, once Chatwoot's API confirms the
   deletion. A message deleted before it was relayed is never posted.
+- A customer's response to an interactive message (an option pick, form, CSAT rating, or email
+  request) is posted under the customer's name once Chatwoot's API confirms it, formatted like
+  Chatwoot's Slack integration: the question, then `**Response:** …`, `**Responses:**` with a
+  `• Label: value` line per field, `**CSAT:**` with `• Rating: …` and `• Feedback: …`, or
+  `**Email:** …`. Markup is stripped. Chatwoot lets a customer answer again (a CSAT rating can be
+  changed for 14 days): a changed response is posted again, an unchanged one is not. Nothing is
+  posted for a conversation without a post or for a blocked contact.
 - A conversation deleted in Chatwoot (its API answers "not found") gets a notice in its post
   ("This conversation no longer exists in Chatwoot."), the post is archived, and the service
   forgets it. Chatwoot sends no webhook for a deletion, so this happens on the next event or job
@@ -100,7 +107,7 @@ Cron (every 5 min) ──▶ Worker ──RPC──▶   ├─▶ Chatwoot REST
   account, which must match the payload. `POST /discord/interactions` verifies Discord's Ed25519
   signature with `discord-interactions`. Both answer within milliseconds of CPU.
 - **Webhooks are a trigger, the API is the source of truth.** An event only queues "sync
-  conversation N" (or "check deleted message M"). The Durable Object fetches the conversation and
+  conversation N" (or "check updated message M"). The Durable Object fetches the conversation and
   the messages after its stored cursor from Chatwoot's API and relays them in order, then
   corrects tags and the archived flag once. Each Discord message is recorded as soon as Discord
   accepts it, and the cursor moves past a Chatwoot message as soon as all of its Discord messages
@@ -110,7 +117,7 @@ Cron (every 5 min) ──▶ Worker ──RPC──▶   ├─▶ Chatwoot REST
   Execute Webhook API has no idempotency key.
 - **One Durable Object ("Hub") holds all state and does all work.** Its SQLite tables hold the
   conversation → post mapping and cursor, the Discord message ids posted for each Chatwoot
-  message, the job queue, hourly triage counters, and a small cache (webhook, tags, inbox names). A single object is the simplest correct choice:
+  message, the responses posted for interactive messages, the job queue, hourly triage counters, and a small cache (webhook, tags, inbox names). A single object is the simplest correct choice:
   work is serialized per conversation (no duplicate posts under concurrent events), the global
   triage budget and the post → ticket lookup need no coordination, and support volumes are far
   below one object's throughput. Requests only write a job row and set an alarm; the alarm drains
@@ -123,7 +130,7 @@ Cron (every 5 min) ──▶ Worker ──RPC──▶   ├─▶ Chatwoot REST
   Missed webhooks and downtime heal on their own. Activity means a new message (Chatwoot's
   `last_activity_at`); status and assignee changes add an activity message, but a change that
   adds none (for example only the topic attribute) relies on its `conversation_updated` webhook.
-  Deletions rely on their webhooks too.
+  Deletions and interactive-message responses rely on their webhooks too.
 - **Commands** are answered in the Worker (modals, validation, refusals) or deferred: the job is
   stored in the Durable Object and run from its alarm, which downloads attachments (only from
   `cdn.discordapp.com`/`media.discordapp.net`, no redirects, size-capped), calls Chatwoot as the
@@ -175,7 +182,8 @@ not fit per-invocation subrequest accounting on Workers.
    *Link* (key configurable via `relay.linkAttribute`; set it to `""` to disable).
 3. In each account, add a webhook (Settings → Integrations → Webhooks) pointing at
    `https://<worker>/chatwoot/webhook`, subscribed to `message_created` (new messages),
-   `message_updated` (deleted messages), `conversation_updated` (assignee and topic), and
+   `message_updated` (deleted messages and customers' responses to interactive messages),
+   `conversation_updated` (assignee and topic), and
    `conversation_status_changed`. Other events are acknowledged and ignored. Copy its secret.
 4. Each agent who will use commands creates their own access token; the operator stores it as a
    secret keyed by their Discord user id.

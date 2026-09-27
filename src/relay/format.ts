@@ -52,12 +52,20 @@ export function senderName(message: RelayMessage): string {
     case "activity":
       return SYSTEM_USERNAME;
     case "incoming":
-      return safeUsername(filled(sender.name) ?? filled(sender.email) ?? "Customer");
+      return customerName(sender);
     default: {
       const fallback = sender.type === "user" ? "Agent" : "Bot";
       return safeUsername(`${filled(sender.name) ?? fallback} · ${account}`);
     }
   }
+}
+
+/** A customer's name, else their email. */
+export function customerName(customer: {
+  name?: string | null | undefined;
+  email?: string | null | undefined;
+}): string {
+  return safeUsername(filled(customer.name) ?? filled(customer.email) ?? "Customer");
 }
 
 export interface Avatars {
@@ -70,7 +78,12 @@ export interface Avatars {
 /** A customer's own https avatar or the contact default; everything else uses the Chatwoot avatar. */
 export function senderAvatar(message: RelayMessage, avatars: Avatars): string {
   if (message.messageType !== "incoming") return avatars.chatwoot;
-  const url = filled(message.sender?.avatarUrl);
+  return customerAvatar(message.sender?.avatarUrl, avatars);
+}
+
+/** A customer's own https avatar, else the contact default. */
+export function customerAvatar(avatarUrl: string | null | undefined, avatars: Avatars): string {
+  const url = filled(avatarUrl);
   return url?.startsWith("https://") ? url : avatars.contact;
 }
 

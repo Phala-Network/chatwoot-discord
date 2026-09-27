@@ -10,6 +10,8 @@ import {
   CONTENT_LIMIT,
   charLength,
   conversationUrl,
+  customerAvatar,
+  customerName,
   fromCustomer,
   postHeader,
   SYSTEM_USERNAME,
@@ -186,6 +188,41 @@ export class Relay {
       return;
     }
     store.saveState(accountId, conversation.id, state);
+  }
+
+  /**
+   * Posts a customer's response to an interactive message into the conversation's post, under
+   * the contact's name and avatar. Returns false if the post no longer exists in Discord, which
+   * is then forgotten. Like any message, it unarchives the post; a resolved post needs a sync.
+   */
+  async postResponse(
+    accountId: number,
+    conversation: RelayConversation,
+    threadId: string,
+    text: string,
+  ): Promise<boolean> {
+    const { store, forum, frontendUrl, avatars } = this.options;
+    let content = text;
+    if (content.length > CONTENT_LIMIT) {
+      const link = conversationUrl(frontendUrl, accountId, conversation.id);
+      const note = `-# Response truncated (${charLength(text)} characters). Full text: <${link}>`;
+      content = `${split(text, CONTENT_LIMIT - note.length - 1)[0] ?? ""}\n${note}`;
+    }
+    const message: WebhookMessage = {
+      content,
+      username: customerName(conversation.contact),
+      avatar_url: customerAvatar(conversation.contact.avatarUrl, avatars),
+      allowed_mentions: { parse: [] },
+    };
+    try {
+      await forum.execute(this.options.target(accountId).forumChannelId, message, threadId);
+    } catch (error) {
+      if (!(error instanceof UnknownThreadError)) throw error;
+      store.forgetThread(accountId, conversation.id);
+      return false;
+    }
+    if (conversation.status === "resolved") store.saveState(accountId, conversation.id, OUT_OF_DATE);
+    return true;
   }
 
   /** Posts a notice into the conversation's post when one of its messages could not be relayed. */

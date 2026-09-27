@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Customer messages ping the conversation's linked assignee (on the same line as the triage
   mention); agent replies, notes, activity lines, and unassigned conversations ping nobody.
 - A message deleted in Chatwoot is deleted from its post once Chatwoot's API confirms it.
+- A customer's response to an interactive message (option pick, form, CSAT rating, or email
+  request) is posted into the conversation's post under the customer's name, formatted like
+  Chatwoot's Slack integration, once Chatwoot's API confirms it (from `message_updated`). A
+  response is posted once; a changed response is posted again.
 - A conversation that no longer exists in Chatwoot gets a notice in its post, which is archived
   and forgotten.
 

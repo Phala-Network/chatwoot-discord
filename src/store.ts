@@ -1,5 +1,6 @@
 // Durable Object SQLite storage: conversation <-> post mappings, the Discord messages posted
-// for each Chatwoot message, the job queue, hourly counters, and a small cache.
+// for each Chatwoot message, responses posted for interactive messages, the job queue, hourly
+// counters, and a small cache.
 
 import type { Cache } from "./discord/forum.js";
 import type { RelayStore } from "./relay/relay.js";
@@ -47,6 +48,15 @@ export const MIGRATIONS: string[] = [
      SET announced_assignee = substr(substr(state, instr(state, '|') + 1), 1, instr(substr(state, instr(state, '|') + 1), '|') - 1)
      WHERE state LIKE '%|%|%';
    DELETE FROM deliveries;`,
+  // submitted_responses records the response to an interactive message last posted (a SHA-256
+  // digest of its text), so an update that does not change it is not posted again.
+  `CREATE TABLE submitted_responses (
+     account_id INTEGER NOT NULL,
+     conversation_id INTEGER NOT NULL,
+     message_id INTEGER NOT NULL,
+     digest TEXT NOT NULL,
+     PRIMARY KEY (account_id, conversation_id, message_id)
+   );`,
 ];
 
 const COUNTER_TTL_MS = 2 * 60 * 60 * 1000;
@@ -229,6 +239,30 @@ export class Store implements RelayStore, Cache {
     );
   }
 
+  /** Digest of the response to an interactive message last posted (see processMessageUpdate). */
+  postedResponse(accountId: number, conversationId: number, messageId: number): string | undefined {
+    const row = this.sql
+      .exec<{ digest: string }>(
+        "SELECT digest FROM submitted_responses WHERE account_id = ? AND conversation_id = ? AND message_id = ?",
+        accountId,
+        conversationId,
+        messageId,
+      )
+      .toArray()[0];
+    return row?.digest;
+  }
+
+  savePostedResponse(accountId: number, conversationId: number, messageId: number, digest: string): void {
+    this.sql.exec(
+      `INSERT INTO submitted_responses (account_id, conversation_id, message_id, digest) VALUES (?, ?, ?, ?)
+       ON CONFLICT (account_id, conversation_id, message_id) DO UPDATE SET digest = excluded.digest`,
+      accountId,
+      conversationId,
+      messageId,
+      digest,
+    );
+  }
+
   forgetThread(accountId: number, conversationId: number): void {
     this.sql.exec(
       "UPDATE conversations SET thread_id = NULL, state = NULL, announced_assignee = NULL WHERE account_id = ? AND conversation_id = ?",
@@ -237,6 +271,11 @@ export class Store implements RelayStore, Cache {
     );
     this.sql.exec(
       "DELETE FROM posted_messages WHERE account_id = ? AND conversation_id = ?",
+      accountId,
+      conversationId,
+    );
+    this.sql.exec(
+      "DELETE FROM submitted_responses WHERE account_id = ? AND conversation_id = ?",
       accountId,
       conversationId,
     );
