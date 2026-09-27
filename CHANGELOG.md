@@ -12,15 +12,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The README explains what the service is for, how it works, and its design, with illustrations
   of the forum and a ticket post (fictional data).
 - `docs/ai-agent.md` describes how to connect an AI agent (triage bot).
+- A Deploy to Cloudflare button in the README, with the steps after deploying.
 
 ### Changed
 
 - `wrangler.jsonc` is committed with placeholder `CONFIG` (it replaces `wrangler.example.jsonc`);
-  edit it in place, and `bun run deploy` deploys it. `package.json` describes each secret for the
+  edit it in place, and `npm run deploy` deploys it. `package.json` describes each secret for the
   Cloudflare dashboard.
 - Runtime types are generated with `wrangler types` (`worker-configuration.d.ts`) instead of the
   `@cloudflare/workers-types` package, and the compatibility date is 2026-08-15.
 - wrangler 4.142.0.
+- npm replaces Bun as the package manager and script runner (`npm ci`, `npm run <script>`,
+  lockfile `package-lock.json`, npm 12 pinned in `packageManager`): Workers Builds and Dependabot
+  cannot read Bun 1.4's lockfile. `allowScripts` lets only esbuild and workerd run install scripts.
+  `register-commands` runs with Node's type stripping and takes its options after `--`
+  (`npm run register-commands -- --application <app id> --guild <guild id>`).
+- TypeScript 7. `gen:chatwoot` runs openapi-typescript 7.13.0 with TypeScript 5.9.3 through `npx`,
+  since openapi-typescript does not support TypeScript 7; it is no longer a dev dependency.
 
 ## [0.2.0] - 2026-09-27
 

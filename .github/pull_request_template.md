@@ -8,6 +8,6 @@
 
 ## Checklist
 
-- [ ] `bun run lint && bun run typecheck && bun run test && bun run build` pass
+- [ ] `npm run lint && npm run typecheck && npm test && npm run build` pass
 - [ ] User-visible changes are described in `CHANGELOG.md` under "Unreleased"
 - [ ] README and configuration reference are updated if behaviour or settings changed
