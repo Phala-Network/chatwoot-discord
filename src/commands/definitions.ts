@@ -69,5 +69,6 @@ export const COMMANDS: RESTPutAPIApplicationGuildCommandsJSONBody = [
     name: "block",
     description: "Block this contact (spam): resolve and mute their future messages",
   },
+  { type: slash, name: "unblock", description: "Unblock this contact so their new messages are posted again" },
   { type: ApplicationCommandType.Message, name: REPLY_WITH_THIS },
 ];
