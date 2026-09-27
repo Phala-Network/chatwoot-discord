@@ -8,6 +8,7 @@ import {
   type APIInteractionResponse,
   type APIModalInteractionResponse,
   type APIModalSubmitInteraction,
+  ApplicationCommandOptionType,
   ApplicationCommandType,
   ComponentType,
   InteractionResponseType,
@@ -18,7 +19,7 @@ import {
 import type { Settings } from "../config.js";
 import { draftFromMessage, draftFromTriage } from "../relay/format.js";
 import { REPLY_WITH_THIS } from "./definitions.js";
-import type { AttachmentRef, CommandAction, CommandJob } from "./job.js";
+import { type AttachmentRef, type CommandAction, type CommandJob, prioritySchema } from "./job.js";
 
 export const CONTENT_MAX = 4000;
 export const FAILED = "❌ That did not work. Please do it in Chatwoot.";
@@ -97,6 +98,17 @@ function command(context: Context, interaction: APIApplicationCommandInteraction
       return defer(context, { type: "status", status: "resolved" });
     case "reopen":
       return defer(context, { type: "status", status: "open" });
+    case "pending":
+      return defer(context, { type: "status", status: "pending" });
+    case "snooze":
+      return snooze(context, stringOption(interaction, "until") ?? "until_next_reply", Date.now());
+    case "priority": {
+      const level = stringOption(interaction, "level");
+      if (level === "none") return defer(context, { type: "priority", priority: null });
+      const priority = prioritySchema.safeParse(level);
+      if (!priority.success) throw new UserError("Choose a priority from the list.");
+      return defer(context, { type: "priority", priority: priority.data });
+    }
     case "block":
       return defer(context, { type: "block" });
     case "assign": {
@@ -110,6 +122,31 @@ function command(context: Context, interaction: APIApplicationCommandInteraction
     default:
       return privately("Unknown command.");
   }
+}
+
+/**
+ * The snooze time as Chatwoot's dashboard computes it (findSnoozeTime in
+ * dashboard/helper/snoozeHelpers.js at v4.18.0): Unix seconds, taken when the command is used.
+ * "Until next reply" sends no time.
+ */
+function snooze(context: Context, option: string, now: number): HandlerResult {
+  switch (option) {
+    case "until_next_reply":
+      return defer(context, { type: "status", status: "snoozed" });
+    case "an_hour_from_now":
+      return defer(context, { type: "status", status: "snoozed", snoozedUntil: Math.floor((now + HOUR) / 1000) });
+    default:
+      throw new UserError("Choose a snooze option from the list.");
+  }
+}
+
+const HOUR = 60 * 60 * 1000;
+
+function stringOption(interaction: APIApplicationCommandInteraction, name: string): string | undefined {
+  const { data } = interaction;
+  if (data.type !== ApplicationCommandType.ChatInput) return undefined;
+  const option = data.options?.find((o) => o.name === name);
+  return option?.type === ApplicationCommandOptionType.String ? option.value : undefined;
 }
 
 function submit(context: Context, interaction: APIModalSubmitInteraction): HandlerResult {

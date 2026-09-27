@@ -1,10 +1,11 @@
 // Runs a deferred command against Chatwoot as the invoking agent, using that agent's own access
 // token, so Chatwoot applies its normal permissions and records who did it.
 
-import { ChatwootError, chatwootClient, type Fetch } from "../chatwoot/api.js";
+import { ChatwootError, chatwootClient, type Fetch, type StatusChange } from "../chatwoot/api.js";
 import type { Settings } from "../config.js";
 import { errorFields, log } from "../log.js";
 import { downloadAttachment } from "./attachments.js";
+import { PRIORITY_NAMES } from "./definitions.js";
 import { FAILED, NOT_LINKED, UserError } from "./handler.js";
 import type { CommandJob } from "./job.js";
 
@@ -23,16 +24,26 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
 
     let message: string;
     switch (action.type) {
-      case "status":
-        await chatwoot.setStatus(accountId, conversationId, action.status);
-        message = action.status === "resolved" ? "Resolved." : "Reopened.";
+      case "status": {
+        const { status, snoozedUntil } = action;
+        await chatwoot.setStatus(
+          accountId,
+          conversationId,
+          snoozedUntil === undefined ? { status } : { status, snoozed_until: snoozedUntil },
+        );
+        message = statusMessage(status, snoozedUntil);
+        break;
+      }
+      case "priority":
+        await chatwoot.setPriority(accountId, conversationId, action.priority);
+        message = action.priority ? `Priority set to ${PRIORITY_NAMES[action.priority]}.` : "Priority removed.";
         break;
       case "block": {
         // What Chatwoot's "Block contact" does (Conversation#mute!), through the documented API:
         // resolve the conversation and set the contact's `blocked` flag.
         const contactId = (await existing(chatwoot.getConversation(accountId, conversationId))).meta?.sender?.id;
         if (contactId === undefined) throw new UserError("This conversation has no contact to block.");
-        await chatwoot.setStatus(accountId, conversationId, "resolved");
+        await chatwoot.setStatus(accountId, conversationId, { status: "resolved" });
         await chatwoot.blockContact(accountId, contactId);
         message = "Contact blocked and conversation resolved. Their new messages will not be posted here.";
         break;
@@ -87,6 +98,20 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
     }
     log.error("command failed", { action: action.type, accountId, conversationId, ...errorFields(error) });
     return FAILED;
+  }
+}
+
+function statusMessage(status: StatusChange["status"], snoozedUntil: number | undefined): string {
+  switch (status) {
+    case "open":
+      return "Reopened.";
+    case "resolved":
+      return "Resolved.";
+    case "pending":
+      return "Marked as pending.";
+    case "snoozed":
+      // Discord shows the timestamp in each reader's own time zone.
+      return snoozedUntil === undefined ? "Snoozed until the next reply." : `Snoozed until <t:${snoozedUntil}:f>.`;
   }
 }
 

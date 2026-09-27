@@ -57,6 +57,14 @@ export const MESSAGE_PAGE_SIZE = 100;
 type MultipartMessage =
   operations["create-a-new-message-in-a-conversation"]["requestBody"]["content"]["multipart/form-data"];
 
+/** The body of POST conversations/{id}/toggle_status. */
+export type StatusChange = operations["toggle-status-of-a-conversation"]["requestBody"]["content"]["application/json"];
+
+/** A priority for POST conversations/{id}/toggle_priority; null clears it. */
+export type ConversationPriority = NonNullable<
+  NonNullable<operations["toggle-priority-of-a-conversation"]["requestBody"]>["content"]["application/json"]["priority"]
+>;
+
 export interface NewMessage {
   content: string;
   private: boolean;
@@ -161,12 +169,22 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
       );
     },
 
-    setStatus(accountId: number, conversationId: number, status: "open" | "resolved"): Promise<void> {
+    setStatus(accountId: number, conversationId: number, change: StatusChange): Promise<void> {
       return ensureOk(
         "toggle status",
         client.POST("/api/v1/accounts/{account_id}/conversations/{conversation_id}/toggle_status", {
           params: { path: { account_id: accountId, conversation_id: conversationId } },
-          body: { status },
+          body: change,
+        }),
+      );
+    },
+
+    setPriority(accountId: number, conversationId: number, priority: ConversationPriority | null): Promise<void> {
+      return ensureOk(
+        "toggle priority",
+        client.POST("/api/v1/accounts/{account_id}/conversations/{conversation_id}/toggle_priority", {
+          params: { path: { account_id: accountId, conversation_id: conversationId } },
+          body: { priority },
         }),
       );
     },

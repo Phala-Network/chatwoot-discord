@@ -12,8 +12,18 @@ const attachmentSchema = z.object({
 });
 export type AttachmentRef = z.infer<typeof attachmentSchema>;
 
+/** Chatwoot's conversation priorities (`Conversation.priorities`); null clears the priority. */
+export const prioritySchema = z.enum(["urgent", "high", "medium", "low"]);
+export type Priority = z.infer<typeof prioritySchema>;
+
 const actionSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("status"), status: z.enum(["open", "resolved"]) }),
+  z.object({
+    type: z.literal("status"),
+    status: z.enum(["open", "resolved", "pending", "snoozed"]),
+    /** Unix seconds when a snoozed conversation reopens; without it, the contact's next reply does. */
+    snoozedUntil: z.number().int().optional(),
+  }),
+  z.object({ type: z.literal("priority"), priority: prioritySchema.nullable() }),
   z.object({ type: z.literal("block") }),
   z.object({ type: z.literal("assign"), email: z.string() }),
   z.object({ type: z.literal("message"), private: z.boolean(), content: z.string(), files: z.array(attachmentSchema) }),
