@@ -89,8 +89,9 @@ permissions apply, and an unassigned conversation is assigned to them.
 - Never send anything to the customer itself. Text posted in a Discord post never reaches the
   customer; only the commands do, and they run as the linked human who uses them. Do not let the
   agent send messages through Chatwoot's API either.
-- Do not change the post's tags or archived state; the relay sets them from Chatwoot and replaces
-  them the next time the conversation's status, assignee, or topic changes.
+- Do not change the post's tags, title, or archived state; the relay sets them from Chatwoot and
+  replaces them the next time the conversation's status, assignee, topic, priority, labels, or
+  contact name changes.
 
 ## Optional: read-only context from Chatwoot
 

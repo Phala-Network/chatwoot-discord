@@ -216,7 +216,8 @@ while the conversation is resolved.
 
 - Messages are posted through the forum webhook, so each shows its sender's name and avatar:
   customers (their Chatwoot avatar or `avatars.contact`), agents as `Name · Account`, and
-  everything else as `Chatwoot` (`avatars.chatwoot`). Templates (greetings, CSAT) are skipped.
+  everything else as `Chatwoot` (`avatars.chatwoot`). Templates (greetings, CSAT) and messages
+  with nothing to show are skipped.
 - An agent's replies and notes show the Discord avatar of the agent's linked Discord user
   (`agents[]`), else the agent's Chatwoot avatar, else `avatars.chatwoot`. The bot looks each
   linked agent up at most once a day (one extra Discord request); if that fails, it uses the
@@ -331,8 +332,9 @@ Cloudflare's current pricing for the Free allowance.
   unsigned requests get 401.
 - Commands act only for linked users; others get an ephemeral refusal. The ticket is resolved
   from the stored post → conversation mapping, never from the post title.
-- Discord messages are sent with `allowed_mentions` locked down; only the conversation's linked
-  assignee can be pinged.
+- Discord messages are sent with `allowed_mentions` locked down; only linked agents can be
+  pinged: the conversation's assignee, and agents mentioned in a private note. Customer text
+  cannot call a bot either (see [Relay details](#relay-details)).
 - Attachments are fetched only from Discord's CDN (`cdn.discordapp.com`, `media.discordapp.net`)
   over HTTPS, without following redirects, with size caps.
 - Logs carry ids and outcomes only, never message bodies or tokens. Errors shown to users are
