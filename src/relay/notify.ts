@@ -68,9 +68,9 @@ export class Notifier {
   posted(message: RelayMessage): void {
     if (!this.live(message)) return;
     const { store } = this.options;
-    const assignee = assigneeTag(message.conversation);
-    if (store.announcedAssignee(message.account.id, message.conversation.id) !== assignee) {
-      store.saveAnnouncedAssignee(message.account.id, message.conversation.id, assignee);
+    const announcedAssignee = assigneeTag(message.conversation);
+    if (store.conversation(message.account.id, message.conversation.id)?.announcedAssignee !== announcedAssignee) {
+      store.updateConversation(message.account.id, message.conversation.id, { announcedAssignee });
     }
   }
 
@@ -106,15 +106,11 @@ export class Notifier {
    * the message pings them (which also adds them to the post).
    */
   private newAssignee(message: RelayMessage): string | undefined {
-    const { store } = this.options;
-    const accountId = message.account.id;
-    const conversationId = message.conversation.id;
+    const recorded = this.options.store.conversation(message.account.id, message.conversation.id);
     // A post adopted from the link attribute has no recorded state, so an unchanged assignee
     // cannot be told apart from a new one: do not ping (its tags are still brought up to date).
-    if (store.state(accountId, conversationId) === undefined && store.thread(accountId, conversationId)) {
-      return undefined;
-    }
-    if (store.announcedAssignee(accountId, conversationId) === assigneeTag(message.conversation)) return undefined;
+    if (recorded?.threadId !== undefined && recorded.state === undefined) return undefined;
+    if (recorded?.announcedAssignee === assigneeTag(message.conversation)) return undefined;
     return this.linkedAssignee(message);
   }
 }

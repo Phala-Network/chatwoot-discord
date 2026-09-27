@@ -3,7 +3,7 @@
 // counters, and a small cache.
 
 import type { Cache } from "./discord/forum.ts";
-import type { RelayStore } from "./relay/relay.ts";
+import type { PostFields, RelayStore } from "./relay/relay.ts";
 
 export const MIGRATIONS: string[] = [
   `CREATE TABLE conversations (
@@ -68,12 +68,22 @@ export const MIGRATIONS: string[] = [
 
 const COUNTER_TTL_MS = 2 * 60 * 60 * 1000;
 
-interface ConversationRow {
-  threadId: string | undefined;
-  state: string | undefined;
-  /** Id of the last message handled; undefined for an adopted post until its first run. */
-  cursor: number | undefined;
+interface ConversationFields extends PostFields {
+  /** Id of the last message handled; unset for an adopted post until its first run. */
+  cursor: number;
 }
+
+/** A conversation's row; a field is undefined until it is set. */
+type ConversationRow = { [Field in keyof ConversationFields]: ConversationFields[Field] | undefined };
+
+const COLUMNS: ReadonlyArray<readonly [keyof ConversationFields, string]> = [
+  ["threadId", "thread_id"],
+  ["state", "state"],
+  ["cursor", "cursor"],
+  ["announcedAssignee", "announced_assignee"],
+  ["titleSubject", "title_subject"],
+  ["title", "title"],
+];
 
 export interface Job {
   key: string;
@@ -105,14 +115,43 @@ export class Store implements RelayStore, Cache {
 
   conversation(accountId: number, conversationId: number): ConversationRow | undefined {
     const row = this.sql
-      .exec<{ thread_id: string | null; state: string | null; cursor: number | null }>(
-        "SELECT thread_id, state, cursor FROM conversations WHERE account_id = ? AND conversation_id = ?",
+      .exec<{
+        thread_id: string | null;
+        state: string | null;
+        cursor: number | null;
+        announced_assignee: string | null;
+        title_subject: string | null;
+        title: string | null;
+      }>(
+        `SELECT ${COLUMNS.map(([, column]) => column).join(", ")} FROM conversations
+         WHERE account_id = ? AND conversation_id = ?`,
         accountId,
         conversationId,
       )
       .toArray()[0];
     if (!row) return undefined;
-    return { threadId: row.thread_id ?? undefined, state: row.state ?? undefined, cursor: row.cursor ?? undefined };
+    return {
+      threadId: row.thread_id ?? undefined,
+      state: row.state ?? undefined,
+      cursor: row.cursor ?? undefined,
+      announcedAssignee: row.announced_assignee ?? undefined,
+      titleSubject: row.title_subject ?? undefined,
+      title: row.title ?? undefined,
+    };
+  }
+
+  /** Sets the given fields of a conversation's row. */
+  updateConversation(accountId: number, conversationId: number, patch: Partial<ConversationFields>): void {
+    const set = COLUMNS.filter(([field]) => patch[field] !== undefined);
+    if (set.length === 0) return;
+    this.ensureRow(accountId, conversationId);
+    this.sql.exec(
+      `UPDATE conversations SET ${set.map(([, column]) => `${column} = ?`).join(", ")}
+       WHERE account_id = ? AND conversation_id = ?`,
+      ...set.map(([field]) => patch[field] ?? null),
+      accountId,
+      conversationId,
+    );
   }
 
   ticketForThread(threadId: string): { accountId: number; conversationId: number } | undefined {
@@ -164,78 +203,6 @@ export class Store implements RelayStore, Cache {
   }
 
   // RelayStore
-
-  thread(accountId: number, conversationId: number): string | undefined {
-    return this.conversation(accountId, conversationId)?.threadId;
-  }
-
-  saveThread(accountId: number, conversationId: number, threadId: string): void {
-    this.ensureRow(accountId, conversationId);
-    this.sql.exec(
-      "UPDATE conversations SET thread_id = ? WHERE account_id = ? AND conversation_id = ?",
-      threadId,
-      accountId,
-      conversationId,
-    );
-  }
-
-  title(accountId: number, conversationId: number): { subject: string; applied: string } | undefined {
-    const row = this.sql
-      .exec<{ title_subject: string | null; title: string | null }>(
-        "SELECT title_subject, title FROM conversations WHERE account_id = ? AND conversation_id = ?",
-        accountId,
-        conversationId,
-      )
-      .toArray()[0];
-    if (!row || row.title_subject === null || row.title === null) return undefined;
-    return { subject: row.title_subject, applied: row.title };
-  }
-
-  saveTitle(accountId: number, conversationId: number, subject: string, applied: string): void {
-    this.ensureRow(accountId, conversationId);
-    this.sql.exec(
-      "UPDATE conversations SET title_subject = ?, title = ? WHERE account_id = ? AND conversation_id = ?",
-      subject,
-      applied,
-      accountId,
-      conversationId,
-    );
-  }
-
-  state(accountId: number, conversationId: number): string | undefined {
-    return this.conversation(accountId, conversationId)?.state;
-  }
-
-  saveState(accountId: number, conversationId: number, state: string): void {
-    this.ensureRow(accountId, conversationId);
-    this.sql.exec(
-      "UPDATE conversations SET state = ? WHERE account_id = ? AND conversation_id = ?",
-      state,
-      accountId,
-      conversationId,
-    );
-  }
-
-  announcedAssignee(accountId: number, conversationId: number): string | undefined {
-    const row = this.sql
-      .exec<{ announced_assignee: string | null }>(
-        "SELECT announced_assignee FROM conversations WHERE account_id = ? AND conversation_id = ?",
-        accountId,
-        conversationId,
-      )
-      .toArray()[0];
-    return row?.announced_assignee ?? undefined;
-  }
-
-  saveAnnouncedAssignee(accountId: number, conversationId: number, assignee: string): void {
-    this.ensureRow(accountId, conversationId);
-    this.sql.exec(
-      "UPDATE conversations SET announced_assignee = ? WHERE account_id = ? AND conversation_id = ?",
-      assignee,
-      accountId,
-      conversationId,
-    );
-  }
 
   postedParts(accountId: number, conversationId: number, messageId: number): string[] {
     return this.sql

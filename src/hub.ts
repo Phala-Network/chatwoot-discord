@@ -21,8 +21,9 @@ import { loadSettings, relaysInbox, type Settings } from "./config.ts";
 import { DiscordForum } from "./discord/forum.ts";
 import { DiscordHttpError, DiscordRest } from "./discord/rest.ts";
 import { errorFields, log } from "./log.ts";
-import { latestMessageId, processConversation, processMessageUpdate, relayFor } from "./relay/processor.ts";
+import { latestMessageId, processConversation, relayFor } from "./relay/processor.ts";
 import type { Relay } from "./relay/relay.ts";
+import { processMessageUpdate } from "./relay/updates.ts";
 import { type Job, Store } from "./store.ts";
 
 export const HUB_NAME = "global";

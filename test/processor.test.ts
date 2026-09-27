@@ -10,7 +10,8 @@ import type { Settings } from "../src/config.ts";
 import { DiscordForum } from "../src/discord/forum.ts";
 import { DiscordRest } from "../src/discord/rest.ts";
 import { minimumBudget, requestsPerMessage } from "../src/relay/limits.ts";
-import { type ProcessOutcome, processConversation, processMessageUpdate, relayFor } from "../src/relay/processor.ts";
+import { type ProcessOutcome, processConversation, relayFor } from "../src/relay/processor.ts";
+import { processMessageUpdate } from "../src/relay/updates.ts";
 import { Store } from "../src/store.ts";
 import { ALICE, BOB, FORUM, json, mockFetch, on, type Recorded, TRIAGE, testSettings } from "./helpers.ts";
 
@@ -315,7 +316,7 @@ describe("processConversation", () => {
       await sync(store, settings);
       expect(world.conversation.custom_attributes).toEqual({});
       await sync(store, settings);
-      const link = `https://discord.com/channels/${GUILD}/${store.thread(3, 12)}`;
+      const link = `https://discord.com/channels/${GUILD}/${store.conversation(3, 12)?.threadId}`;
       expect(world.conversation.custom_attributes).toEqual({ discord_thread: link });
       // Linked: later syncs do not write it again.
       await sync(store, settings);

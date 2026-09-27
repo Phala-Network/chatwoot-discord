@@ -30,16 +30,23 @@ describe("Store", () => {
 
       const store = new Store(sql);
       store.migrate();
+      // The assignee a post announced was the assignee field of its state.
       expect(store.conversation(3, 12)).toEqual({
         threadId: "100000000000000101",
         state: "resolved|Kim Lee|billing",
         cursor: 500,
+        announcedAssignee: "Kim Lee",
+        titleSubject: undefined,
+        title: undefined,
       });
-      // The assignee a post announced was the assignee field of its state.
-      expect(store.announcedAssignee(3, 12)).toBe("Kim Lee");
-      expect(store.announcedAssignee(3, 13)).toBeUndefined();
+      expect(store.conversation(3, 13)?.announcedAssignee).toBeUndefined();
       const tables = sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'").toArray();
       expect(tables.map((table) => table.name)).not.toContain("deliveries");
+
+      // Only the given fields change.
+      store.updateConversation(3, 13, { state: "s", title: "T" });
+      store.updateConversation(3, 13, { title: "T2" });
+      expect(store.conversation(3, 13)).toMatchObject({ threadId: "100000000000000102", state: "s", title: "T2" });
 
       store.savePostedPart(3, 12, 501, 0, "m1");
       store.savePostedPart(3, 12, 501, 1, "m2");

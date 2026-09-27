@@ -360,7 +360,7 @@ describe("Relay", () => {
 
   it("does not announce the assignee of an adopted post without a recorded state", async () => {
     const adopted = relayWith({ discordUserFor: () => "592" });
-    adopted.store.saveThread(3, 12, "adopted-thread");
+    adopted.store.updateConversation(3, 12, { threadId: "adopted-thread" });
     const reply = message({
       messageType: "outgoing",
       content: "On it",
@@ -454,7 +454,7 @@ describe("Relay", () => {
     await relay.relay(message());
     const contact = { name: "Jane Doe", avatarUrl: "https://cdn.example.com/jane.png" };
     const conversation = message({ conversation: { contact } }).conversation;
-    expect(await relay.postResponse(3, conversation, "thread-1", "Pick one\n\n**Response:** A")).toBe(true);
+    expect(await relay.postResponse(3, conversation, "Pick one\n\n**Response:** A")).toBe(true);
     expect(forum.calls.at(-1)).toEqual([
       "thread-1",
       {
@@ -466,7 +466,7 @@ describe("Relay", () => {
     ]);
 
     const long = `Question\n\n**Responses:**\n${"• Notes: text\n".repeat(300)}`;
-    await relay.postResponse(3, conversation, "thread-1", long);
+    await relay.postResponse(3, conversation, long);
     const content = forum.contents().at(-1) ?? "";
     expect(content.length).toBeLessThanOrEqual(CONTENT_LIMIT);
     expect(content.startsWith("Question\n\n**Responses:**\n• Notes: text\n")).toBe(true);
@@ -478,7 +478,7 @@ describe("Relay", () => {
   it("forgets a post deleted in Discord instead of posting a response", async () => {
     await relay.relay(message());
     forum.failThreadWith = "gone";
-    expect(await relay.postResponse(3, message().conversation, "thread-1", "**Email:** a@example.com")).toBe(false);
+    expect(await relay.postResponse(3, message().conversation, "**Email:** a@example.com")).toBe(false);
     expect(store.thread(3, 12)).toBeUndefined();
   });
 
@@ -565,7 +565,7 @@ describe("Relay", () => {
 
     // A post this service did not title (adopted) keeps its title.
     const adopted = relayWith();
-    adopted.store.saveThread(3, 12, "adopted-thread");
+    adopted.store.updateConversation(3, 12, { threadId: "adopted-thread" });
     await adopted.relay.sync(3, renamed.conversation, "adopted-thread");
     expect(adopted.forum.patches).toEqual([["adopted-thread", tagsFor("open")]]);
   });

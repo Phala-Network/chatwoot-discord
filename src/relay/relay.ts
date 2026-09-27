@@ -62,21 +62,29 @@ export interface ForumClient {
   postUrl(forumChannelId: string, threadId: string): Promise<string>;
 }
 
-export interface RelayStore {
-  thread(accountId: number, conversationId: number): string | undefined;
-  saveThread(accountId: number, conversationId: number, threadId: string): void;
+/** What is recorded about a conversation's post. */
+export interface PostFields {
+  threadId: string;
+  /** The tags and archived flag last applied to the post (see Relay.stateOf). */
+  state: string;
+  /** The assignee tag the post last announced. */
+  announcedAssignee: string;
   /**
-   * The subject a post's title ends with and the title last applied; undefined for a post whose
+   * The subject the post's title ends with and the title last applied; unset for a post whose
    * title this service did not record (adopted, or created by an earlier version).
    */
-  title(accountId: number, conversationId: number): { subject: string; applied: string } | undefined;
-  saveTitle(accountId: number, conversationId: number, subject: string, applied: string): void;
-  /** The tags and archived flag last applied to the post (see Relay.stateOf). */
-  state(accountId: number, conversationId: number): string | undefined;
-  saveState(accountId: number, conversationId: number, state: string): void;
-  /** The assignee tag the post last announced. */
-  announcedAssignee(accountId: number, conversationId: number): string | undefined;
-  saveAnnouncedAssignee(accountId: number, conversationId: number, assignee: string): void;
+  titleSubject: string;
+  title: string;
+}
+
+export interface RelayStore {
+  /** What is recorded about the conversation's post; a field is undefined until it is set. */
+  conversation(
+    accountId: number,
+    conversationId: number,
+  ): { [Field in keyof PostFields]: PostFields[Field] | undefined } | undefined;
+  /** Records the given fields. */
+  updateConversation(accountId: number, conversationId: number, patch: Partial<PostFields>): void;
   /** Ids of the Discord messages posted so far for a Chatwoot message, in order. */
   postedParts(accountId: number, conversationId: number, messageId: number): string[];
   savePostedPart(accountId: number, conversationId: number, messageId: number, part: number, discordId: string): void;
@@ -145,7 +153,7 @@ export class Relay {
     const accountId = message.account.id;
     const conversation = message.conversation;
     const parts = this.parts(message, text);
-    let threadId = store.thread(accountId, conversation.id);
+    let threadId = store.conversation(accountId, conversation.id)?.threadId;
     if (threadId) {
       try {
         await this.post(message, parts, threadId);
@@ -171,19 +179,20 @@ export class Relay {
   async sync(accountId: number, conversation: RelayConversation, threadId: string): Promise<void> {
     const { store, forum } = this.options;
     const state = this.stateOf(conversation);
-    if (store.state(accountId, conversation.id) === state) return;
+    const recorded = store.conversation(accountId, conversation.id);
+    if (recorded?.state === state) return;
     const target = this.options.target(accountId);
-    const titled = store.title(accountId, conversation.id);
-    const title = titled ? threadTitle(target.name, conversation, titled.subject) : undefined;
+    const subject = recorded?.titleSubject;
+    const title = subject === undefined ? undefined : threadTitle(target.name, conversation, subject);
     // Only a changed title is sent: other updates leave the post's name alone.
-    const rename = titled && title !== titled.applied ? title : undefined;
+    const rename = title !== recorded?.title ? title : undefined;
     try {
       await forum.updateThread(target.forumChannelId, threadId, {
         archived: false,
         applied_tags: await this.postTags(accountId, conversation),
         ...(rename ? { name: rename } : {}),
       });
-      if (titled && rename) store.saveTitle(accountId, conversation.id, titled.subject, rename);
+      if (rename) store.updateConversation(accountId, conversation.id, { title: rename });
       if (conversation.status === "resolved") {
         await forum.updateThread(target.forumChannelId, threadId, { archived: true });
       }
@@ -192,74 +201,48 @@ export class Relay {
       store.forgetThread(accountId, conversation.id); // Deleted in Discord: the next message starts a new post.
       return;
     }
-    store.saveState(accountId, conversation.id, state);
+    store.updateConversation(accountId, conversation.id, { state });
   }
 
   /**
    * Posts a customer's response to an interactive message into the conversation's post, under
-   * the contact's name and avatar. Returns false if the post no longer exists in Discord, which
-   * is then forgotten. Like any message, it unarchives the post; a resolved post needs a sync.
+   * the contact's name and avatar (see `postMessage`).
    */
-  async postResponse(
-    accountId: number,
-    conversation: RelayConversation,
-    threadId: string,
-    text: string,
-  ): Promise<boolean> {
-    const { store, forum, frontendUrl, avatars } = this.options;
+  postResponse(accountId: number, conversation: RelayConversation, text: string): Promise<boolean> {
+    const { frontendUrl, avatars } = this.options;
     let content = text;
     if (content.length > CONTENT_LIMIT) {
       const link = conversationUrl(frontendUrl, accountId, conversation.id);
       const note = `-# Response truncated (${charLength(text)} characters). Full text: <${link}>`;
       content = `${split(text, CONTENT_LIMIT - note.length - 1)[0] ?? ""}\n${note}`;
     }
-    const message: WebhookMessage = {
+    return this.postMessage(accountId, conversation, {
       content,
       username: customerName(conversation.contact),
       avatar_url: customerAvatar(conversation.contact.avatarUrl, avatars),
       allowed_mentions: { parse: [] },
-    };
-    try {
-      await forum.execute(this.options.target(accountId).forumChannelId, message, threadId);
-    } catch (error) {
-      if (!(error instanceof UnknownThreadError)) throw error;
-      store.forgetThread(accountId, conversation.id);
-      return false;
-    }
-    this.unarchived(accountId, conversation);
-    return true;
+    });
   }
 
   /**
    * Posts a notice into the conversation's post, e.g. when one of its messages could not be
-   * relayed or delivered. Returns false if there is no post. Like any message, it unarchives the
-   * post; a resolved post needs a sync.
+   * relayed or delivered (see `postMessage`).
    */
-  async notify(accountId: number, conversation: RelayConversation, content: string): Promise<boolean> {
-    const { store } = this.options;
-    const threadId = store.thread(accountId, conversation.id);
-    if (!threadId) return false;
-    try {
-      await this.notice(accountId, threadId, content);
-    } catch (error) {
-      if (!(error instanceof UnknownThreadError)) throw error;
-      store.forgetThread(accountId, conversation.id);
-      return false;
-    }
-    this.unarchived(accountId, conversation);
-    return true;
+  notify(accountId: number, conversation: RelayConversation, content: string): Promise<boolean> {
+    return this.postMessage(accountId, conversation, this.notice(content));
   }
 
   /** The conversation was deleted in Chatwoot: says so in its post, archives it, and forgets it. */
   async closeDeleted(accountId: number, conversationId: number): Promise<void> {
     const { store, forum } = this.options;
-    const threadId = store.thread(accountId, conversationId);
-    if (!threadId) return;
-    try {
-      await this.notice(accountId, threadId, "This conversation no longer exists in Chatwoot.");
-      await forum.updateThread(this.options.target(accountId).forumChannelId, threadId, { archived: true });
-    } catch (error) {
-      if (!(error instanceof UnknownThreadError)) throw error;
+    const threadId = store.conversation(accountId, conversationId)?.threadId;
+    const gone = this.notice("This conversation no longer exists in Chatwoot.");
+    if (threadId && (await this.postMessage(accountId, { id: conversationId }, gone))) {
+      try {
+        await forum.updateThread(this.forumOf(accountId), threadId, { archived: true });
+      } catch (error) {
+        if (!(error instanceof UnknownThreadError)) throw error;
+      }
     }
     store.forgetThread(accountId, conversationId);
   }
@@ -322,7 +305,7 @@ export class Relay {
     const { store, forum } = this.options;
     const accountId = message.account.id;
     const conversationId = message.conversation.id;
-    const forumChannelId = this.options.target(accountId).forumChannelId;
+    const forumChannelId = this.forumOf(accountId);
     for (let part = store.postedParts(accountId, conversationId, message.id).length; part < parts.length; part += 1) {
       const payload = parts[part];
       if (!payload) break;
@@ -355,29 +338,58 @@ export class Relay {
     const tags = await this.postTags(accountId, conversation);
     if (tags.length > 0) post.applied_tags = tags;
     const { channelId: threadId } = await forum.execute(target.forumChannelId, post);
-    store.saveThread(accountId, conversation.id, threadId);
-    store.saveTitle(accountId, conversation.id, subject, title);
-    store.saveState(accountId, conversation.id, this.stateOf(conversation));
+    store.updateConversation(accountId, conversation.id, {
+      threadId,
+      titleSubject: subject,
+      title,
+      state: this.stateOf(conversation),
+    });
     return threadId;
   }
 
-  private async notice(accountId: number, threadId: string, content: string): Promise<void> {
-    const forumChannelId = this.options.target(accountId).forumChannelId;
-    await this.options.forum.execute(
-      forumChannelId,
-      {
-        content,
-        username: SYSTEM_USERNAME,
-        avatar_url: this.options.avatars.chatwoot,
-        allowed_mentions: { parse: [] },
-      },
-      threadId,
-    );
+  /**
+   * Posts one message into the conversation's post. Returns false when there is no post, or it
+   * no longer exists in Discord (it is then forgotten). Like any message, it unarchives the post:
+   * a resolved post needs a sync afterwards.
+   */
+  private async postMessage(
+    accountId: number,
+    conversation: Pick<RelayConversation, "id" | "status">,
+    message: WebhookMessage,
+  ): Promise<boolean> {
+    const { store, forum } = this.options;
+    const threadId = store.conversation(accountId, conversation.id)?.threadId;
+    if (!threadId) return false;
+    try {
+      await forum.execute(this.forumOf(accountId), message, threadId);
+    } catch (error) {
+      if (!(error instanceof UnknownThreadError)) throw error;
+      store.forgetThread(accountId, conversation.id);
+      return false;
+    }
+    this.unarchived(accountId, conversation);
+    return true;
+  }
+
+  /** A message from Chatwoot itself. */
+  private notice(content: string): WebhookMessage {
+    return {
+      content,
+      username: SYSTEM_USERNAME,
+      avatar_url: this.options.avatars.chatwoot,
+      allowed_mentions: { parse: [] },
+    };
+  }
+
+  private forumOf(accountId: number): string {
+    return this.options.target(accountId).forumChannelId;
   }
 
   /** Posting into an archived post unarchives it: a resolved post must be archived again. */
-  private unarchived(accountId: number, conversation: RelayConversation): void {
-    if (conversation.status === "resolved") this.options.store.saveState(accountId, conversation.id, OUT_OF_DATE);
+  private unarchived(accountId: number, conversation: Pick<RelayConversation, "id" | "status">): void {
+    if (conversation.status === "resolved") {
+      this.options.store.updateConversation(accountId, conversation.id, { state: OUT_OF_DATE });
+    }
   }
 
   private postTags(accountId: number, conversation: RelayConversation): Promise<string[]> {
