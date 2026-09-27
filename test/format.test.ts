@@ -12,9 +12,9 @@ import {
   tagNames,
   threadTitle,
   titleSubject,
-} from "../src/relay/format.js";
-import type { RelayMessage } from "../src/relay/types.js";
-import { message } from "./helpers.js";
+} from "../src/relay/format.ts";
+import type { RelayMessage } from "../src/relay/types.ts";
+import { message } from "./helpers.ts";
 
 function title(relayMessage: RelayMessage): string {
   return threadTitle(relayMessage.account.name, relayMessage.conversation, titleSubject(relayMessage));

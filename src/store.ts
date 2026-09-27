@@ -2,8 +2,8 @@
 // for each Chatwoot message, responses posted for interactive messages, the job queue, hourly
 // counters, and a small cache.
 
-import type { Cache } from "./discord/forum.js";
-import type { RelayStore } from "./relay/relay.js";
+import type { Cache } from "./discord/forum.ts";
+import type { RelayStore } from "./relay/relay.ts";
 
 export const MIGRATIONS: string[] = [
   `CREATE TABLE conversations (

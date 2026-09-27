@@ -5,7 +5,7 @@
 // when an agent's reply could not be delivered.
 
 import { z } from "zod";
-import { type Budget, BudgetExhaustedError } from "../budget.js";
+import { type Budget, BudgetExhaustedError } from "../budget.ts";
 import {
   type ChatwootClient,
   type ChatwootConversation,
@@ -13,15 +13,15 @@ import {
   MESSAGE_PAGE_SIZE,
   toRelayConversation,
   toRelayMessage,
-} from "../chatwoot/api.js";
-import { relaysInbox, type Settings } from "../config.js";
-import { parseJson } from "../json.js";
-import { errorFields, log } from "../log.js";
-import type { Store } from "../store.js";
-import { clip, mentionedUserIds } from "./format.js";
-import { type ForumClient, Relay, type RelayStore } from "./relay.js";
-import { interactiveMessage, responseText } from "./response.js";
-import type { RelayConversation } from "./types.js";
+} from "../chatwoot/api.ts";
+import { relaysInbox, type Settings } from "../config.ts";
+import { parseJson } from "../json.ts";
+import { errorFields, log } from "../log.ts";
+import type { Store } from "../store.ts";
+import { clip, mentionedUserIds } from "./format.ts";
+import { type ForumClient, Relay, type RelayStore } from "./relay.ts";
+import { interactiveMessage, responseText } from "./response.ts";
+import type { RelayConversation } from "./types.ts";
 
 const INBOX_CACHE_MS = 24 * 60 * 60 * 1000;
 const agentEmailsSchema = z.record(z.string(), z.string());

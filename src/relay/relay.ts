@@ -22,9 +22,9 @@ import {
   threadTitle,
   titleSubject,
   topicTag,
-} from "./format.js";
-import { Notifier, type TriageOptions } from "./notify.js";
-import type { RelayAssignee, RelayConversation, RelayMessage } from "./types.js";
+} from "./format.ts";
+import { Notifier, type TriageOptions } from "./notify.ts";
+import type { RelayAssignee, RelayConversation, RelayMessage } from "./types.ts";
 
 export type WebhookMessage = RESTPostAPIWebhookWithTokenJSONBody;
 

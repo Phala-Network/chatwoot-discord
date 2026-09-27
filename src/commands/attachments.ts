@@ -1,9 +1,9 @@
 // Downloads a Discord attachment for forwarding to Chatwoot. Only Discord's CDN hosts are
 // fetched, redirects are refused, and the body is read with a size cap (files are held in memory).
 
-import type { Fetch } from "../chatwoot/api.js";
-import { fileTooLarge, isDiscordAttachmentUrl, UserError } from "./common.js";
-import type { AttachmentRef } from "./job.js";
+import type { Fetch } from "../chatwoot/api.ts";
+import { fileTooLarge, isDiscordAttachmentUrl, UserError } from "./common.ts";
+import type { AttachmentRef } from "./job.ts";
 
 export async function downloadAttachment(
   file: AttachmentRef,

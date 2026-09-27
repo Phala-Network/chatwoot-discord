@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { ACTIVITY_WAIT_MS, eventTarget } from "../src/chatwoot/webhook.js";
-import { hasResponse, interactiveMessage, plainText, responseText } from "../src/relay/response.js";
+import { ACTIVITY_WAIT_MS, eventTarget } from "../src/chatwoot/webhook.ts";
+import { hasResponse, interactiveMessage, plainText, responseText } from "../src/relay/response.ts";
 
 const response = (contentType: string, content: string, attributes: Record<string, unknown>) =>
   responseText(interactiveMessage(contentType, content, attributes));

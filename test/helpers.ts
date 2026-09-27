@@ -1,10 +1,10 @@
 // Shared fixtures and fakes. Outbound HTTP is mocked at the fetch boundary.
 
 import { vi } from "vitest";
-import { buildSettings, configSchema, type Settings, secretsSchema } from "../src/config.js";
-import type { ForumClient, RelayStore, WebhookMessage } from "../src/relay/relay.js";
-import { UnknownThreadError } from "../src/relay/relay.js";
-import type { RelayMessage } from "../src/relay/types.js";
+import { buildSettings, configSchema, type Settings, secretsSchema } from "../src/config.ts";
+import type { ForumClient, RelayStore, WebhookMessage } from "../src/relay/relay.ts";
+import { UnknownThreadError } from "../src/relay/relay.ts";
+import type { RelayMessage } from "../src/relay/types.ts";
 
 export const ALICE = "100000000000000011";
 export const BOB = "100000000000000012";

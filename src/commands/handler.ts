@@ -16,11 +16,11 @@ import {
   MessageFlags,
   TextInputStyle,
 } from "discord-api-types/v10";
-import type { Settings } from "../config.js";
-import { draftFromMessage, draftFromTriage } from "../relay/format.js";
-import { filesTooLarge, fileTooLarge, isDiscordAttachmentUrl, NOT_LINKED, UserError } from "./common.js";
-import { CONTENT_MAX, REPLY_WITH_THIS } from "./definitions.js";
-import { type AttachmentRef, type CommandAction, type CommandJob, prioritySchema } from "./job.js";
+import type { Settings } from "../config.ts";
+import { draftFromMessage, draftFromTriage } from "../relay/format.ts";
+import { filesTooLarge, fileTooLarge, isDiscordAttachmentUrl, NOT_LINKED, UserError } from "./common.ts";
+import { CONTENT_MAX, REPLY_WITH_THIS } from "./definitions.ts";
+import { type AttachmentRef, type CommandAction, type CommandJob, prioritySchema } from "./job.ts";
 
 export interface Ticket {
   accountId: number;

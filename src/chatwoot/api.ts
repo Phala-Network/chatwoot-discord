@@ -5,8 +5,8 @@
 
 import createClient from "openapi-fetch";
 import { z } from "zod";
-import type { MessageType, RelayAttachment, RelayConversation, RelayMessage } from "../relay/types.js";
-import type { components, operations, paths } from "./schema.js";
+import type { MessageType, RelayAttachment, RelayConversation, RelayMessage } from "../relay/types.ts";
+import type { components, operations, paths } from "./schema.ts";
 
 export type Fetch = (input: Request) => Promise<Response>;
 

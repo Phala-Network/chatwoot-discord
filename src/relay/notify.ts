@@ -3,9 +3,9 @@
 // announcement of a newly assigned agent. Only live messages notify; history relayed later (the
 // first sync of an older conversation, a catch-up after downtime) is posted without them.
 
-import { assigneeTag, fromCustomer } from "./format.js";
-import type { RelayStore } from "./relay.js";
-import type { RelayAssignee, RelayMessage } from "./types.js";
+import { assigneeTag, fromCustomer } from "./format.ts";
+import type { RelayStore } from "./relay.ts";
+import type { RelayAssignee, RelayMessage } from "./types.ts";
 
 export interface TriageOptions {
   userId: string;

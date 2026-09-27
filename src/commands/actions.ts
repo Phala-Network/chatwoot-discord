@@ -1,13 +1,13 @@
 // Runs a deferred command against Chatwoot as the invoking agent, using that agent's own access
 // token, so Chatwoot applies its normal permissions and records who did it.
 
-import { ChatwootError, chatwootClient, type Fetch, type StatusChange } from "../chatwoot/api.js";
-import type { Settings } from "../config.js";
-import { errorFields, log } from "../log.js";
-import { downloadAttachment } from "./attachments.js";
-import { FAILED, filesTooLarge, NOT_LINKED, UserError } from "./common.js";
-import { PRIORITY_NAMES } from "./definitions.js";
-import type { CommandJob } from "./job.js";
+import { ChatwootError, chatwootClient, type Fetch, type StatusChange } from "../chatwoot/api.ts";
+import type { Settings } from "../config.ts";
+import { errorFields, log } from "../log.ts";
+import { downloadAttachment } from "./attachments.ts";
+import { FAILED, filesTooLarge, NOT_LINKED, UserError } from "./common.ts";
+import { PRIORITY_NAMES } from "./definitions.ts";
+import type { CommandJob } from "./job.ts";
 
 interface CommandResult {
   /** The confirmation shown to the invoker (only they see it). */

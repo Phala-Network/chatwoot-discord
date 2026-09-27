@@ -6,8 +6,8 @@
 // pausing every route when it is the global limit. Waits are capped so an invocation never
 // sleeps for long; longer limits fail the job, which then retries with backoff.
 
-import type { Fetch } from "../chatwoot/api.js";
-import { isRecord, parseJson } from "../json.js";
+import type { Fetch } from "../chatwoot/api.ts";
+import { isRecord, parseJson } from "../json.ts";
 
 const API_BASE = "https://discord.com/api/v10";
 const USER_AGENT = "DiscordBot (chatwoot-discord, 1)";

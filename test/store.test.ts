@@ -1,7 +1,7 @@
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import { MIGRATIONS, Store } from "../src/store.js";
+import { MIGRATIONS, Store } from "../src/store.ts";
 
 describe("Store", () => {
   it("upgrades a 0.1.0 database without losing its posts", async () => {

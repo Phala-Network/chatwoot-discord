@@ -6,10 +6,10 @@ import {
   MessageFlags,
 } from "discord-api-types/v10";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { FAILED } from "../src/commands/common.js";
-import { COMMANDS, REPLY_WITH_THIS } from "../src/commands/definitions.js";
-import { type HandlerResult, handleInteraction } from "../src/commands/handler.js";
-import { ALICE, BOB, CAROL, TRIAGE, testSettings } from "./helpers.js";
+import { FAILED } from "../src/commands/common.ts";
+import { COMMANDS, REPLY_WITH_THIS } from "../src/commands/definitions.ts";
+import { type HandlerResult, handleInteraction } from "../src/commands/handler.ts";
+import { ALICE, BOB, CAROL, TRIAGE, testSettings } from "./helpers.ts";
 
 const THREAD = "100000000000001500";
 const settings = testSettings();

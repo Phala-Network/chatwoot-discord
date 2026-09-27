@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { executeCommand } from "../src/commands/actions.js";
-import { type CommandAction, type CommandJob, commandJobSchema } from "../src/commands/job.js";
-import { ALICE, json, mockFetch, on, type Route, testSettings } from "./helpers.js";
+import { executeCommand } from "../src/commands/actions.ts";
+import { type CommandAction, type CommandJob, commandJobSchema } from "../src/commands/job.ts";
+import { ALICE, json, mockFetch, on, type Route, testSettings } from "./helpers.ts";
 
 const settings = testSettings();
 const cw = "chatwoot.example.com/api/v1";

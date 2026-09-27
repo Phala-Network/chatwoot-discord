@@ -17,9 +17,9 @@ import {
   WebhookType,
 } from "discord-api-types/v10";
 import { z } from "zod";
-import { parseJson } from "../json.js";
-import { type ForumClient, UnknownThreadError, type WebhookMessage } from "../relay/relay.js";
-import { DiscordHttpError, type DiscordRest } from "./rest.js";
+import { parseJson } from "../json.ts";
+import { type ForumClient, UnknownThreadError, type WebhookMessage } from "../relay/relay.ts";
+import { DiscordHttpError, type DiscordRest } from "./rest.ts";
 
 const WEBHOOK_NAME = "Chatwoot";
 const MAX_TAGS = 5;

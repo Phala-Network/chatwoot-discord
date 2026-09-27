@@ -13,17 +13,17 @@ import {
   Routes,
 } from "discord-api-types/v10";
 import { z } from "zod";
-import { Budget, BudgetExhaustedError } from "./budget.js";
-import { chatwootClient, toRelayConversation } from "./chatwoot/api.js";
-import { executeCommand } from "./commands/actions.js";
-import { type CommandJob, commandJobSchema } from "./commands/job.js";
-import { loadSettings, relaysInbox, type Settings } from "./config.js";
-import { DiscordForum } from "./discord/forum.js";
-import { DiscordRest } from "./discord/rest.js";
-import { errorFields, log } from "./log.js";
-import { latestMessageId, processConversation, processMessageUpdate, relayFor } from "./relay/processor.js";
-import type { Relay } from "./relay/relay.js";
-import { type Job, Store } from "./store.js";
+import { Budget, BudgetExhaustedError } from "./budget.ts";
+import { chatwootClient, toRelayConversation } from "./chatwoot/api.ts";
+import { executeCommand } from "./commands/actions.ts";
+import { type CommandJob, commandJobSchema } from "./commands/job.ts";
+import { loadSettings, relaysInbox, type Settings } from "./config.ts";
+import { DiscordForum } from "./discord/forum.ts";
+import { DiscordRest } from "./discord/rest.ts";
+import { errorFields, log } from "./log.ts";
+import { latestMessageId, processConversation, processMessageUpdate, relayFor } from "./relay/processor.ts";
+import type { Relay } from "./relay/relay.ts";
+import { type Job, Store } from "./store.ts";
 
 export const HUB_NAME = "global";
 

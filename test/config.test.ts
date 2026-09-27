@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { configSchema } from "../src/config.js";
+import { configSchema } from "../src/config.ts";
 
 const minimal = {
   chatwoot: { baseUrl: "https://chatwoot.example.com" },

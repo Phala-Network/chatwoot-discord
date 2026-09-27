@@ -2,8 +2,8 @@
 // Worker secrets. Both are validated once per isolate.
 
 import { z } from "zod";
-import { parseJson } from "./json.js";
-import { requestsPerMessage } from "./relay/processor.js";
+import { parseJson } from "./json.ts";
+import { requestsPerMessage } from "./relay/processor.ts";
 
 /** Gravatar's built-in "mp" default image, forced (it does not depend on any email). */
 const DEFAULT_CONTACT_AVATAR = "https://gravatar.com/avatar/?d=mp&f=y&s=256";

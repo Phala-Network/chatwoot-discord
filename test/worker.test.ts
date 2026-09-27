@@ -9,8 +9,8 @@ import {
 } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import worker from "../src/index.js";
-import { ALICE, json, mockFetch, on, type Recorded, type Route } from "./helpers.js";
+import worker from "../src/index.ts";
+import { ALICE, json, mockFetch, on, type Recorded, type Route } from "./helpers.ts";
 
 const FORUM = "100000000000000055";
 const GUILD = "100000000000000044";

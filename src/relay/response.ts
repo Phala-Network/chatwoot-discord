@@ -3,8 +3,8 @@
 // (lib/integrations/slack/update_slack_message_service.rb at v4.18.0), in Discord markdown.
 // Nothing here performs I/O.
 
-import { isRecord } from "../json.js";
-import { chatwootMentions } from "./format.js";
+import { isRecord } from "../json.ts";
+import { chatwootMentions } from "./format.ts";
 
 /** Message content types whose submitted response is posted (SUPPORTED_CONTENT_TYPES). */
 const RESPONSE_CONTENT_TYPES: ReadonlySet<string> = new Set(["input_select", "form", "input_csat", "input_email"]);

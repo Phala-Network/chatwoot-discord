@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { CONTENT_LIMIT } from "../src/relay/format.js";
-import { Relay, type RelayOptions } from "../src/relay/relay.js";
-import { FakeForum, FORUM, MemoryStore, message, TAGS, TRIAGE } from "./helpers.js";
+import { CONTENT_LIMIT } from "../src/relay/format.ts";
+import { Relay, type RelayOptions } from "../src/relay/relay.ts";
+import { FakeForum, FORUM, MemoryStore, message, TAGS, TRIAGE } from "./helpers.ts";
 
 function relayWith(options: Partial<RelayOptions> = {}) {
   const forum = options.forum instanceof FakeForum ? options.forum : new FakeForum();

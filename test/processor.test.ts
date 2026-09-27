@@ -4,20 +4,20 @@
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Budget } from "../src/budget.js";
-import { chatwootClient } from "../src/chatwoot/api.js";
-import type { Settings } from "../src/config.js";
-import { DiscordForum } from "../src/discord/forum.js";
-import { DiscordRest } from "../src/discord/rest.js";
+import { Budget } from "../src/budget.ts";
+import { chatwootClient } from "../src/chatwoot/api.ts";
+import type { Settings } from "../src/config.ts";
+import { DiscordForum } from "../src/discord/forum.ts";
+import { DiscordRest } from "../src/discord/rest.ts";
 import {
   type ProcessOutcome,
   processConversation,
   processMessageUpdate,
   relayFor,
   requestsPerMessage,
-} from "../src/relay/processor.js";
-import { Store } from "../src/store.js";
-import { BOB, FORUM, json, mockFetch, on, type Recorded, TRIAGE, testSettings } from "./helpers.js";
+} from "../src/relay/processor.ts";
+import { Store } from "../src/store.ts";
+import { BOB, FORUM, json, mockFetch, on, type Recorded, TRIAGE, testSettings } from "./helpers.ts";
 
 const GUILD = "100000000000000044";
 const now = () => Math.floor(Date.now() / 1000);

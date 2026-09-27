@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DiscordForum } from "../src/discord/forum.js";
-import { DiscordHttpError, DiscordRest } from "../src/discord/rest.js";
-import { UnknownThreadError } from "../src/relay/relay.js";
-import { json, mockFetch, on } from "./helpers.js";
+import { DiscordForum } from "../src/discord/forum.ts";
+import { DiscordHttpError, DiscordRest } from "../src/discord/rest.ts";
+import { UnknownThreadError } from "../src/relay/relay.ts";
+import { json, mockFetch, on } from "./helpers.ts";
 
 class MemoryCache {
   values = new Map<string, string>();

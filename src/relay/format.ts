@@ -1,7 +1,7 @@
 // Pure formatting for the Discord side of the relay: titles, sender names, message bodies,
 // chunking, and tag names. Nothing here performs I/O.
 
-import type { RelayAttachment, RelayConversation, RelayMessage } from "./types.js";
+import type { RelayAttachment, RelayConversation, RelayMessage } from "./types.ts";
 
 export const CONTENT_LIMIT = 2000;
 export const TITLE_LIMIT = 100;

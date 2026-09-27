@@ -4,8 +4,8 @@
 // Account webhooks are sent once (Webhooks::Trigger logs failures and WebhookJob does not
 // retry), so deliveries need no dedupe; the relay is idempotent anyway (see relay/processor.ts).
 
-import { isRecord } from "../json.js";
-import { hasResponse, interactiveMessage } from "../relay/response.js";
+import { isRecord } from "../json.ts";
+import { hasResponse, interactiveMessage } from "../relay/response.ts";
 
 const TIMESTAMP_TOLERANCE_SECONDS = 300;
 
