@@ -273,6 +273,52 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
       );
     },
 
+    /**
+     * Removes the conversation's assignee the way Chatwoot's dashboard does (ConversationAction.vue
+     * posts `assignee_id: null`, which AssignmentsController#create applies, at v4.18.0). The
+     * spec types `assignee_id` as a number only, so this body is serialized here.
+     */
+    unassign(accountId: number, conversationId: number): Promise<void> {
+      return ensureOk(
+        "unassign conversation",
+        client.POST("/api/v1/accounts/{account_id}/conversations/{conversation_id}/assignments", {
+          params: { path: { account_id: accountId, conversation_id: conversationId } },
+          body: {},
+          bodySerializer: () => JSON.stringify({ assignee_id: null }),
+        }),
+      );
+    },
+
+    /** The account's label names (Chatwoot saves them in lower case). */
+    async listLabels(accountId: number): Promise<string[]> {
+      const list = await data(
+        "list labels",
+        client.GET("/api/v1/accounts/{account_id}/labels", { params: { path: { account_id: accountId } } }),
+      );
+      return (list.payload ?? []).flatMap((label) => (label.title ? [label.title] : []));
+    },
+
+    async conversationLabels(accountId: number, conversationId: number): Promise<string[]> {
+      const list = await data(
+        "list conversation labels",
+        client.GET("/api/v1/accounts/{account_id}/conversations/{conversation_id}/labels", {
+          params: { path: { account_id: accountId, conversation_id: conversationId } },
+        }),
+      );
+      return list.payload ?? [];
+    },
+
+    /** Replaces the conversation's labels (the spec's "Add Labels" overwrites the list). */
+    setLabels(accountId: number, conversationId: number, labels: string[]): Promise<void> {
+      return ensureOk(
+        "set labels",
+        client.POST("/api/v1/accounts/{account_id}/conversations/{conversation_id}/labels", {
+          params: { path: { account_id: accountId, conversation_id: conversationId } },
+          body: { labels },
+        }),
+      );
+    },
+
     /** Sets one conversation custom attribute, keeping the others (`merge`). */
     setCustomAttribute(accountId: number, conversationId: number, key: string, value: string): Promise<void> {
       return ensureOk(

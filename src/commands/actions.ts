@@ -25,9 +25,9 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
 
   try {
     const profile = await chatwoot.getProfile();
-    if (profile.id === undefined || !profile.accounts?.some((account) => account.id === accountId)) {
-      throw new UserError(NOT_LINKED);
-    }
+    if (profile.id === undefined) throw new UserError(NOT_LINKED);
+    // The token works, but its user was removed from the account (or never was in it).
+    if (!profile.accounts?.some((account) => account.id === accountId)) throw new UserError(NOT_IN_ACCOUNT);
 
     let message: string;
     switch (action.type) {
@@ -70,6 +70,30 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
         await chatwoot.assign(accountId, conversationId, assignee.id);
         // The name Chatwoot shows as the assignee, which is also the post's assignee tag.
         message = `Assigned to ${assignee.name ?? action.email}.`;
+        break;
+      }
+      case "unassign":
+        await chatwoot.unassign(accountId, conversationId);
+        message = "Unassigned.";
+        break;
+      case "label": {
+        // Chatwoot sets a conversation's labels as a whole list.
+        const { change, label } = action;
+        const current = await chatwoot.conversationLabels(accountId, conversationId);
+        if (change === "add") {
+          const known = await chatwoot.listLabels(accountId);
+          if (!known.includes(label)) throw new UserError(`There is no label "${label}" in this Chatwoot account.`);
+          if (!current.includes(label)) await chatwoot.setLabels(accountId, conversationId, [...current, label]);
+          message = `Label ${label} added.`;
+        } else {
+          if (!current.includes(label)) throw new UserError(`This conversation has no label "${label}".`);
+          await chatwoot.setLabels(
+            accountId,
+            conversationId,
+            current.filter((name) => name !== label),
+          );
+          message = `Label ${label} removed.`;
+        }
         break;
       }
       case "message": {
@@ -138,6 +162,9 @@ function statusMessage(status: StatusChange["status"], snoozedUntil: number | un
       return snoozedUntil === undefined ? "Snoozed until the next reply." : `Snoozed until <t:${snoozedUntil}:f>.`;
   }
 }
+
+const NOT_IN_ACCOUNT =
+  "Your Chatwoot user is no longer an agent in this Chatwoot account. Ask an admin to add you back, or to unlink your Discord account.";
 
 const CANNOT_REPLY =
   "This conversation's channel does not accept a reply right now (for example, its reply window has closed). Reply in Chatwoot, for example with a template.";

@@ -13,6 +13,9 @@ export const REPLY_WITH_THIS = "Reply with this";
 /** Longest reply or note text accepted from Discord. */
 export const CONTENT_MAX = 4000;
 
+/** Longest label name accepted from Discord. */
+const LABEL_MAX = 100;
+
 /** Chatwoot's priority options and their dashboard names ("none" clears the priority). */
 export const PRIORITY_NAMES = { none: "None", urgent: "Urgent", high: "High", medium: "Medium", low: "Low" };
 
@@ -84,6 +87,26 @@ export const COMMANDS: RESTPutAPIApplicationGuildCommandsJSONBody = [
     name: "assign",
     description: "Assign the conversation (default: to you)",
     options: [{ type: ApplicationCommandOptionType.User, name: "agent", description: "Agent to assign" }],
+  },
+  { type: slash, name: "unassign", description: "Remove the conversation's assignee" },
+  {
+    type: slash,
+    name: "label",
+    description: "Add or remove a label",
+    options: (["add", "remove"] as const).map((change) => ({
+      type: ApplicationCommandOptionType.Subcommand,
+      name: change,
+      description: change === "add" ? "Add a label to the conversation" : "Remove a label from the conversation",
+      options: [
+        {
+          type: ApplicationCommandOptionType.String,
+          name: "label",
+          description: "The label's name in Chatwoot",
+          required: true,
+          max_length: LABEL_MAX,
+        },
+      ],
+    })),
   },
   {
     type: slash,

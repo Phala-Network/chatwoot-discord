@@ -40,7 +40,7 @@ Cron (every 5 min) ─▶ Worker ──▶ Hub Durable Object ──▶ sweep: r
   agents, 🔒 private notes, activity lines.
 - Forum tags follow the conversation: account, status (`open`, `pending`, `snoozed`,
   `resolved`), assignee or `unassigned`, topic, priority, and labels. Resolved posts are archived.
-- Agents answer inside the post with `/reply`, `/note`, `/resolve`, `/assign`, and
+- Agents answer inside the post with `/reply`, `/note`, `/resolve`, `/assign`, `/label`, and
   [other commands](#commands). Each runs in Chatwoot as the agent who used it.
 - An optional AI agent (a Discord bot) is called on each customer message and posts a draft;
   a human sends it with **Apps → Reply with this**.
@@ -199,6 +199,8 @@ Used inside a ticket post, by Discord users linked in `agents[]` who have a toke
 | `/snooze [until]` | Snooze until the next reply (default) or for an hour. A reply from the contact always reopens it. |
 | `/priority <level>` | Set the priority (`Urgent`, `High`, `Medium`, `Low`), or clear it with `None`. |
 | `/assign [agent]` | Assign to yourself or another linked Discord user. |
+| `/unassign` | Remove the assignee, like choosing "None" as the assignee in Chatwoot. |
+| `/label add <label>`, `/label remove <label>` | Add one of the account's labels, or remove one of the conversation's; the other labels stay. |
 | `/block` | Like Chatwoot's "Block contact": resolves the conversation and blocks the contact, so their future messages are muted. |
 | `/unblock` | Like Chatwoot's "Unblock contact": their new messages are posted again (messages received while blocked are not). The status is unchanged. |
 
