@@ -1,4 +1,4 @@
-import { generateKeyPairSync, randomBytes } from "node:crypto";
+import { generateKeyPairSync } from "node:crypto";
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import { defineConfig } from "vitest/config";
 
@@ -29,7 +29,6 @@ export default defineConfig({
             "100000000000000011": "token-alice",
             "100000000000000012": "token-bob",
           }),
-          ADMIN_TOKEN: randomBytes(24).toString("hex"),
           TEST_DISCORD_PRIVATE_JWK: privateJwk,
         },
       },

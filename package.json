@@ -17,8 +17,7 @@
     "test": "vitest run",
     "build": "wrangler deploy --dry-run --outdir dist --config wrangler.example.jsonc",
     "gen:chatwoot": "openapi-typescript https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/swagger/swagger.json --empty-objects-unknown -o src/chatwoot/schema.d.ts",
-    "register-commands": "tsx scripts/register-commands.ts",
-    "import-state": "tsx scripts/import-state.ts"
+    "register-commands": "tsx scripts/register-commands.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.14",
@@ -32,7 +31,6 @@
     "wrangler": "^4.141.0"
   },
   "dependencies": {
-    "@sentry/cloudflare": "^11.0.0",
     "discord-api-types": "^0.38.55",
     "discord-interactions": "^4.4.0",
     "hono": "^4.13.9",

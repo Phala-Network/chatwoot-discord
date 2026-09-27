@@ -129,18 +129,16 @@ export class Store implements RelayStore, Cache {
     return row?.fail_count ?? 1;
   }
 
-  /** Imports a mapping created elsewhere (e.g. by a previous relay). Returns false if the thread is taken. */
-  importMapping(accountId: number, conversationId: number, threadId: string, cursor: number | undefined): boolean {
+  /** Maps a conversation to a post created elsewhere (e.g. by a previous relay). Returns false if the thread is taken. */
+  adoptThread(accountId: number, conversationId: number, threadId: string): boolean {
     const owner = this.ticketForThread(threadId);
     if (owner && (owner.accountId !== accountId || owner.conversationId !== conversationId)) return false;
     this.sql.exec(
-      `INSERT INTO conversations (account_id, conversation_id, thread_id, cursor) VALUES (?, ?, ?, ?)
-       ON CONFLICT (account_id, conversation_id) DO UPDATE SET thread_id = excluded.thread_id, state = NULL,
-         cursor = COALESCE(excluded.cursor, conversations.cursor)`,
+      `INSERT INTO conversations (account_id, conversation_id, thread_id) VALUES (?, ?, ?)
+       ON CONFLICT (account_id, conversation_id) DO UPDATE SET thread_id = excluded.thread_id, state = NULL`,
       accountId,
       conversationId,
       threadId,
-      cursor ?? null,
     );
     return true;
   }

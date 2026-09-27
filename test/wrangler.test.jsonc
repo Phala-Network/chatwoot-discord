@@ -3,6 +3,7 @@
   "name": "chatwoot-discord-test",
   "main": "../src/index.ts",
   "compatibility_date": "2026-08-01",
+  // Required by @cloudflare/vitest-pool-workers (the Worker itself does not need it).
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [{ "name": "HUB", "class_name": "Hub" }]
