@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The README explains what the service is for, how it works, and its design, with illustrations
+  of the forum and a ticket post (fictional data).
+- `docs/ai-agent.md` describes how to connect an AI agent (triage bot).
+
+### Changed
+
+- `wrangler.jsonc` is committed with placeholder `CONFIG` (it replaces `wrangler.example.jsonc`);
+  edit it in place, and `bun run deploy` deploys it. `package.json` describes each secret for the
+  Cloudflare dashboard.
+- Runtime types are generated with `wrangler types` (`worker-configuration.d.ts`) instead of the
+  `@cloudflare/workers-types` package, and the compatibility date is 2026-08-15.
+- wrangler 4.142.0.
+
 ## [0.2.0] - 2026-09-27
 
 ### Added
