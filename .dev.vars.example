@@ -1,0 +1,22 @@
+# Local secrets for `wrangler dev`. Copy to .dev.vars (git-ignored). In production set each
+# with `wrangler secret put <NAME>`. All values here are placeholders.
+
+# Discord application: bot token and the application's public key (hex).
+DISCORD_BOT_TOKEN=replace-with-bot-token
+DISCORD_PUBLIC_KEY=0000000000000000000000000000000000000000000000000000000000000000
+
+# Access token of the Chatwoot user the relay reads as. It must see every relayed inbox
+# (a member of those inboxes, or an administrator).
+CHATWOOT_RELAY_TOKEN=replace-with-relay-agent-token
+
+# Account webhook secrets, keyed by Chatwoot account id (Settings > Integrations > Webhooks).
+CHATWOOT_WEBHOOK_SECRETS={"1":"replace-with-webhook-secret"}
+
+# Each linked agent's own Chatwoot access token, keyed by Discord user id. Commands act as them.
+CHATWOOT_AGENT_TOKENS={"100000000000000011":"replace-with-agent-token"}
+
+# Optional: enables POST /admin/import (at least 32 characters). Remove after a cutover.
+# ADMIN_TOKEN=
+
+# Optional: report errors to Sentry.
+# SENTRY_DSN=

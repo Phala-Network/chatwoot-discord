@@ -51,7 +51,8 @@ export async function handleInteraction(interaction: APIInteraction, deps: Handl
   }
 
   try {
-    const ticket = interaction.channel?.id ? await deps.ticketForThread(interaction.channel.id) : undefined;
+    const threadId = interaction.channel?.id ?? interaction.channel_id;
+    const ticket = threadId ? await deps.ticketForThread(threadId) : undefined;
     const account = ticket && deps.settings.account(ticket.accountId);
     if (!ticket || !account) return privately("Use this command inside a ticket post in the Chatwoot forum.");
 
