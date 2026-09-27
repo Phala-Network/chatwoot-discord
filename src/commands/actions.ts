@@ -44,8 +44,16 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
         const contactId = (await existing(chatwoot.getConversation(accountId, conversationId))).meta?.sender?.id;
         if (contactId === undefined) throw new UserError("This conversation has no contact to block.");
         await chatwoot.setStatus(accountId, conversationId, { status: "resolved" });
-        await chatwoot.blockContact(accountId, contactId);
+        await chatwoot.setContactBlocked(accountId, contactId, true);
         message = "Contact blocked and conversation resolved. Their new messages will not be posted here.";
+        break;
+      }
+      case "unblock": {
+        // Chatwoot's "Unblock contact": clears the contact's `blocked` flag; the conversation stays as it is.
+        const contactId = (await existing(chatwoot.getConversation(accountId, conversationId))).meta?.sender?.id;
+        if (contactId === undefined) throw new UserError("This conversation has no contact to unblock.");
+        await chatwoot.setContactBlocked(accountId, contactId, false);
+        message = "Contact unblocked. Their new messages will be posted here again.";
         break;
       }
       case "assign": {

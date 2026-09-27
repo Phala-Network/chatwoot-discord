@@ -68,6 +68,7 @@ record.
 | `/priority <level>` | Set the priority (`Urgent`, `High`, `Medium`, `Low`), or clear it with `None`. |
 | `/assign [agent]` | Assign to yourself or another linked Discord user. |
 | `/block` | Like Chatwoot's "Block contact": resolves the conversation and blocks the contact, so their future messages are muted. |
+| `/unblock` | Like Chatwoot's "Unblock contact": their new messages are posted again (messages received while blocked are not). The conversation's status is unchanged. |
 
 Chatwoot's other snooze options (tomorrow, next week, next month, custom) reopen at a time of day
 in the agent's browser time zone, which Discord does not share with the service; use Chatwoot for

@@ -189,12 +189,12 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
       );
     },
 
-    blockContact(accountId: number, contactId: number): Promise<void> {
+    setContactBlocked(accountId: number, contactId: number, blocked: boolean): Promise<void> {
       return ensureOk(
-        "block contact",
+        blocked ? "block contact" : "unblock contact",
         client.PUT("/api/v1/accounts/{account_id}/contacts/{id}", {
           params: { path: { account_id: accountId, id: contactId } },
-          body: { blocked: true },
+          body: { blocked },
         }),
       );
     },

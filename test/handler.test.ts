@@ -145,6 +145,7 @@ describe("interaction handler", () => {
       "priority",
       "assign",
       "block",
+      "unblock",
     ]);
     const menuCommands = COMMANDS.filter((command) => command.type === 3);
     expect(menuCommands.map((command) => command.name)).toEqual([REPLY_WITH_THIS]);
@@ -223,6 +224,9 @@ describe("interaction handler", () => {
       status: "open",
     });
     expect((await handleInteraction(interaction({ name: "block" }), deps)).job?.action).toEqual({ type: "block" });
+    expect((await handleInteraction(interaction({ name: "unblock" }), deps)).job?.action).toEqual({
+      type: "unblock",
+    });
     expect((await handleInteraction(interaction({ name: "pending" }), deps)).job?.action).toEqual({
       type: "status",
       status: "pending",

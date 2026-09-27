@@ -111,6 +111,8 @@ function command(context: Context, interaction: APIApplicationCommandInteraction
     }
     case "block":
       return defer(context, { type: "block" });
+    case "unblock":
+      return defer(context, { type: "unblock" });
     case "assign": {
       const option =
         data.type === ApplicationCommandType.ChatInput ? data.options?.find((o) => o.name === "agent") : undefined;

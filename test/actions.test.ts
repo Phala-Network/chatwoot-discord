@@ -99,6 +99,19 @@ describe("executeCommand", () => {
     ]);
   });
 
+  it("unblocks the contact without changing the conversation", async () => {
+    const { result, requests } = run(
+      { type: "unblock" },
+      on("GET", conversation, () => json({ id: 15, status: "resolved", meta: { sender: { id: 88 } } })),
+      ok("PUT", `${cw}/accounts/3/contacts/88`),
+    );
+    expect(await result).toBe("✅ Contact unblocked. Their new messages will be posted here again.");
+    expect(requests.slice(1).map((request) => [`${request.method} ${request.url.pathname}`, request.body])).toEqual([
+      ["GET /api/v1/accounts/3/conversations/15", ""],
+      ["PUT /api/v1/accounts/3/contacts/88", JSON.stringify({ blocked: false })],
+    ]);
+  });
+
   it("assigns by the target agent's email", async () => {
     const { result, requests } = run(
       { type: "assign", email: "bob@example.com" },

@@ -25,6 +25,7 @@ const actionSchema = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("priority"), priority: prioritySchema.nullable() }),
   z.object({ type: z.literal("block") }),
+  z.object({ type: z.literal("unblock") }),
   z.object({ type: z.literal("assign"), email: z.string() }),
   z.object({ type: z.literal("message"), private: z.boolean(), content: z.string(), files: z.array(attachmentSchema) }),
 ]);
