@@ -7,11 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- A deferred command that could not start within 12 minutes (Discord interaction tokens last
-  15 minutes) is dropped instead of acting in Chatwoot without being able to report the result.
-
 ## [0.1.0] - 2026-09-27
 
 ### Added
@@ -27,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   posts are adopted from that attribute during a cutover.
 - Discord commands that act in Chatwoot as the invoking agent: `/reply` (with attachments),
   `/note`, `/resolve`, `/reopen`, `/assign`, `/block`, and the "Reply with this" message command.
+  A command that cannot start within 12 minutes is dropped, because Discord's interaction token
+  (valid 15 minutes) could no longer report its result.
 - A single SQLite-backed Durable Object with a job queue, alarms, retries with backoff, a
   per-invocation subrequest budget, and a cron reconciliation sweep for missed webhooks.
 - Verification of Chatwoot webhook HMAC signatures and Discord Ed25519 interaction signatures.
