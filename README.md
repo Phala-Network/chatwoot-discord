@@ -222,7 +222,8 @@ while the conversation is resolved.
   this order: account, status, assignee, topic, priority, then labels. The assignee tag is the
   agent's Chatwoot `name`; the topic tag is the conversation's `topic` custom attribute
   (`relay.topicAttribute`). A resolved conversation's post is archived; any other status
-  unarchives it.
+  unarchives it. The forum's tags are read at most every 10 minutes; when Discord refuses a
+  request because a tag was deleted since, it is sent again with the tags read anew.
 - The post title follows the contact's name when it changes (on the conversation's next sync);
   posts adopted from another relay or created by earlier versions keep their title.
 - A newly assigned agent who is linked in `agents[]` is pinged once (`-# Assigned to @name`).
@@ -275,7 +276,7 @@ replace:
 | `relay.linkAttribute` | `discord_thread` | Conversation attribute that receives the post URL (`""` disables). |
 | `relay.startAfterMessageId` | `0` | Messages with an id at or below this are never relayed (cutover watermark). |
 | `relay.maxAttempts` | `5` | Attempts before a message Discord refuses as invalid is skipped with a notice. |
-| `relay.subrequestBudget` | `45` | Outbound requests per alarm invocation (Free plan limit: 50). At least `relay.maxChunks` + 19: a run's setup and one message's worst case (`src/relay/limits.ts`). |
+| `relay.subrequestBudget` | `45` | Outbound requests per alarm invocation (Free plan limit: 50). At least `relay.maxChunks` + 23: a run's setup and one message's worst case (`src/relay/limits.ts`). |
 | `reconcile.lookbackSeconds` | `3600` | Minimum sweep window (conversations with activity within it are checked). Messages older than this are relayed without notifications. |
 | `reconcile.maxCatchUpSeconds` | `604800` | Maximum sweep window after downtime. |
 | `avatars.chatwoot` | `<Chatwoot URL>/favicon-512x512.png` | Avatar of activity lines, cards, notices, agent bots, and agents with neither a linked Discord user nor a Chatwoot avatar (https). |

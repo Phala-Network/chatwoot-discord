@@ -145,7 +145,7 @@ export class FakeForum implements ForumClient {
     return { channelId: threadId ?? `thread-${this.calls.length}`, messageId: `message-${this.calls.length}` };
   }
 
-  async updateThread(threadId: string, patch: ThreadPatch) {
+  async updateThread(_forum: string, threadId: string, patch: ThreadPatch) {
     if (this.failThreadWith === "gone") {
       this.failThreadWith = undefined;
       throw new UnknownThreadError(threadId);

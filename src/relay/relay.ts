@@ -44,10 +44,14 @@ export interface ForumClient {
     threadId?: string,
   ): Promise<{ channelId: string; messageId: string }>;
   /**
-   * Modifies a post. Discord rejects changes to an archived post unless the same request
-   * unarchives it. Throws UnknownThreadError if the post no longer exists.
+   * Modifies a post of the forum. Discord rejects changes to an archived post unless the same
+   * request unarchives it. Throws UnknownThreadError if the post no longer exists.
    */
-  updateThread(threadId: string, patch: { archived: boolean; applied_tags?: string[]; name?: string }): Promise<void>;
+  updateThread(
+    forumChannelId: string,
+    threadId: string,
+    patch: { archived: boolean; applied_tags?: string[]; name?: string },
+  ): Promise<void>;
   /** Deletes a message the forum's webhook posted; a message that is already gone counts as deleted. */
   deleteMessage(forumChannelId: string, threadId: string, messageId: string): Promise<void>;
   /** Tag ids matched by name, case-insensitively; missing tags are skipped. At most 5. */
@@ -168,18 +172,21 @@ export class Relay {
     const { store, forum } = this.options;
     const state = this.stateOf(conversation);
     if (store.state(accountId, conversation.id) === state) return;
+    const target = this.options.target(accountId);
     const titled = store.title(accountId, conversation.id);
-    const title = titled ? threadTitle(this.options.target(accountId).name, conversation, titled.subject) : undefined;
+    const title = titled ? threadTitle(target.name, conversation, titled.subject) : undefined;
     // Only a changed title is sent: other updates leave the post's name alone.
     const rename = titled && title !== titled.applied ? title : undefined;
     try {
-      await forum.updateThread(threadId, {
+      await forum.updateThread(target.forumChannelId, threadId, {
         archived: false,
         applied_tags: await this.postTags(accountId, conversation),
         ...(rename ? { name: rename } : {}),
       });
       if (titled && rename) store.saveTitle(accountId, conversation.id, titled.subject, rename);
-      if (conversation.status === "resolved") await forum.updateThread(threadId, { archived: true });
+      if (conversation.status === "resolved") {
+        await forum.updateThread(target.forumChannelId, threadId, { archived: true });
+      }
     } catch (error) {
       if (!(error instanceof UnknownThreadError)) throw error;
       store.forgetThread(accountId, conversation.id); // Deleted in Discord: the next message starts a new post.
@@ -250,7 +257,7 @@ export class Relay {
     if (!threadId) return;
     try {
       await this.notice(accountId, threadId, "This conversation no longer exists in Chatwoot.");
-      await forum.updateThread(threadId, { archived: true });
+      await forum.updateThread(this.options.target(accountId).forumChannelId, threadId, { archived: true });
     } catch (error) {
       if (!(error instanceof UnknownThreadError)) throw error;
     }
