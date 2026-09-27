@@ -188,6 +188,9 @@ export class Relay {
     const assignee = message.conversation.assignee;
     if (!discordUserFor || !assignee?.id) return undefined;
     const stored = store.state(message.account.id, message.conversation.id);
+    // A post adopted from a previous relay has no recorded state, so an unchanged assignee cannot
+    // be told apart from a new one: do not ping (its tags are still brought up to date).
+    if (stored === undefined && store.thread(message.account.id, message.conversation.id)) return undefined;
     if (stored?.split("|")[1] === assigneeTag(message.conversation)) return undefined;
     return discordUserFor(assignee);
   }
