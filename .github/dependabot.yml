@@ -12,6 +12,15 @@ updates:
     groups:
       npm-minor-and-patch:
         update-types: [minor, patch]
+    # Majors held on purpose (https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#ignore--):
+    ignore:
+      # Types follow the Node runtime, which is Node 24 (Active LTS).
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # @cloudflare/vitest-pool-workers requires vitest ^4.1; remove once it supports vitest 5
+      # (https://github.com/cloudflare/workers-sdk/pull/15500).
+      - dependency-name: "vitest"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
