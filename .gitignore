@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+wrangler.jsonc
+coverage/
+*.log
+.DS_Store
+.pnpm-store/

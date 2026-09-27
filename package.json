@@ -1,0 +1,42 @@
+{
+  "name": "chatwoot-discord",
+  "version": "0.1.0",
+  "description": "Mirror Chatwoot conversations into a Discord forum and handle tickets with Discord commands.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.34.5",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
+    "test": "vitest run",
+    "build": "wrangler deploy --dry-run --outdir dist --config wrangler.example.jsonc",
+    "gen:chatwoot": "openapi-typescript https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/swagger/swagger.json --empty-objects-unknown -o src/chatwoot/schema.d.ts",
+    "register-commands": "tsx scripts/register-commands.ts",
+    "import-state": "tsx scripts/import-state.ts"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.14",
+    "@cloudflare/vitest-pool-workers": "0.22.0",
+    "@cloudflare/workers-types": "^5.20260927.1",
+    "@types/node": "^24.19.0",
+    "openapi-typescript": "^7.13.0",
+    "tsx": "^4.23.15",
+    "typescript": "~5.9.3",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.141.0"
+  },
+  "dependencies": {
+    "@sentry/cloudflare": "^11.0.0",
+    "discord-api-types": "^0.38.55",
+    "discord-interactions": "^4.4.0",
+    "hono": "^4.13.9",
+    "openapi-fetch": "^0.17.0",
+    "zod": "^4.6.5"
+  }
+}

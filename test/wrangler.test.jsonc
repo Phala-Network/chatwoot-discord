@@ -1,0 +1,27 @@
+// Test-only Worker configuration (placeholder ids; secrets are injected by vitest.config.ts).
+{
+  "name": "chatwoot-discord-test",
+  "main": "../src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "HUB", "class_name": "Hub" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }],
+  "vars": {
+    "CONFIG": {
+      "chatwoot": { "baseUrl": "https://chatwoot.example.com" },
+      "discord": { "applicationId": "100000000000000001" },
+      "accounts": [
+        { "id": 3, "name": "Acme", "forumChannelId": "100000000000000055" },
+        { "id": 1, "name": "Globex", "forumChannelId": "100000000000000055" }
+      ],
+      "agents": [
+        { "discordUserId": "100000000000000011", "email": "Alice@example.com" },
+        { "discordUserId": "100000000000000012", "email": "bob@example.com" },
+        { "discordUserId": "100000000000000013", "email": "carol@example.com" }
+      ],
+      "triage": { "userId": "100000000000000777", "draftLabels": ["Draft", "Brouillon"] }
+    }
+  }
+}
