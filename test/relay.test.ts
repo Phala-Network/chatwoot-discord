@@ -10,6 +10,7 @@ function relayWith(options: Partial<RelayOptions> = {}) {
     forum,
     store,
     frontendUrl: "https://chatwoot.example.com/",
+    avatars: AVATARS,
     target: (accountId) => ({ forumChannelId: FORUM, tag: accountId === 3 ? "Acme" : "Globex" }),
     topicAttribute: "topic",
     maxChunks: 4,
@@ -17,6 +18,11 @@ function relayWith(options: Partial<RelayOptions> = {}) {
   });
   return { relay, forum, store };
 }
+
+const AVATARS = {
+  chatwoot: "https://chatwoot.example.com/favicon-512x512.png",
+  contact: "https://avatars.example.com/person.png",
+};
 
 const triage = { userId: TRIAGE, name: "Triage bot", perConversationPerHour: 5, perHour: 30 };
 const resolved = { status: "resolved" };
@@ -50,6 +56,7 @@ describe("Relay", () => {
     expect(first).toEqual({
       content: "My agent will not connect",
       username: "Jane Doe",
+      avatar_url: AVATARS.contact,
       allowed_mentions: { parse: [] },
     });
     expect(forum.patches).toEqual([]);
@@ -76,7 +83,24 @@ describe("Relay", () => {
     expect(ignored).toHaveLength(1);
   });
 
-  it("posts follow-ups into the same post under the sender's name, with their avatar", async () => {
+  it("gives customers their own avatar or the contact default, and Chatwoot's messages the Chatwoot avatar", async () => {
+    await relay.relay(message());
+    await relay.relay(
+      message({
+        id: 102,
+        sender: { name: "Jane Doe", type: "contact", avatarUrl: "https://files.example.com/jane.png" },
+      }),
+    );
+    await relay.relay(message({ id: 103, messageType: "activity", content: "Assigned to Sam" }));
+    expect(forum.calls.map(([, payload]) => payload.avatar_url)).toEqual([
+      AVATARS.chatwoot,
+      AVATARS.contact,
+      "https://files.example.com/jane.png",
+      AVATARS.chatwoot,
+    ]);
+  });
+
+  it("posts follow-ups into the same post under the sender's name, with the Chatwoot avatar", async () => {
     await relay.relay(message());
     await relay.relay(
       message({
@@ -88,7 +112,7 @@ describe("Relay", () => {
     );
     const [thread, payload] = forum.calls.at(-1) ?? [];
     expect(thread).toBe("thread-1");
-    expect(payload).toMatchObject({ username: "Sam · Acme", avatar_url: "https://files.example.com/sam.png" });
+    expect(payload).toMatchObject({ username: "Sam · Acme", avatar_url: AVATARS.chatwoot });
     expect(forum.patches).toEqual([]);
   });
 
@@ -331,7 +355,10 @@ describe("Relay", () => {
     });
     await adopted.relay.relay(reply);
     expect(adopted.forum.calls).toEqual([
-      ["adopted-thread", { content: "On it", username: "Sam · Acme", allowed_mentions: { parse: [] } }],
+      [
+        "adopted-thread",
+        { content: "On it", username: "Sam · Acme", avatar_url: AVATARS.chatwoot, allowed_mentions: { parse: [] } },
+      ],
     ]);
   });
 
@@ -380,6 +407,7 @@ describe("Relay", () => {
       {
         content: "This conversation no longer exists in Chatwoot.",
         username: "Chatwoot",
+        avatar_url: AVATARS.chatwoot,
         allowed_mentions: { parse: [] },
       },
     ]);

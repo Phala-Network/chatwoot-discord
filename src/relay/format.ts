@@ -60,11 +60,18 @@ export function senderName(message: RelayMessage): string {
   }
 }
 
-/** Only https avatars are passed to Discord; activity lines use the webhook's own avatar. */
-export function senderAvatar(message: RelayMessage): string | undefined {
-  if (message.messageType === "activity") return undefined;
+export interface Avatars {
+  /** For everything Chatwoot posts: agent replies, notes, activity lines, cards, and notices. */
+  chatwoot: string;
+  /** For customers without an https avatar in Chatwoot. */
+  contact: string;
+}
+
+/** A customer's own https avatar or the contact default; everything else uses the Chatwoot avatar. */
+export function senderAvatar(message: RelayMessage, avatars: Avatars): string {
+  if (message.messageType !== "incoming") return avatars.chatwoot;
   const url = filled(message.sender?.avatarUrl);
-  return url?.startsWith("https://") ? url : undefined;
+  return url?.startsWith("https://") ? url : avatars.contact;
 }
 
 export function threadTitle(message: RelayMessage): string {

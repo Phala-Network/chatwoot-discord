@@ -337,6 +337,7 @@ describe("worker", () => {
         allowed_mentions: { parse: [] },
         content: `My agent will not connect\n-# <@100000000000000777>`,
         username: "Jane Doe",
+        avatar_url: "https://gravatar.com/avatar/?d=mp&f=y&s=256",
       },
     });
 
@@ -358,7 +359,15 @@ describe("worker", () => {
     await chatwootWebhook(created(12));
     await drain();
     expect(world.webhookPosts().slice(2)).toEqual([
-      { thread, body: { allowed_mentions: { parse: [] }, content: "Try again", username: "Sam · Acme" } },
+      {
+        thread,
+        body: {
+          allowed_mentions: { parse: [] },
+          avatar_url: "https://chatwoot.example.com/favicon-512x512.png",
+          content: "Try again",
+          username: "Sam · Acme",
+        },
+      },
     ]);
   });
 
@@ -512,6 +521,7 @@ describe("worker", () => {
       body: {
         content: "This conversation no longer exists in Chatwoot.",
         username: "Chatwoot",
+        avatar_url: "https://chatwoot.example.com/favicon-512x512.png",
         allowed_mentions: { parse: [] },
       },
     });
