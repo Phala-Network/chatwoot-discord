@@ -1,0 +1,33 @@
+// Copy to wrangler.jsonc (git-ignored) and fill in your ids. Secrets are set with
+// `wrangler secret put <NAME>` (see README), never here.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "chatwoot-discord",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  // Needed by @sentry/cloudflare (AsyncLocalStorage).
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  // Reconciliation sweep. The Free plan allows 5 cron triggers per account; this uses one.
+  "triggers": { "crons": ["*/5 * * * *"] },
+  "durable_objects": {
+    "bindings": [{ "name": "HUB", "class_name": "Hub" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }],
+  "vars": {
+    "CONFIG": {
+      "chatwoot": { "baseUrl": "https://chatwoot.example.com" },
+      "discord": { "applicationId": "100000000000000001" },
+      "accounts": [
+        { "id": 1, "name": "Acme", "forumChannelId": "100000000000000002" },
+        { "id": 2, "name": "Globex", "forumChannelId": "100000000000000002", "tag": "Globex" }
+      ],
+      "agents": [
+        { "discordUserId": "100000000000000011", "email": "alice@example.com" },
+        { "discordUserId": "100000000000000012", "email": "bob@example.com" }
+      ],
+      "triage": { "userId": "100000000000000021", "name": "Triage bot", "draftLabels": ["Draft"] },
+      "relay": { "maxChunks": 4, "topicAttribute": "topic", "linkAttribute": "discord_thread" }
+    }
+  }
+}
