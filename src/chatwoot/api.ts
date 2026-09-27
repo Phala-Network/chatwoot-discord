@@ -46,7 +46,7 @@ const attachmentSchema = z.object({
 /**
  * The spec's `message` schema describes a single `attachment` object and leaves `sender` and
  * `content_attributes` untyped, while the API returns `attachments[]` (app/views/api/v1/models/
- * _message.json.jbuilder), a sender with `name`/`email`/`type`/`thumbnail`, and content
+ * _message.json.jbuilder), a sender with `id`/`name`/`email`/`type`/`thumbnail`, and content
  * attributes such as `email.subject`, `deleted`, `external_error` (why a failed message was not
  * delivered), and the response to an interactive message (`submitted_values`,
  * `submitted_email`, `items`; app/models/message.rb). Only those fields are read; the shape of a
@@ -73,7 +73,7 @@ const messageSchema = z.object({
     })
     .nullish()
     .catch(null),
-  sender: z.object({ name: text, email: text, type: text, thumbnail: text }).nullish(),
+  sender: z.object({ id: z.number().nullish(), name: text, email: text, type: text, thumbnail: text }).nullish(),
   attachments: z.array(attachmentSchema).nullish(),
 });
 export type ChatwootMessage = z.infer<typeof messageSchema>;
@@ -313,6 +313,7 @@ export function toRelayMessage(
     inboxName?: string | null;
     conversation: RelayConversation;
     mentionedAgents?: ReadonlyMap<number, string>;
+    discordAvatarUrl?: string;
   },
 ): RelayMessage {
   return {
@@ -336,6 +337,7 @@ export function toRelayMessage(
     inboxName: context.inboxName ?? null,
     conversation: context.conversation,
     ...(context.mentionedAgents ? { mentionedAgents: context.mentionedAgents } : {}),
+    ...(context.discordAvatarUrl ? { discordAvatarUrl: context.discordAvatarUrl } : {}),
   };
 }
 

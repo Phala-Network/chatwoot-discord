@@ -15,6 +15,8 @@ import {
   toRelayMessage,
 } from "../chatwoot/api.ts";
 import { relaysInbox, type Settings } from "../config.ts";
+import type { DiscordRest } from "../discord/rest.ts";
+import { fetchAvatarUrl } from "../discord/users.ts";
 import { parseJson } from "../json.ts";
 import { errorFields, log } from "../log.ts";
 import type { Store } from "../store.ts";
@@ -26,12 +28,16 @@ import type { RelayConversation } from "./types.ts";
 const INBOX_CACHE_MS = 24 * 60 * 60 * 1000;
 const agentEmailsSchema = z.record(z.string(), z.string());
 const AGENTS_CACHE_MS = 60 * 60 * 1000;
+const AVATAR_CACHE_MS = 24 * 60 * 60 * 1000;
+/** After a failed avatar lookup, the agent's Chatwoot avatar is used this long before trying again. */
+const AVATAR_RETRY_MS = 60 * 60 * 1000;
 /**
  * Worst case for relaying one message besides its parts: the inbox name and the forum's tags
  * for a new post, webhook lookup and creation, the ticket card, the account's agents (for
- * mentions), the truncation note, and a failure notice.
+ * mentions and the sender), the linked sender's Discord avatar, the truncation note, and a
+ * failure notice.
  */
-const MESSAGE_REQUESTS = 8;
+const MESSAGE_REQUESTS = 9;
 /** Linking a new post from its conversation: the forum's guild and the attribute update. */
 const LINK_REQUESTS = 2;
 /** Bringing a post's tags and archived flag up to date: the forum's tags and two updates. */
@@ -73,6 +79,7 @@ interface ProcessorContext {
   store: Store;
   relay: Relay;
   forum: ForumClient;
+  rest: DiscordRest;
   chatwoot: ChatwootClient;
   budget: Budget;
 }
@@ -131,12 +138,11 @@ export async function processConversation(
       if (inboxName === undefined && !store.thread(accountId, conversationId)) {
         inboxName = await cachedInboxName(context, accountId, raw);
       }
-      const mentionedAgents = await linkedMentions(context, accountId, message);
       const relayMessage = toRelayMessage(message, {
         account: { id: accountId, name: account.name },
         inboxName: inboxName ?? null,
         conversation,
-        ...(mentionedAgents ? { mentionedAgents } : {}),
+        ...(await linkedAgents(context, accountId, message)),
       });
       try {
         await relay.relay(relayMessage);
@@ -368,24 +374,57 @@ async function cachedInboxName(
 }
 
 /**
- * For a private note that mentions Chatwoot users (Chatwoot notifies mentions in notes only:
- * Messages::MentionService at v4.18.0), the linked agents among them by Chatwoot user id.
+ * The linked agents a message involves: for a private note that mentions Chatwoot users
+ * (Chatwoot notifies mentions in notes only: Messages::MentionService at v4.18.0), the linked
+ * agents among them by Chatwoot user id; for a message sent by a linked agent, their Discord
+ * avatar.
  */
-async function linkedMentions(
+async function linkedAgents(
   context: ProcessorContext,
   accountId: number,
   message: ChatwootMessage,
-): Promise<ReadonlyMap<number, string> | undefined> {
-  if (!message.private || !message.content || context.settings.config.agents.length === 0) return undefined;
-  const mentioned = mentionedUserIds(message.content);
-  if (mentioned.length === 0) return undefined;
+): Promise<{ mentionedAgents?: ReadonlyMap<number, string>; discordAvatarUrl?: string }> {
+  if (context.settings.config.agents.length === 0) return {};
+  const mentioned = message.private && message.content ? mentionedUserIds(message.content) : [];
+  const senderId = message.message_type === 1 && message.sender?.type === "user" ? message.sender.id : undefined;
+  if (mentioned.length === 0 && senderId == null) return {};
+  // Chatwoot's message sender has no email: agents are matched through the account's agent list.
   const emails = await cachedAgentEmails(context, accountId);
+  const discordUser = (userId: number) => context.settings.discordUserForEmail(emails[String(userId)]);
   const linked = new Map<number, string>();
   for (const userId of mentioned) {
-    const discordId = context.settings.discordUserForEmail(emails[String(userId)]);
+    const discordId = discordUser(userId);
     if (discordId) linked.set(userId, discordId);
   }
-  return linked;
+  const senderDiscordId = senderId == null ? undefined : discordUser(senderId);
+  const discordAvatarUrl = senderDiscordId ? await cachedDiscordAvatar(context, senderDiscordId) : undefined;
+  return {
+    ...(mentioned.length > 0 ? { mentionedAgents: linked } : {}),
+    ...(discordAvatarUrl ? { discordAvatarUrl } : {}),
+  };
+}
+
+/**
+ * A linked agent's Discord avatar, looked up at most once a day; undefined when Discord will
+ * not say, and then not asked again for a while.
+ */
+async function cachedDiscordAvatar(
+  { store, rest }: ProcessorContext,
+  discordUserId: string,
+): Promise<string | undefined> {
+  const key = `avatar:${discordUserId}`;
+  const cached = store.get(key);
+  if (cached !== undefined) return cached || undefined;
+  try {
+    const url = await fetchAvatarUrl(rest, discordUserId);
+    store.set(key, url, AVATAR_CACHE_MS);
+    return url;
+  } catch (error) {
+    if (error instanceof BudgetExhaustedError) throw error;
+    log.warn("Discord avatar unavailable", { discordUserId, ...errorFields(error) });
+    store.set(key, "", AVATAR_RETRY_MS);
+    return undefined;
+  }
 }
 
 /** The account's agents' emails by Chatwoot user id; empty when Chatwoot will not say. */

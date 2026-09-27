@@ -214,6 +214,10 @@ while the conversation is resolved.
 - Messages are posted through the forum webhook, so each shows its sender's name and avatar:
   customers (their Chatwoot avatar or `avatars.contact`), agents as `Name · Account`, and
   everything else as `Chatwoot` (`avatars.chatwoot`). Templates (greetings, CSAT) are skipped.
+- An agent's replies and notes show the Discord avatar of the agent's linked Discord user
+  (`agents[]`), else the agent's Chatwoot avatar, else `avatars.chatwoot`. The bot looks each
+  linked agent up at most once a day (one extra Discord request); if that fails, it uses the
+  fallback and tries again an hour later. Agent bots keep `avatars.chatwoot`.
 - Tags are matched by name, case-insensitively. Discord applies at most 5 per post, taken in
   this order: account, status, assignee, topic, priority, then labels. The assignee tag is the
   agent's Chatwoot `name`; the topic tag is the conversation's `topic` custom attribute
@@ -258,7 +262,7 @@ replace:
 | `chatwoot.baseUrl` | required | Chatwoot base URL for API calls. |
 | `chatwoot.publicUrl` | `baseUrl` | Base URL for dashboard links posted in Discord. |
 | `accounts[]` | required | `{ id, name, forumChannelId, tag?, inboxIds? }`: Chatwoot account id, the name shown in titles and confirmations, its forum, its forum tag (default `name`), and the inboxes to relay (default: all). Accounts may share a forum. |
-| `agents[]` | `[]` | `{ discordUserId, email }`: links Discord users to Chatwoot agents (commands, assignee pings, `/assign` targets). |
+| `agents[]` | `[]` | `{ discordUserId, email }`: links Discord users to Chatwoot agents (commands, assignee pings, `/assign` targets, and the Discord avatar on the agent's messages). |
 | `triage.userId` | unset | Discord user id of an AI agent (triage bot) to mention on customer messages. |
 | `triage.name` | `Triage bot` | Name used in budget notes (at most 100 characters). |
 | `triage.perConversationPerHour` / `perHour` | `5` / `30` | Mention budgets. |
@@ -268,10 +272,10 @@ replace:
 | `relay.linkAttribute` | `discord_thread` | Conversation attribute that receives the post URL (`""` disables). |
 | `relay.startAfterMessageId` | `0` | Messages with an id at or below this are never relayed (cutover watermark). |
 | `relay.maxAttempts` | `5` | Attempts before a message is skipped with a notice. |
-| `relay.subrequestBudget` | `45` | Outbound requests per alarm invocation (Free plan limit: 50). Must exceed `relay.maxChunks` + 13, one message's worst case. |
+| `relay.subrequestBudget` | `45` | Outbound requests per alarm invocation (Free plan limit: 50). Must exceed `relay.maxChunks` + 14, one message's worst case. |
 | `reconcile.lookbackSeconds` | `3600` | Minimum sweep window (conversations with activity within it are checked). Messages older than this are relayed without notifications. |
 | `reconcile.maxCatchUpSeconds` | `604800` | Maximum sweep window after downtime. |
-| `avatars.chatwoot` | `<Chatwoot URL>/favicon-512x512.png` | Avatar of agent replies, notes, activity lines, cards, and notices (https). |
+| `avatars.chatwoot` | `<Chatwoot URL>/favicon-512x512.png` | Avatar of activity lines, cards, notices, agent bots, and agents with neither a linked Discord user nor a Chatwoot avatar (https). |
 | `avatars.contact` | Gravatar "mystery person" | Avatar of customers who have no avatar in Chatwoot (https). |
 | `attachments.maxFiles` | `10` | Files per `/reply` or `/note` (0 hides the upload field). |
 | `attachments.maxFileBytes` / `maxTotalBytes` | 25 MB / 50 MB | Size caps (files are held in memory). |

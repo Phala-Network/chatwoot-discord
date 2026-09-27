@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DiscordForum } from "../src/discord/forum.ts";
 import { DiscordHttpError, DiscordRest } from "../src/discord/rest.ts";
+import { avatarUrl } from "../src/discord/users.ts";
 import { UnknownThreadError } from "../src/relay/relay.ts";
 import { json, mockFetch, on } from "./helpers.ts";
 
@@ -223,5 +224,22 @@ describe("DiscordRest", () => {
     const error = await rest.get("/channels/2").catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(DiscordHttpError);
     expect(error).toMatchObject({ status: 403, code: 50001 });
+  });
+});
+
+describe("avatarUrl", () => {
+  it("builds a user's own avatar, or their default avatar, on Discord's CDN", () => {
+    const id = "80351110224678912";
+    expect(avatarUrl({ id, avatar: "8342729096ea3675442027381ff50dfe", discriminator: "0" })).toBe(
+      `https://cdn.discordapp.com/avatars/${id}/8342729096ea3675442027381ff50dfe.png`,
+    );
+    expect(avatarUrl({ id, avatar: "a_1269e74af4df7417b13759eae50c83dc", discriminator: "0" })).toBe(
+      `https://cdn.discordapp.com/avatars/${id}/a_1269e74af4df7417b13759eae50c83dc.png`,
+    );
+    // New username system: (user_id >> 22) % 6. Legacy: discriminator % 5.
+    expect(avatarUrl({ id, avatar: null, discriminator: "0" })).toBe("https://cdn.discordapp.com/embed/avatars/5.png");
+    expect(avatarUrl({ id, avatar: null, discriminator: "1337" })).toBe(
+      "https://cdn.discordapp.com/embed/avatars/2.png",
+    );
   });
 });
