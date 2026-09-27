@@ -51,13 +51,15 @@ const attachmentSchema = z.object({
  * An item of a bot's `input_select`, `cards`, or `article` message (`content_attributes.items`,
  * with the keys ContentAttributeValidator allows at v4.18.0).
  */
+const itemText = text.catch(null);
 const itemSchema = z.object({
-  title: text,
-  description: text,
-  media_url: text,
-  link: text,
+  title: itemText,
+  value: itemText,
+  description: itemText,
+  media_url: itemText,
+  link: itemText,
   actions: z
-    .array(z.object({ text: text, uri: text }))
+    .array(z.object({ text: itemText, uri: itemText }))
     .nullish()
     .catch(null),
 });
@@ -466,7 +468,7 @@ function toRelayItems(items: unknown): RelayItem[] {
   const parsed = z.array(itemSchema).safeParse(items);
   if (!parsed.success) return [];
   return parsed.data.map((item) => ({
-    title: item.title ?? "",
+    title: item.title ?? item.value ?? "",
     description: item.description ?? "",
     url: item.link ?? item.media_url ?? "",
     links: (item.actions ?? []).flatMap((action) => (action.uri ? [{ text: action.text ?? "", url: action.uri }] : [])),

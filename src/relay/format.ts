@@ -166,8 +166,9 @@ export function defused(text: string): string {
 }
 
 /**
- * Markdown images, which Discord does not show, as their URL, which it previews: e.g. a LINE
- * sticker, which Chatwoot stores as `![sticker-<id>](<url>)` (Line::IncomingMessageService at v4.18.0).
+ * Markdown images, which Discord's markdown has no syntax for, as their URL, which Discord
+ * previews: e.g. a LINE sticker, which Chatwoot stores as `![sticker-<id>](<url>)`
+ * (Line::IncomingMessageService at v4.18.0).
  */
 function markdownImages(content: string): string {
   return content.replace(/!\[[^\]\n]*\]\((https?:\/\/[^)\s]+)\)/g, "$1");

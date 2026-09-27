@@ -447,9 +447,12 @@ describe("processConversation", () => {
         content_type: "input_select",
         message_type: 1,
         content_attributes: {
+          // An option without a title shows its value; a malformed field does not hide the rest.
           items: [
             { title: "Billing", value: "billing" },
             { title: "Technical", value: "tech" },
+            { value: "other" },
+            { title: 5, value: "five" },
           ],
         },
       },
@@ -488,7 +491,7 @@ describe("processConversation", () => {
         `${sticker}\n-# <@${TRIAGE}>`,
         `📇 Ana Lima: +15550100\n-# <@${TRIAGE}>`,
         `📎 Story mention https://lookaside.example.com/story\n📎 Reel https://lookaside.example.com/reel\n📎 Shared post https://example.com/p\n-# <@${TRIAGE}>`,
-        "Pick a topic\n• Billing\n• Technical",
+        "Pick a topic\n• Billing\n• Technical\n• other\n• five",
         "• [Pro plan](<https://example.com/pro.png>) — $10 a month · [Buy](<https://example.com/buy>)",
         "• [Reset your password](<https://help.example.com/reset>) — Steps",
       ]);
