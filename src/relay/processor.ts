@@ -1,6 +1,7 @@
 // Brings one conversation's forum post up to date from Chatwoot's API: relays every message
-// after the stored cursor, in order, then corrects the post's tags and archived flag. Also
-// removes the Discord messages of a message deleted in Chatwoot.
+// after the stored cursor, in order, then corrects the post's tags and archived flag. Also acts
+// on updated messages: removes the Discord messages of a message deleted in Chatwoot and posts
+// customers' responses to interactive messages.
 
 import { type Budget, BudgetExhaustedError } from "../budget.js";
 import {
@@ -14,6 +15,7 @@ import type { Settings } from "../config.js";
 import { errorFields, log } from "../log.js";
 import type { Store } from "../store.js";
 import type { ForumClient, Relay } from "./relay.js";
+import { interactiveMessage, responseText } from "./response.js";
 import type { RelayConversation } from "./types.js";
 
 const INBOX_CACHE_MS = 24 * 60 * 60 * 1000;
@@ -119,26 +121,76 @@ export async function processConversation(
 }
 
 /**
- * Deletes the Discord messages of a relayed message once Chatwoot's API confirms that the
- * message was deleted (its content attributes carry `deleted: true`).
+ * Acts on a message reported as updated once Chatwoot's API confirms the change: a deleted
+ * message's Discord messages are deleted, and a customer's response to an interactive message
+ * is posted. Nothing is done for a conversation without a post.
  */
-export async function processDeletedMessage(
-  { settings, store, forum, chatwoot }: ProcessorContext,
+export async function processMessageUpdate(
+  context: ProcessorContext,
   accountId: number,
   conversationId: number,
   messageId: number,
 ): Promise<void> {
-  const account = settings.account(accountId);
+  const { settings, store, chatwoot } = context;
   const threadId = store.thread(accountId, conversationId);
-  const parts = store.postedParts(accountId, conversationId, messageId);
-  if (!account || !threadId || parts.length === 0) return;
+  if (!settings.account(accountId) || !threadId) return;
   const message = await chatwoot.getMessage(accountId, conversationId, messageId);
-  if (message?.content_attributes?.deleted !== true) return;
+  if (!message) return;
+  if (message.content_attributes?.deleted === true) {
+    await deleteRelayedMessage(context, accountId, conversationId, messageId, threadId);
+    return;
+  }
+  const text = responseText(interactiveMessage(message.content_type, message.content, message.content_attributes));
+  if (text) await postResponse(context, accountId, conversationId, messageId, threadId, text);
+}
+
+async function deleteRelayedMessage(
+  { settings, store, forum }: ProcessorContext,
+  accountId: number,
+  conversationId: number,
+  messageId: number,
+  threadId: string,
+): Promise<void> {
+  const account = settings.account(accountId);
+  const parts = store.postedParts(accountId, conversationId, messageId);
+  if (!account || parts.length === 0) return;
   for (const discordId of parts) {
     await forum.deleteMessage(account.forumChannelId, threadId, discordId);
     store.deletePostedPart(accountId, conversationId, messageId, discordId);
   }
   log.info("deleted message removed from post", { accountId, conversationId, messageId, parts: parts.length });
+}
+
+/**
+ * Posts a response once: Chatwoot lets a customer submit again (a CSAT rating can be changed
+ * for 14 days), and only a changed response is posted again. Webhook payloads do not say what
+ * changed, so other updates of the message (such as its read status) end here and post nothing.
+ * A blocked contact's response is not posted, like their messages.
+ */
+async function postResponse(
+  { store, relay, chatwoot }: ProcessorContext,
+  accountId: number,
+  conversationId: number,
+  messageId: number,
+  threadId: string,
+  text: string,
+): Promise<void> {
+  const digest = await sha256(text);
+  if (store.postedResponse(accountId, conversationId, messageId) === digest) return;
+  const raw = await chatwoot.getConversation(accountId, conversationId);
+  if (!raw) return; // Deleted: the conversation's own job closes the post.
+  const conversation = toRelayConversation(conversationId, raw);
+  if (conversation.contact.blocked) return;
+  if (!(await relay.postResponse(accountId, conversation, threadId, text))) return;
+  store.savePostedResponse(accountId, conversationId, messageId, digest);
+  log.info("response posted", { accountId, conversationId, messageId });
+  const current = store.thread(accountId, conversationId);
+  if (current) await relay.sync(accountId, conversation, current);
+}
+
+async function sha256(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 /**

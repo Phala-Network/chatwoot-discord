@@ -8,7 +8,15 @@ describe("Store", () => {
     await runInDurableObject(env.HUB.getByName("store-migration"), (_instance, state) => {
       const sql = state.storage.sql;
       // Rebuild the database as version 0.1.0 left it.
-      for (const table of ["conversations", "jobs", "deliveries", "counters", "cache", "posted_messages"]) {
+      for (const table of [
+        "conversations",
+        "jobs",
+        "deliveries",
+        "counters",
+        "cache",
+        "posted_messages",
+        "submitted_responses",
+      ]) {
         sql.exec(`DROP TABLE IF EXISTS ${table}`);
       }
       sql.exec(MIGRATIONS[0] ?? "");
@@ -35,8 +43,12 @@ describe("Store", () => {
       store.savePostedPart(3, 12, 501, 0, "m1");
       store.savePostedPart(3, 12, 501, 1, "m2");
       expect(store.postedParts(3, 12, 501)).toEqual(["m1", "m2"]);
+      store.savePostedResponse(3, 12, 502, "digest-1");
+      store.savePostedResponse(3, 12, 502, "digest-2");
+      expect(store.postedResponse(3, 12, 502)).toBe("digest-2");
       store.forgetThread(3, 12);
       expect(store.postedParts(3, 12, 501)).toEqual([]);
+      expect(store.postedResponse(3, 12, 502)).toBeUndefined();
       expect(store.conversation(3, 12)?.cursor).toBe(500);
     });
   });

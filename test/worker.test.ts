@@ -31,6 +31,7 @@ interface FakeConversation {
     id: number;
     content: string;
     message_type: number;
+    content_type?: string;
     private?: boolean;
     sender?: Record<string, unknown>;
     content_attributes?: Record<string, unknown>;
@@ -506,6 +507,79 @@ describe("worker", () => {
     const deletes = world.sent("DELETE", /^\/api\/v10\/webhooks\/1\/tok\/messages\//);
     expect(deletes.map((request) => request.url.pathname.split("/").at(-1))).toEqual(["m-2"]);
     expect(deletes[0]?.url.searchParams.get("thread_id")).toBe(world.webhookPosts()[1]?.thread);
+  });
+
+  it("posts a customer's response to an interactive message once, after Chatwoot's API confirms it", async () => {
+    const question = { id: 1402, content: "How did we do?", message_type: 3, content_type: "input_csat" };
+    world.conversation(23, [{ id: 1401, content: "thanks, all good", message_type: 0 }, question], {}, "resolved");
+    await chatwootWebhook(created(23));
+    await drain();
+    const thread = world.webhookPosts()[1]?.thread;
+    const posts = world.webhookPosts().length;
+    const rated = (rating: number) => ({ submitted_values: { csat_survey_response: { rating } } });
+    const updated = (rating: number) => ({
+      ...created(23),
+      event: "message_updated",
+      id: 1402,
+      content_type: "input_csat",
+      content_attributes: rated(rating),
+    });
+
+    // The webhook claims a response the API does not have yet: nothing is posted.
+    await chatwootWebhook(updated(5));
+    await drain();
+    expect(world.webhookPosts()).toHaveLength(posts);
+
+    Object.assign(question, { content_attributes: rated(5) });
+    await chatwootWebhook(updated(5));
+    await drain();
+    // Another update of the same response (e.g. its status) is not posted again.
+    await chatwootWebhook(updated(5));
+    await drain();
+    expect(world.webhookPosts().slice(posts)).toEqual([
+      {
+        thread,
+        body: {
+          content: "How did we do?\n\n**CSAT:**\n• Rating: 5",
+          username: "Jane Doe",
+          avatar_url: "https://gravatar.com/avatar/?d=mp&f=y&s=256",
+          allowed_mentions: { parse: [] },
+        },
+      },
+    ]);
+    // Posting unarchived the resolved post; it is archived again.
+    expect(JSON.parse(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).at(-1)?.body ?? "")).toEqual({
+      archived: true,
+    });
+
+    // A changed response is posted again.
+    Object.assign(question, { content_attributes: rated(4) });
+    await chatwootWebhook(updated(4));
+    await drain();
+    expect(
+      world
+        .webhookPosts()
+        .slice(posts)
+        .map((post) => post.body.content),
+    ).toEqual(["How did we do?\n\n**CSAT:**\n• Rating: 5", "How did we do?\n\n**CSAT:**\n• Rating: 4"]);
+  });
+
+  it("runs deletion jobs queued by earlier versions", async () => {
+    world.conversation(24, [{ id: 1501, content: "oops", message_type: 1 }]);
+    await chatwootWebhook(created(24));
+    await drain();
+    const deleted = world.conversations.get(24)?.messages[0];
+    if (deleted) Object.assign(deleted, { content: "This message was deleted", content_attributes: { deleted: true } });
+    await runInDurableObject(hub(), async (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO jobs (key, priority, payload, not_before, created_at) VALUES (?, 3, ?, 0, 0)",
+        "deleted-message:3:24:1501",
+        JSON.stringify({ type: "deleted-message", accountId: 3, conversationId: 24, messageId: 1501 }),
+      );
+      await state.storage.setAlarm(Date.now());
+    });
+    await drain();
+    expect(world.sent("DELETE", /^\/api\/v10\/webhooks\/1\/tok\/messages\//)).toHaveLength(1);
   });
 
   it("closes the post of a conversation deleted in Chatwoot", async () => {

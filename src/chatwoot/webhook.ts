@@ -4,6 +4,8 @@
 // Account webhooks are sent once (Webhooks::Trigger logs failures and WebhookJob does not
 // retry), so deliveries need no dedupe; the relay is idempotent anyway (see relay/processor.ts).
 
+import { hasResponse, interactiveMessage } from "../relay/response.js";
+
 export const TIMESTAMP_TOLERANCE_SECONDS = 300;
 
 const encoder = new TextEncoder();
@@ -37,13 +39,18 @@ const CONVERSATION_EVENTS = new Set(["conversation_updated", "conversation_statu
 
 export type WebhookTarget =
   | { type: "conversation"; accountId: number; conversationId: number }
-  | { type: "deleted-message"; accountId: number; conversationId: number; messageId: number };
+  | { type: "message-updated"; accountId: number; conversationId: number; messageId: number };
 
 /**
  * What an event asks the relay to do, or undefined for events it ignores. Message payloads carry
- * `conversation.id` (the display id); conversation payloads are the conversation. Deleting a
- * message updates it with `content_attributes.deleted` (MessagesController#destroy); other
- * message updates are not relayed.
+ * `conversation.id` (the display id); conversation payloads are the conversation.
+ *
+ * Two message updates are relayed (the payload is Message#webhook_data, with `content_type` and
+ * `content_attributes`): a deletion, which sets `content_attributes.deleted`
+ * (MessagesController#destroy), and a customer's response to an interactive message, which sets
+ * `submitted_values` or `submitted_email` (Widget::MessagesController#update). The payload does
+ * not say what changed, so any update of a message with a response is queued; the job posts a
+ * response only once.
  */
 export function eventTarget(payload: unknown): WebhookTarget | undefined {
   if (!isRecord(payload) || typeof payload.event !== "string") return undefined;
@@ -55,11 +62,12 @@ export function eventTarget(payload: unknown): WebhookTarget | undefined {
   const conversationId = isRecord(payload.conversation) ? payload.conversation.id : undefined;
   if (!isPositiveInteger(conversationId)) return undefined;
   if (payload.event === "message_created") return { type: "conversation", accountId, conversationId };
+  if (payload.event !== "message_updated" || !isPositiveInteger(payload.id)) return undefined;
   const deleted = isRecord(payload.content_attributes) && payload.content_attributes.deleted === true;
-  if (payload.event === "message_updated" && deleted && isPositiveInteger(payload.id)) {
-    return { type: "deleted-message", accountId, conversationId, messageId: payload.id };
-  }
-  return undefined;
+  const responded = hasResponse(interactiveMessage(payload.content_type, payload.content, payload.content_attributes));
+  return deleted || responded
+    ? { type: "message-updated", accountId, conversationId, messageId: payload.id }
+    : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

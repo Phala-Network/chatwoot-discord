@@ -16,7 +16,7 @@ export interface RelayConversation {
   status?: string | undefined;
   channel?: string | null;
   inboxId?: number | null;
-  contact: { name?: string | null; email?: string | null; blocked?: boolean };
+  contact: { name?: string | null; email?: string | null; blocked?: boolean; avatarUrl?: string | null };
   assignee?: RelayAssignee | null;
   customAttributes: Record<string, unknown>;
 }

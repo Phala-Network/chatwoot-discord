@@ -426,4 +426,36 @@ describe("Relay", () => {
     expect(forum.calls.at(-1)?.[0]).toBe("thread-1");
     expect(forum.contents().at(-1)).toContain("message 555 could not be relayed");
   });
+
+  it("posts a response under the contact's name and avatar, capped with a link to the full text", async () => {
+    await relay.relay(message());
+    const contact = { name: "Jane Doe", avatarUrl: "https://cdn.example.com/jane.png" };
+    const conversation = message({ conversation: { contact } }).conversation;
+    expect(await relay.postResponse(3, conversation, "thread-1", "Pick one\n\n**Response:** A")).toBe(true);
+    expect(forum.calls.at(-1)).toEqual([
+      "thread-1",
+      {
+        content: "Pick one\n\n**Response:** A",
+        username: "Jane Doe",
+        avatar_url: "https://cdn.example.com/jane.png",
+        allowed_mentions: { parse: [] },
+      },
+    ]);
+
+    const long = `Question\n\n**Responses:**\n${"• Notes: text\n".repeat(300)}`;
+    await relay.postResponse(3, conversation, "thread-1", long);
+    const content = forum.contents().at(-1) ?? "";
+    expect(content.length).toBeLessThanOrEqual(CONTENT_LIMIT);
+    expect(content.startsWith("Question\n\n**Responses:**\n• Notes: text\n")).toBe(true);
+    expect(content.split("\n").at(-1)).toBe(
+      `-# Response truncated (${long.length} characters). Full text: <https://chatwoot.example.com/app/accounts/3/conversations/12>`,
+    );
+  });
+
+  it("forgets a post deleted in Discord instead of posting a response", async () => {
+    await relay.relay(message());
+    forum.failThreadWith = "gone";
+    expect(await relay.postResponse(3, message().conversation, "thread-1", "**Email:** a@example.com")).toBe(false);
+    expect(store.thread(3, 12)).toBeUndefined();
+  });
 });

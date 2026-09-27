@@ -21,7 +21,7 @@ import { loadSettings, type Settings } from "./config.js";
 import { DiscordForum } from "./discord/forum.js";
 import { DiscordRest } from "./discord/rest.js";
 import { errorFields, log } from "./log.js";
-import { latestMessageId, processConversation, processDeletedMessage } from "./relay/processor.js";
+import { latestMessageId, processConversation, processMessageUpdate } from "./relay/processor.js";
 import { Relay } from "./relay/relay.js";
 import { type Job, Store } from "./store.js";
 
@@ -32,11 +32,13 @@ const payloadSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("command"), job: commandJobSchema }),
   z.object({ type: z.literal("sweep"), accountId: id }),
   z.object({ type: z.literal("conversation"), accountId: id, conversationId: id }),
+  z.object({ type: z.literal("message-updated"), accountId: id, conversationId: id, messageId: id }),
+  // Queued by earlier versions; runs as "message-updated".
   z.object({ type: z.literal("deleted-message"), accountId: id, conversationId: id, messageId: id }),
 ]);
 type JobPayload = z.infer<typeof payloadSchema>;
 
-const PRIORITY = { command: 0, sweep: 1, conversation: 2, "deleted-message": 3 } as const;
+const PRIORITY = { command: 0, sweep: 1, conversation: 2, "message-updated": 3, "deleted-message": 3 } as const;
 /** Requests a job may need before it can start without being cut short. */
 const COMMAND_BUDGET = 20;
 const MIN_BUDGET = 2;
@@ -67,9 +69,12 @@ export class Hub extends DurableObject<Env> {
     await this.schedule();
   }
 
-  /** Queues a check of a message reported as deleted, which removes its Discord messages. */
-  async enqueueDeletedMessage(accountId: number, conversationId: number, messageId: number): Promise<void> {
-    this.enqueue({ type: "deleted-message", accountId, conversationId, messageId });
+  /**
+   * Queues a check of a message reported as deleted (its Discord messages are removed) or as
+   * answered by the customer (the response is posted).
+   */
+  async enqueueMessageUpdate(accountId: number, conversationId: number, messageId: number): Promise<void> {
+    this.enqueue({ type: "message-updated", accountId, conversationId, messageId });
     await this.schedule();
   }
 
@@ -147,8 +152,9 @@ export class Hub extends DurableObject<Env> {
           if (outcome === "done") this.store.completeJob(job);
           return outcome;
         }
+        case "message-updated":
         case "deleted-message":
-          await processDeletedMessage(services, payload.accountId, payload.conversationId, payload.messageId);
+          await processMessageUpdate(services, payload.accountId, payload.conversationId, payload.messageId);
           this.store.completeJob(job);
           return "done";
       }
@@ -274,7 +280,7 @@ export class Hub extends DurableObject<Env> {
           ? `sweep:${payload.accountId}`
           : payload.type === "conversation"
             ? `conversation:${payload.accountId}:${payload.conversationId}`
-            : `deleted-message:${payload.accountId}:${payload.conversationId}:${payload.messageId}`;
+            : `${payload.type}:${payload.accountId}:${payload.conversationId}:${payload.messageId}`;
     this.store.enqueue(key, PRIORITY[payload.type], JSON.stringify(payload));
   }
 

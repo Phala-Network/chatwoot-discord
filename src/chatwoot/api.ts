@@ -33,16 +33,24 @@ const text = z.string().nullish();
  * The spec's `message` schema describes a single `attachment` object and leaves `sender` and
  * `content_attributes` untyped, while the API returns `attachments[]` (app/views/api/v1/models/
  * _message.json.jbuilder), a sender with `name`/`email`/`type`/`thumbnail`, and content
- * attributes such as `email.subject` and `deleted` (app/models/message.rb). Only those fields
- * are read.
+ * attributes such as `email.subject`, `deleted`, and the response to an interactive message
+ * (`submitted_values`, `submitted_email`, `items`; app/models/message.rb). Only those fields
+ * are read; the shape of a response is checked where it is formatted (relay/response.ts).
  */
 const messageSchema = z.object({
   id: z.number(),
   content: text,
   message_type: z.number(),
+  content_type: text,
   private: z.boolean().nullish(),
   content_attributes: z
-    .object({ email: z.object({ subject: text }).nullish(), deleted: z.boolean().nullish() })
+    .object({
+      email: z.object({ subject: text }).nullish(),
+      deleted: z.boolean().nullish(),
+      submitted_values: z.unknown().optional(),
+      submitted_email: z.unknown().optional(),
+      items: z.unknown().optional(),
+    })
     .nullish()
     .catch(null),
   sender: z.object({ name: text, email: text, type: text, thumbnail: text }).nullish(),
@@ -270,6 +278,7 @@ export function toRelayConversation(conversationId: number, conversation: Chatwo
       name: meta?.sender?.name ?? null,
       email: meta?.sender?.email ?? null,
       blocked: meta?.sender?.blocked ?? false,
+      avatarUrl: meta?.sender?.thumbnail ?? null,
     },
     assignee: assignee ? { id: assignee.id, name: assignee.name, email: assignee.email } : null,
     customAttributes: conversation.custom_attributes ?? {},

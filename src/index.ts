@@ -59,8 +59,8 @@ app.post("/chatwoot/webhook", bodyLimit({ maxSize: 2 * 1024 * 1024 }), async (c)
   }
 
   const stub = hub(c.env);
-  if (target.type === "deleted-message") {
-    await stub.enqueueDeletedMessage(target.accountId, target.conversationId, target.messageId);
+  if (target.type === "message-updated") {
+    await stub.enqueueMessageUpdate(target.accountId, target.conversationId, target.messageId);
   } else {
     await stub.enqueueConversation(target.accountId, target.conversationId);
   }
