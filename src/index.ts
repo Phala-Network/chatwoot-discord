@@ -58,12 +58,13 @@ app.post("/chatwoot/webhook", bodyLimit({ maxSize: 2 * 1024 * 1024 }), async (c)
     return c.text("account does not match the webhook secret", 403);
   }
 
-  const result = await hub(c.env).enqueueConversation(
-    target.accountId,
-    target.conversationId,
-    c.req.header("x-chatwoot-delivery") || undefined,
-  );
-  return c.json({ ok: true, duplicate: result === "duplicate" });
+  const stub = hub(c.env);
+  if (target.type === "deleted-message") {
+    await stub.enqueueDeletedMessage(target.accountId, target.conversationId, target.messageId);
+  } else {
+    await stub.enqueueConversation(target.accountId, target.conversationId);
+  }
+  return c.json({ ok: true });
 });
 
 app.post("/discord/interactions", bodyLimit({ maxSize: 1024 * 1024 }), async (c) => {
@@ -77,8 +78,8 @@ app.post("/discord/interactions", bodyLimit({ maxSize: 1024 * 1024 }), async (c)
 
   let interaction: APIInteraction;
   try {
-    // Discord signed this body, so it is a well-formed interaction.
-    interaction = JSON.parse(new TextDecoder().decode(body)) as APIInteraction;
+    // Discord signed this body, so it is a well-formed interaction (typed, not validated).
+    interaction = JSON.parse(new TextDecoder().decode(body));
   } catch {
     return c.text("bad request", 400);
   }

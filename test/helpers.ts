@@ -40,6 +40,8 @@ export function message(overrides: Overrides = {}): RelayMessage {
 export class MemoryStore implements RelayStore {
   threads = new Map<string, string>();
   states = new Map<string, string>();
+  announced = new Map<string, string>();
+  parts = new Map<string, string[]>();
   counters = new Map<string, number>();
   seen = new Set<string>();
 
@@ -55,9 +57,25 @@ export class MemoryStore implements RelayStore {
   saveState(a: number, c: number, state: string) {
     this.states.set(`${a}:${c}`, state);
   }
+  announcedAssignee(a: number, c: number) {
+    return this.announced.get(`${a}:${c}`);
+  }
+  saveAnnouncedAssignee(a: number, c: number, assignee: string) {
+    this.announced.set(`${a}:${c}`, assignee);
+  }
+  postedParts(a: number, c: number, messageId: number) {
+    return this.parts.get(`${a}:${c}:${messageId}`) ?? [];
+  }
+  savePostedPart(a: number, c: number, messageId: number, part: number, discordId: string) {
+    const parts = this.postedParts(a, c, messageId);
+    parts[part] = discordId;
+    this.parts.set(`${a}:${c}:${messageId}`, parts);
+  }
   forgetThread(a: number, c: number) {
     this.threads.delete(`${a}:${c}`);
     this.states.delete(`${a}:${c}`);
+    this.announced.delete(`${a}:${c}`);
+    for (const key of this.parts.keys()) if (key.startsWith(`${a}:${c}:`)) this.parts.delete(key);
   }
   firstAttempt(name: string) {
     if (this.seen.has(name)) return false;
@@ -75,14 +93,25 @@ export const TAGS: Record<string, string> = {
   acme: "t-acme",
   globex: "t-globex",
   open: "t-open",
+  pending: "t-pending",
   resolved: "t-resolved",
 };
 
-/** Records webhook executions like Discord would: a new post gets channel id "thread-<n>". */
+type ThreadPatch = { archived: boolean; applied_tags?: string[] };
+
+/**
+ * Records webhook executions like Discord would: a new post gets channel id "thread-<n>" and
+ * every message id "message-<n>". Like Discord, posting into an archived post unarchives it, and
+ * an archived post's tags cannot change unless the same update unarchives it.
+ */
 export class FakeForum implements ForumClient {
   calls: Array<[string | undefined, WebhookMessage]> = [];
-  patches: Array<[string, { applied_tags: string[]; archived: boolean }]> = [];
+  patches: Array<[string, ThreadPatch]> = [];
+  deleted: string[] = [];
+  archived = new Set<string>();
   failThreadWith: "gone" | "error" | undefined;
+  /** Fails the next execution into a thread after this many succeed. */
+  failAfter: number | undefined;
 
   constructor(
     public tags: Record<string, string> = TAGS,
@@ -90,17 +119,34 @@ export class FakeForum implements ForumClient {
   ) {}
 
   async execute(_forum: string, payload: WebhookMessage, threadId?: string) {
+    if (threadId && this.failAfter !== undefined) {
+      if (this.failAfter === 0) {
+        this.failAfter = undefined;
+        throw new Error("Discord HTTP 500");
+      }
+      this.failAfter -= 1;
+    }
     if (threadId && this.failThreadWith) {
       const failure = this.failThreadWith;
       this.failThreadWith = undefined;
       throw failure === "gone" ? new UnknownThreadError(threadId) : new Error("Discord HTTP 500");
     }
     this.calls.push([threadId, payload]);
-    return { channelId: threadId ?? `thread-${this.calls.length}` };
+    if (threadId) this.archived.delete(threadId);
+    return { channelId: threadId ?? `thread-${this.calls.length}`, messageId: `message-${this.calls.length}` };
   }
 
-  async updatePost(threadId: string, patch: { applied_tags: string[]; archived: boolean }) {
+  async updateThread(threadId: string, patch: ThreadPatch) {
+    if (this.archived.has(threadId) && patch.archived !== false) {
+      throw new Error("Discord HTTP 400: Thread is archived");
+    }
     this.patches.push([threadId, patch]);
+    if (patch.archived) this.archived.add(threadId);
+    else this.archived.delete(threadId);
+  }
+
+  async deleteMessage(_forum: string, _threadId: string, messageId: string) {
+    this.deleted.push(messageId);
   }
 
   async tagIds(_forum: string, names: ReadonlyArray<string | undefined>) {
@@ -127,7 +173,6 @@ export class FakeForum implements ForumClient {
 export function testSettings(overrides: Record<string, unknown> = {}): Settings {
   const config = configSchema.parse({
     chatwoot: { baseUrl: "https://chatwoot.example.com" },
-    discord: { applicationId: "100000000000000001" },
     accounts: [
       { id: 3, name: "Acme", forumChannelId: FORUM },
       { id: 1, name: "Globex", forumChannelId: FORUM },

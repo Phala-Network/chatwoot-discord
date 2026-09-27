@@ -1,7 +1,8 @@
 // Chatwoot account webhooks. Verified against Chatwoot v4.18.0 lib/webhooks/trigger.rb:
 //   X-Chatwoot-Timestamp: unix seconds
 //   X-Chatwoot-Signature: "sha256=" + hex(HMAC-SHA256(secret, "#{timestamp}.#{raw body}"))
-//   X-Chatwoot-Delivery:  a UUID per delivery (app/listeners/webhook_listener.rb)
+// Account webhooks are sent once (Webhooks::Trigger logs failures and WebhookJob does not
+// retry), so deliveries need no dedupe; the relay is idempotent anyway (see relay/processor.ts).
 
 export const TIMESTAMP_TOLERANCE_SECONDS = 300;
 
@@ -32,22 +33,33 @@ export async function verifyChatwootSignature(
   return crypto.subtle.verify("HMAC", key, hexToBytes(hex), signed);
 }
 
-const CONVERSATION_EVENTS = new Set(["conversation_created", "conversation_updated", "conversation_status_changed"]);
-const MESSAGE_EVENTS = new Set(["message_created", "message_updated"]);
+const CONVERSATION_EVENTS = new Set(["conversation_updated", "conversation_status_changed"]);
+
+export type WebhookTarget =
+  | { type: "conversation"; accountId: number; conversationId: number }
+  | { type: "deleted-message"; accountId: number; conversationId: number; messageId: number };
 
 /**
- * The account and conversation (display id) an event concerns, or undefined for events the relay
- * ignores. Message payloads carry `conversation.id`; conversation payloads are the conversation.
+ * What an event asks the relay to do, or undefined for events it ignores. Message payloads carry
+ * `conversation.id` (the display id); conversation payloads are the conversation. Deleting a
+ * message updates it with `content_attributes.deleted` (MessagesController#destroy); other
+ * message updates are not relayed.
  */
-export function eventTarget(payload: unknown): { accountId: number; conversationId: number } | undefined {
+export function eventTarget(payload: unknown): WebhookTarget | undefined {
   if (!isRecord(payload) || typeof payload.event !== "string") return undefined;
   const accountId = isRecord(payload.account) ? payload.account.id : undefined;
-  let conversationId: unknown;
-  if (MESSAGE_EVENTS.has(payload.event))
-    conversationId = isRecord(payload.conversation) ? payload.conversation.id : undefined;
-  else if (CONVERSATION_EVENTS.has(payload.event)) conversationId = payload.id;
-  if (!isPositiveInteger(accountId) || !isPositiveInteger(conversationId)) return undefined;
-  return { accountId, conversationId };
+  if (!isPositiveInteger(accountId)) return undefined;
+  if (CONVERSATION_EVENTS.has(payload.event)) {
+    return isPositiveInteger(payload.id) ? { type: "conversation", accountId, conversationId: payload.id } : undefined;
+  }
+  const conversationId = isRecord(payload.conversation) ? payload.conversation.id : undefined;
+  if (!isPositiveInteger(conversationId)) return undefined;
+  if (payload.event === "message_created") return { type: "conversation", accountId, conversationId };
+  const deleted = isRecord(payload.content_attributes) && payload.content_attributes.deleted === true;
+  if (payload.event === "message_updated" && deleted && isPositiveInteger(payload.id)) {
+    return { type: "deleted-message", accountId, conversationId, messageId: payload.id };
+  }
+  return undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -2,13 +2,21 @@
 // each sender's name.
 
 import {
-  type APIChannel,
-  type APIMessage,
-  type APIWebhook,
+  type RESTDeleteAPIWebhookWithTokenMessageQuery,
+  type RESTDeleteAPIWebhookWithTokenMessageResult,
+  type RESTGetAPIChannelResult,
+  type RESTGetAPIChannelWebhooksResult,
   type RESTPatchAPIChannelJSONBody,
+  type RESTPatchAPIChannelResult,
+  type RESTPostAPIChannelWebhookJSONBody,
+  type RESTPostAPIChannelWebhookResult,
+  type RESTPostAPIWebhookWithTokenJSONBody,
+  type RESTPostAPIWebhookWithTokenQuery,
+  type RESTPostAPIWebhookWithTokenWaitResult,
   Routes,
   WebhookType,
 } from "discord-api-types/v10";
+import { z } from "zod";
 import { type ForumClient, UnknownThreadError, type WebhookMessage } from "../relay/relay.js";
 import { DiscordHttpError, type DiscordRest } from "./rest.js";
 
@@ -16,6 +24,7 @@ export const WEBHOOK_NAME = "Chatwoot";
 const MAX_TAGS = 5;
 const TAG_CACHE_MS = 10 * 60 * 1000;
 const UNKNOWN_WEBHOOK = 10015;
+const UNKNOWN_MESSAGE = 10008;
 
 export interface Cache {
   get(key: string): string | undefined;
@@ -24,10 +33,8 @@ export interface Cache {
   delete(key: string): void;
 }
 
-interface ForumInfo {
-  guildId: string;
-  tags: Record<string, string>;
-}
+const forumInfoSchema = z.object({ guildId: z.string(), tags: z.record(z.string(), z.string()) });
+type ForumInfo = z.infer<typeof forumInfoSchema>;
 
 export class DiscordForum implements ForumClient {
   constructor(
@@ -35,17 +42,23 @@ export class DiscordForum implements ForumClient {
     private readonly cache: Cache,
   ) {}
 
-  async execute(forumChannelId: string, message: WebhookMessage, threadId?: string): Promise<{ channelId: string }> {
+  async execute(
+    forumChannelId: string,
+    message: WebhookMessage,
+    threadId?: string,
+  ): Promise<{ channelId: string; messageId: string }> {
     const webhook = await this.webhook(forumChannelId);
-    const query = new URLSearchParams({ wait: "true" });
-    if (threadId) query.set("thread_id", threadId);
     try {
-      const sent = (await this.rest.post(Routes.webhook(webhook.id, webhook.token), {
+      const sent = await this.rest.post<
+        RESTPostAPIWebhookWithTokenWaitResult,
+        RESTPostAPIWebhookWithTokenJSONBody,
+        RESTPostAPIWebhookWithTokenQuery
+      >(Routes.webhook(webhook.id, webhook.token), {
         body: message,
-        query,
+        query: { wait: true, ...(threadId ? { thread_id: threadId } : {}) },
         auth: false,
-      })) as APIMessage;
-      return { channelId: sent.channel_id };
+      });
+      return { channelId: sent.channel_id, messageId: sent.id };
     } catch (error) {
       if (error instanceof DiscordHttpError && error.status === 404) {
         if (error.code === UNKNOWN_WEBHOOK) {
@@ -59,9 +72,26 @@ export class DiscordForum implements ForumClient {
     }
   }
 
-  async updatePost(threadId: string, patch: { applied_tags: string[]; archived: boolean }): Promise<void> {
-    const body: RESTPatchAPIChannelJSONBody = patch;
-    await this.rest.patch(Routes.channel(threadId), { body });
+  async updateThread(threadId: string, patch: { archived: boolean; applied_tags?: string[] }): Promise<void> {
+    await this.rest.patch<RESTPatchAPIChannelResult, RESTPatchAPIChannelJSONBody>(Routes.channel(threadId), {
+      body: patch,
+    });
+  }
+
+  async deleteMessage(forumChannelId: string, threadId: string, messageId: string): Promise<void> {
+    const webhook = await this.webhook(forumChannelId);
+    try {
+      await this.rest.delete<RESTDeleteAPIWebhookWithTokenMessageResult, RESTDeleteAPIWebhookWithTokenMessageQuery>(
+        Routes.webhookMessage(webhook.id, webhook.token, messageId),
+        { query: { thread_id: threadId }, auth: false },
+      );
+    } catch (error) {
+      if (error instanceof DiscordHttpError && error.status === 404) {
+        if (error.code === UNKNOWN_MESSAGE) return;
+        if (error.code === UNKNOWN_WEBHOOK) this.cache.delete(webhookKey(forumChannelId));
+      }
+      throw error;
+    }
   }
 
   async tagIds(forumChannelId: string, names: ReadonlyArray<string | undefined>): Promise<string[]> {
@@ -75,7 +105,7 @@ export class DiscordForum implements ForumClient {
 
   async threadExists(forumChannelId: string, threadId: string): Promise<boolean> {
     try {
-      const channel = (await this.rest.get(Routes.channel(threadId))) as APIChannel;
+      const channel = await this.rest.get<RESTGetAPIChannelResult>(Routes.channel(threadId));
       return "parent_id" in channel && channel.parent_id === forumChannelId;
     } catch (error) {
       if (error instanceof DiscordHttpError && (error.status === 404 || error.status === 403)) return false;
@@ -91,18 +121,18 @@ export class DiscordForum implements ForumClient {
   /** Reuses the forum's "Chatwoot" webhook, or creates it. */
   private async webhook(forumChannelId: string): Promise<{ id: string; token: string }> {
     const key = webhookKey(forumChannelId);
-    const cached = this.cache.get(key);
-    if (cached) {
-      const [id, token] = cached.split(":");
-      if (id && token) return { id, token };
-    }
-    const hooks = (await this.rest.get(Routes.channelWebhooks(forumChannelId))) as APIWebhook[];
+    const [id, token] = this.cache.get(key)?.split(":") ?? [];
+    if (id && token) return { id, token };
+    const hooks = await this.rest.get<RESTGetAPIChannelWebhooksResult>(Routes.channelWebhooks(forumChannelId));
     const existing = hooks.find(
       (hook) => hook.type === WebhookType.Incoming && hook.name === WEBHOOK_NAME && hook.token,
     );
     const hook =
       existing ??
-      ((await this.rest.post(Routes.channelWebhooks(forumChannelId), { body: { name: WEBHOOK_NAME } })) as APIWebhook);
+      (await this.rest.post<RESTPostAPIChannelWebhookResult, RESTPostAPIChannelWebhookJSONBody>(
+        Routes.channelWebhooks(forumChannelId),
+        { body: { name: WEBHOOK_NAME } },
+      ));
     if (!hook.token) throw new Error("Discord returned a webhook without a token");
     this.cache.set(key, `${hook.id}:${hook.token}`);
     return { id: hook.id, token: hook.token };
@@ -114,9 +144,9 @@ export class DiscordForum implements ForumClient {
    */
   private async channel(forumChannelId: string): Promise<ForumInfo> {
     const key = `forum:${forumChannelId}:channel`;
-    const cached = this.cache.get(key);
-    if (cached) return JSON.parse(cached) as ForumInfo;
-    const channel = (await this.rest.get(Routes.channel(forumChannelId))) as APIChannel;
+    const cached = forumInfoSchema.safeParse(parseJson(this.cache.get(key)));
+    if (cached.success) return cached.data;
+    const channel = await this.rest.get<RESTGetAPIChannelResult>(Routes.channel(forumChannelId));
     const info: ForumInfo = { guildId: "guild_id" in channel ? (channel.guild_id ?? "") : "", tags: {} };
     if ("available_tags" in channel) {
       for (const tag of channel.available_tags) info.tags[tag.name.toLowerCase()] = tag.id;
@@ -128,4 +158,13 @@ export class DiscordForum implements ForumClient {
 
 function webhookKey(forumChannelId: string): string {
   return `forum:${forumChannelId}:webhook`;
+}
+
+function parseJson(value: string | undefined): unknown {
+  if (value === undefined) return undefined;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
 }

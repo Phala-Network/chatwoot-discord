@@ -1,8 +1,10 @@
-// Minimal Discord REST client over fetch (Workers-native). Follows Discord's documented rate
-// limits (https://discord.com/developers/docs/topics/rate-limits): on 429 it waits `retry_after`
-// and retries, and it waits out a bucket whose X-RateLimit-Remaining reached 0 before reusing
-// the same route. Waits are capped so an invocation never sleeps for long; longer limits fail
-// the job, which then retries with backoff.
+// Minimal Discord REST client over fetch (Workers-native). Each call names its discord-api-types
+// request and result types. Follows Discord's documented rate limits
+// (https://discord.com/developers/docs/topics/rate-limits): per-route limits are tracked by
+// their X-RateLimit-Bucket (plus the route's top-level resource), a bucket whose
+// X-RateLimit-Remaining reached 0 is waited out, and a 429 is retried after `retry_after`,
+// pausing every route when it is the global limit. Waits are capped so an invocation never
+// sleeps for long; longer limits fail the job, which then retries with backoff.
 
 import type { Fetch } from "../chatwoot/api.js";
 
@@ -23,15 +25,19 @@ export class DiscordHttpError extends Error {
   }
 }
 
-export interface DiscordRequest {
-  body?: unknown;
-  query?: URLSearchParams;
+export interface DiscordRequest<Body = never, Query extends object = never> {
+  body?: Body;
+  query?: Query;
   /** Webhook and interaction-token routes authenticate by URL; send no bot token. */
   auth?: boolean;
 }
 
 export class DiscordRest {
-  private readonly blockedUntil = new Map<string, number>();
+  /** Route -> the rate limit bucket Discord reported for it. */
+  private readonly buckets = new Map<string, string>();
+  /** Bucket key -> when it has requests again (ms since the epoch). */
+  private readonly resets = new Map<string, number>();
+  private globalReset = 0;
 
   constructor(
     private readonly token: string | undefined,
@@ -39,25 +45,40 @@ export class DiscordRest {
     private readonly sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   ) {}
 
-  get(path: string, request: DiscordRequest = {}): Promise<unknown> {
+  get<Result, Query extends object = never>(path: string, request?: DiscordRequest<never, Query>): Promise<Result> {
     return this.request("GET", path, request);
   }
 
-  post(path: string, request: DiscordRequest = {}): Promise<unknown> {
+  post<Result, Body, Query extends object = never>(
+    path: string,
+    request: DiscordRequest<Body, Query>,
+  ): Promise<Result> {
     return this.request("POST", path, request);
   }
 
-  patch(path: string, request: DiscordRequest = {}): Promise<unknown> {
+  patch<Result, Body>(path: string, request: DiscordRequest<Body>): Promise<Result> {
     return this.request("PATCH", path, request);
   }
 
-  put(path: string, request: DiscordRequest = {}): Promise<unknown> {
+  put<Result, Body>(path: string, request: DiscordRequest<Body>): Promise<Result> {
     return this.request("PUT", path, request);
   }
 
-  private async request(method: string, path: string, request: DiscordRequest): Promise<unknown> {
-    const route = `${method} ${path}`;
-    const url = `${API_BASE}${path}${request.query ? `?${request.query.toString()}` : ""}`;
+  delete<Result, Query extends object = never>(path: string, request?: DiscordRequest<never, Query>): Promise<Result> {
+    return this.request("DELETE", path, request);
+  }
+
+  private async request<Result, Body, Query extends object>(
+    method: string,
+    path: string,
+    request: DiscordRequest<Body, Query> = {},
+  ): Promise<Result> {
+    const route = `${method} ${path.replace(/\/messages\/[^/]+/, "/messages/:id")}`;
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(request.query ?? {})) {
+      if (value !== undefined) query.set(key, String(value));
+    }
+    const url = `${API_BASE}${path}${query.size > 0 ? `?${query.toString()}` : ""}`;
     const headers = new Headers({ "user-agent": USER_AGENT });
     if (request.auth !== false) {
       if (!this.token) throw new Error("A Discord bot token is required for this request");
@@ -66,11 +87,9 @@ export class DiscordRest {
     if (request.body !== undefined) headers.set("content-type", "application/json");
 
     for (let attempt = 1; ; attempt += 1) {
-      const wait = (this.blockedUntil.get(route) ?? 0) - Date.now();
-      if (wait > 0) {
-        if (wait > MAX_WAIT_MS) throw new DiscordHttpError(429, undefined, "rate limited");
-        await this.sleep(wait);
-      }
+      const wait = Math.max(this.globalReset, this.resets.get(this.bucketKey(route, path)) ?? 0) - Date.now();
+      if (wait > MAX_WAIT_MS) throw new DiscordHttpError(429, undefined, "rate limited");
+      if (wait > 0) await this.sleep(wait);
 
       const response = await this.fetch(
         new Request(url, {
@@ -79,32 +98,48 @@ export class DiscordRest {
           ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
         }),
       );
-      this.track(route, response);
-      const data = await readJson(response);
+      const text = await response.text();
+      const bucket = response.headers.get("x-ratelimit-bucket");
+      if (bucket) this.buckets.set(route, bucket);
+      const key = this.bucketKey(route, path);
+      if (response.headers.get("x-ratelimit-remaining") === "0") {
+        this.resets.set(key, Date.now() + seconds(response.headers.get("x-ratelimit-reset-after")) * 1000);
+      }
 
-      if (response.ok) return data;
-      if (response.status === 429 && attempt < MAX_ATTEMPTS) {
-        const retryAfter = retryAfterMs(response, data);
-        if (retryAfter <= MAX_WAIT_MS) {
-          await this.sleep(retryAfter);
-          continue;
+      if (response.ok) return result(text);
+
+      const data = parseJson(text);
+      if (response.status === 429) {
+        const retryAt = Date.now() + seconds(field(data, "retry_after") ?? response.headers.get("retry-after")) * 1000;
+        if (field(data, "global") === true || response.headers.get("x-ratelimit-global") === "true") {
+          this.globalReset = retryAt;
+        } else {
+          this.resets.set(key, retryAt);
         }
+        if (attempt < MAX_ATTEMPTS && retryAt - Date.now() <= MAX_WAIT_MS) continue;
       }
       throw new DiscordHttpError(response.status, errorCode(data), errorMessage(data, response.statusText));
     }
   }
 
-  private track(route: string, response: Response): void {
-    const remaining = response.headers.get("x-ratelimit-remaining");
-    const resetAfter = Number(response.headers.get("x-ratelimit-reset-after"));
-    if (remaining === "0" && Number.isFinite(resetAfter)) this.blockedUntil.set(route, Date.now() + resetAfter * 1000);
-    else this.blockedUntil.delete(route);
+  /** A bucket is shared per top-level resource (channel, guild, or webhook) in the path. */
+  private bucketKey(route: string, path: string): string {
+    const bucket = this.buckets.get(route);
+    if (!bucket) return route;
+    const major = /^\/(?:channels|guilds)\/\d+|^\/webhooks\/\d+\/[^/]+/.exec(path)?.[0] ?? "";
+    return `${bucket}:${major}`;
   }
 }
 
-async function readJson(response: Response): Promise<unknown> {
-  const text = await response.text();
-  if (text === "") return undefined;
+/**
+ * A successful response's JSON (undefined for an empty body), typed by the caller's
+ * discord-api-types result type. Discord's responses are trusted, not validated at runtime.
+ */
+function result(text: string) {
+  return text === "" ? undefined : JSON.parse(text);
+}
+
+function parseJson(text: string): unknown {
   try {
     return JSON.parse(text);
   } catch {
@@ -116,9 +151,9 @@ function field(data: unknown, key: string): unknown {
   return typeof data === "object" && data !== null && key in data ? Reflect.get(data, key) : undefined;
 }
 
-function retryAfterMs(response: Response, data: unknown): number {
-  const seconds = Number(field(data, "retry_after") ?? response.headers.get("retry-after") ?? 1);
-  return Math.ceil((Number.isFinite(seconds) ? seconds : 1) * 1000);
+function seconds(value: unknown): number {
+  const number = Number(value ?? 1);
+  return Number.isFinite(number) ? number : 1;
 }
 
 function errorCode(data: unknown): number | undefined {

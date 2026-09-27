@@ -4,7 +4,6 @@
 import {
   createExecutionContext,
   createScheduledController,
-  runDurableObjectAlarm,
   runInDurableObject,
   waitOnExecutionContext,
 } from "cloudflare:test";
@@ -34,6 +33,7 @@ interface FakeConversation {
     message_type: number;
     private?: boolean;
     sender?: Record<string, unknown>;
+    content_attributes?: Record<string, unknown>;
   }>;
 }
 
@@ -42,18 +42,29 @@ class World {
   conversations = new Map<number, FakeConversation>();
   threads = new Map<string, string>(); // thread id -> parent forum
   failReplies = 0;
+  failPatches = 0;
+  private replies = 0;
   readonly mock: ReturnType<typeof mockFetch>;
 
   constructor(extra: Route[] = []) {
     this.mock = mockFetch(...extra, ...this.routes());
   }
 
-  conversation(id: number, messages: FakeConversation["messages"], custom_attributes: Record<string, unknown> = {}) {
-    this.conversations.set(id, { id, status: "open", custom_attributes, messages });
+  conversation(
+    id: number,
+    messages: FakeConversation["messages"],
+    custom_attributes: Record<string, unknown> = {},
+    status = "open",
+  ) {
+    this.conversations.set(id, { id, status, custom_attributes, messages });
   }
 
   get requests(): Recorded[] {
     return this.mock.requests;
+  }
+
+  sent(method: string, path: RegExp): Recorded[] {
+    return this.requests.filter((request) => request.method === method && path.test(request.url.pathname));
   }
 
   webhookPosts(): Array<{ thread: string | null; body: Record<string, unknown> }> {
@@ -70,6 +81,7 @@ class World {
       custom_attributes: conversation.custom_attributes,
       meta: { sender: { name: "Jane Doe", email: "jane@example.com" }, channel: "Channel::WebWidget" },
       messages: conversation.messages.slice(-1).map(({ id }) => ({ id })),
+      last_activity_at: Math.floor(Date.now() / 1000),
     };
   }
 
@@ -78,13 +90,17 @@ class World {
     return [
       on("GET", new RegExp(`^${cw}/conversations/(\\d+)$`), (request) => {
         const conversation = this.conversations.get(Number(request.url.pathname.split("/").at(-1)));
-        return conversation ? json(this.conversationJson(conversation)) : json({}, { status: 404 });
+        return conversation
+          ? json(this.conversationJson(conversation))
+          : json({ error: "Resource could not be found" }, { status: 404 });
       }),
       on("GET", new RegExp(`^${cw}/conversations/(\\d+)/messages$`), (request) => {
         const conversation = this.conversations.get(Number(request.url.pathname.split("/").at(-2)));
         const after = request.url.searchParams.get("after");
+        const before = request.url.searchParams.get("before");
         const messages = (conversation?.messages ?? []).filter(
-          (message) => after === null || message.id > Number(after),
+          (message) =>
+            (after === null || message.id > Number(after)) && (before === null || message.id < Number(before)),
         );
         return json({ meta: {}, payload: after === null ? messages.slice(-20) : messages.slice(0, 100) });
       }),
@@ -103,9 +119,10 @@ class World {
         json({ data: { meta: {}, payload: [] } }),
       ),
       on("GET", `${cw}/inboxes/2`, () => json({ id: 2, name: "Acme — Product App" })),
-      on("GET", `${cw}/conversations`, () =>
-        json({ data: { meta: {}, payload: [...this.conversations.values()].map((c) => this.conversationJson(c)) } }),
-      ),
+      on("GET", `${cw}/conversations`, (request) => {
+        const all = [...this.conversations.values()].map((c) => this.conversationJson(c));
+        return json({ data: { meta: {}, payload: request.url.searchParams.get("page") === "1" ? all : [] } });
+      }),
       on("GET", `discord.com/api/v10/channels/${FORUM}/webhooks`, () =>
         json([{ id: "1", token: "tok", type: 1, name: "Chatwoot" }]),
       ),
@@ -127,7 +144,16 @@ class World {
           ? json({ id, type: 11, parent_id: parent })
           : json({ message: "Unknown Channel", code: 10003 }, { status: 404 });
       }),
-      on("PATCH", /^discord\.com\/api\/v10\/channels\/\d+$/, () => json({})),
+      on("PATCH", /^discord\.com\/api\/v10\/channels\/\d+$/, () => {
+        if (this.failPatches === 0) return json({});
+        this.failPatches -= 1;
+        return json({ message: "Internal Server Error" }, { status: 500 });
+      }),
+      on(
+        "DELETE",
+        /^discord\.com\/api\/v10\/webhooks\/1\/tok\/messages\/[\w-]+$/,
+        () => new Response(null, { status: 204 }),
+      ),
       on("POST", "discord.com/api/v10/webhooks/1/tok", (request) => {
         const thread = request.url.searchParams.get("thread_id");
         if (thread) {
@@ -135,11 +161,12 @@ class World {
             this.failReplies -= 1;
             return json({ message: "Internal Server Error" }, { status: 500 });
           }
-          return json({ id: "m", channel_id: thread });
+          this.replies += 1;
+          return json({ id: `m-${this.replies}`, channel_id: thread });
         }
         const id = nextThreadId();
         this.threads.set(id, FORUM);
-        return json({ id: "m", channel_id: id });
+        return json({ id: "card", channel_id: id });
       }),
       on("PATCH", /^discord\.com\/api\/v10\/webhooks\/100000000000000001\/[^/]+\/messages\/(@|%40)original$/, () =>
         json({}),
@@ -218,13 +245,12 @@ function dueJobs(): Promise<number> {
 }
 
 /**
- * Runs alarms until no job is due. Alarms set for "now" may also fire on their own in the
- * background, so this waits for the queue rather than counting alarm runs.
+ * Waits until no job is due. Jobs run from the Durable Object's own alarm, which fires on its
+ * own; running alarm() by hand as well would overlap it, which Cloudflare never does.
  */
 async function drain(): Promise<void> {
   await vi.waitFor(
     async () => {
-      await runDurableObjectAlarm(hub());
       if ((await dueJobs()) > 0) throw new Error("jobs still due");
     },
     { timeout: 5000, interval: 20 },
@@ -268,10 +294,12 @@ describe("worker", () => {
     });
   });
 
-  it("dedupes webhook deliveries", async () => {
-    const delivery = crypto.randomUUID();
-    expect(await (await chatwootWebhook(created(90), { delivery })).json()).toEqual({ ok: true, duplicate: false });
-    expect(await (await chatwootWebhook(created(90), { delivery })).json()).toEqual({ ok: true, duplicate: true });
+  it("ignores events the relay does not use", async () => {
+    const conversationCreated = { event: "conversation_created", id: 12, account: { id: 3 } };
+    const edited = { ...created(12), event: "message_updated", content_attributes: {} };
+    for (const event of [conversationCreated, edited]) {
+      expect(await (await chatwootWebhook(event)).json()).toEqual({ ok: true, ignored: true });
+    }
   });
 
   it("relays a conversation in order from the API, links the post, and only posts new messages later", async () => {
@@ -392,10 +420,121 @@ describe("worker", () => {
     await worker.scheduled?.(createScheduledController({ cron: "*/5 * * * *" }), env, ctx);
     await waitOnExecutionContext(ctx);
     await drain();
-    const sweep = world.requests.find((request) => request.url.pathname === "/api/v1/accounts/3/conversations");
-    expect(sweep?.url.searchParams.get("updated_within")).toBe("3600");
-    expect(sweep?.url.searchParams.get("status")).toBe("all");
+    const pages = world.sent("GET", /^\/api\/v1\/accounts\/3\/conversations$/);
+    // Newest activity first; the empty second page ends the sweep.
+    expect(pages.map((request) => Object.fromEntries(request.url.searchParams))).toEqual([
+      { status: "all", assignee_type: "all", page: "1" },
+      { status: "all", assignee_type: "all", page: "2" },
+    ]);
     expect(world.webhookPosts().map((post) => post.body.content)).toContain("missed\n-# <@100000000000000777>");
+  });
+
+  it("the sweep stops at conversations without activity in its window", async () => {
+    world.conversation(18, [{ id: 1001, content: "old", message_type: 0 }]);
+    const old = on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations", () =>
+      json({
+        data: {
+          meta: {},
+          payload: [{ id: 18, status: "open", last_activity_at: Math.floor(Date.now() / 1000) - 7200, messages: [] }],
+        },
+      }),
+    );
+    world.mock.spy.mockRestore();
+    world = new World([old]);
+    const ctx = createExecutionContext();
+    await worker.scheduled?.(createScheduledController({ cron: "*/5 * * * *" }), env, ctx);
+    await waitOnExecutionContext(ctx);
+    await drain();
+    expect(world.sent("GET", /^\/api\/v1\/accounts\/3\/conversations$/)).toHaveLength(1);
+    expect(world.webhookPosts()).toEqual([]);
+  });
+
+  it("does not post a message twice when updating the post fails afterwards", async () => {
+    world.conversation(19, [{ id: 1101, content: "thanks, solved", message_type: 0 }], {}, "resolved");
+    world.failPatches = 1;
+    await chatwootWebhook(created(19));
+    await drain();
+    await runInDurableObject(hub(), (_instance, state) => {
+      state.storage.sql.exec("UPDATE jobs SET not_before = 0");
+    });
+    await setAlarmNow();
+    await drain();
+    expect(world.webhookPosts().map((post) => post.body.content)).toEqual([
+      expect.stringContaining("Open in Chatwoot"),
+      "thanks, solved\n-# <@100000000000000777>",
+    ]);
+    // The first update failed; the retry unarchives with the tags, then archives.
+    expect(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).map((request) => JSON.parse(request.body))).toEqual([
+      { archived: false, applied_tags: ["t-acme"] },
+      { archived: false, applied_tags: ["t-acme"] },
+      { archived: true },
+    ]);
+  });
+
+  it("removes the Discord messages of a message deleted in Chatwoot", async () => {
+    world.conversation(21, [
+      { id: 1201, content: "first", message_type: 0 },
+      { id: 1202, content: "wrong conversation, sorry", message_type: 1 },
+    ]);
+    await chatwootWebhook(created(21));
+    await drain();
+    const deleted = world.conversations.get(21)?.messages[1];
+    if (deleted) Object.assign(deleted, { content: "This message was deleted", content_attributes: { deleted: true } });
+    await chatwootWebhook({
+      ...created(21),
+      event: "message_updated",
+      id: 1202,
+      content_attributes: { deleted: true },
+    });
+    // A deletion reported for a message that was not deleted changes nothing.
+    await chatwootWebhook({
+      ...created(21),
+      event: "message_updated",
+      id: 1201,
+      content_attributes: { deleted: true },
+    });
+    await drain();
+    const deletes = world.sent("DELETE", /^\/api\/v10\/webhooks\/1\/tok\/messages\//);
+    expect(deletes.map((request) => request.url.pathname.split("/").at(-1))).toEqual(["m-2"]);
+    expect(deletes[0]?.url.searchParams.get("thread_id")).toBe(world.webhookPosts()[1]?.thread);
+  });
+
+  it("closes the post of a conversation deleted in Chatwoot", async () => {
+    world.conversation(22, [{ id: 1301, content: "hello", message_type: 0 }]);
+    await chatwootWebhook(created(22));
+    await drain();
+    const thread = world.webhookPosts()[1]?.thread ?? "";
+    world.conversations.delete(22);
+    await chatwootWebhook(created(22));
+    await drain();
+    expect(world.webhookPosts().at(-1)).toEqual({
+      thread,
+      body: {
+        content: "This conversation no longer exists in Chatwoot.",
+        username: "Chatwoot",
+        allowed_mentions: { parse: [] },
+      },
+    });
+    expect(JSON.parse(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).at(-1)?.body ?? "")).toEqual({
+      archived: true,
+    });
+    expect(await hub().ticketForThread(thread)).toBeNull();
+  });
+
+  it("drops unreadable and unknown jobs", async () => {
+    await runInDurableObject(hub(), async (_instance, state) => {
+      const insert = "INSERT INTO jobs (key, priority, payload, not_before, created_at) VALUES (?, 2, ?, 0, 0)";
+      state.storage.sql.exec(insert, "garbage", "{not json");
+      state.storage.sql.exec(insert, "unknown", JSON.stringify({ type: "reindex", accountId: 3 }));
+      state.storage.sql.exec(insert, "partial", JSON.stringify({ type: "conversation", accountId: 3 }));
+      await state.storage.setAlarm(Date.now());
+    });
+    await drain();
+    const left = await runInDurableObject(hub(), (_instance, state) =>
+      state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM jobs").one(),
+    );
+    expect(left.n).toBe(0);
+    expect(world.requests).toEqual([]);
   });
 
   it("verifies Discord signatures and answers pings", async () => {
@@ -451,7 +590,6 @@ describe("worker", () => {
       discordUserId: ALICE,
       accountId: 3,
       conversationId: 17,
-      ticketTitle: "Acme #17",
       action: { type: "message", private: false, content: "Hello", files: [] },
     };
     const queuedAt = Date.now() - 13 * 60 * 1000;

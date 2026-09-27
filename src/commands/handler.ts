@@ -116,9 +116,16 @@ function submit(context: Context, interaction: APIModalSubmitInteraction): Handl
   const kind = interaction.data.custom_id.split(":", 1)[0];
   if (kind !== "reply" && kind !== "note") throw new UserError("Unknown form.");
 
-  const components: unknown = interaction.data.components;
-  const content = stringField(findComponent(components, "content"), "value")?.trim() ?? "";
-  const files = uploadedFiles(interaction, components);
+  const inputs = interaction.data.components.flatMap((component) => {
+    if (component.type === ComponentType.Label) return [component.component];
+    return component.type === ComponentType.ActionRow ? component.components : [];
+  });
+  // Ids are "<name>:<nonce>" (see `editor`).
+  const input = (name: string) => inputs.find((component) => component.custom_id.split(":", 1)[0] === name);
+  const text = input("content");
+  const upload = input("files");
+  const content = text?.type === ComponentType.TextInput ? text.value.trim() : "";
+  const files = uploadedFiles(interaction, upload?.type === ComponentType.FileUpload ? upload.values : []);
   if (content === "" && files.length === 0) throw new UserError("Add a message or an attachment.");
   checkFiles(files, context.deps.settings);
 
@@ -126,9 +133,7 @@ function submit(context: Context, interaction: APIModalSubmitInteraction): Handl
 }
 
 /** Files from the editor's upload field, as Discord describes them in the resolved data. */
-function uploadedFiles(interaction: APIModalSubmitInteraction, components: unknown): AttachmentRef[] {
-  const values = findComponent(components, "files")?.values;
-  const ids = Array.isArray(values) ? values.map(String) : [];
+function uploadedFiles(interaction: APIModalSubmitInteraction, ids: string[]): AttachmentRef[] {
   const resolved: Partial<Record<string, APIAttachment>> = interaction.data.resolved?.attachments ?? {};
   return ids.flatMap((id) => {
     const file = resolved[id];
@@ -258,7 +263,6 @@ function defer(context: Context, action: CommandAction): HandlerResult {
       discordUserId: context.userId,
       accountId: context.ticket.accountId,
       conversationId: context.ticket.conversationId,
-      ticketTitle: context.title,
       action,
     },
   };
@@ -275,32 +279,4 @@ export function privately(content: string): HandlerResult {
 
 function invokerId(interaction: APIInteraction): string | undefined {
   return interaction.member?.user.id ?? interaction.user?.id;
-}
-
-type Node = Record<string, unknown>;
-
-function isNode(value: unknown): value is Node {
-  return typeof value === "object" && value !== null;
-}
-
-function stringField(node: Node | undefined, key: string): string | undefined {
-  const value = node?.[key];
-  return typeof value === "string" ? value : undefined;
-}
-
-/**
- * Modal submissions nest inputs in labels (or legacy action rows); finds one by custom_id
- * ("content" matches "content:<nonce>").
- */
-function findComponent(components: unknown, customId: string): Node | undefined {
-  if (!Array.isArray(components)) return undefined;
-  for (const component of components) {
-    if (!isNode(component)) continue;
-    const id = stringField(component, "custom_id") ?? "";
-    if (id === customId || id.startsWith(`${customId}:`)) return component;
-    const children = Array.isArray(component.components) ? component.components : [component.component];
-    const found = findComponent(children, customId);
-    if (found) return found;
-  }
-  return undefined;
 }

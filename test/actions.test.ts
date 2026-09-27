@@ -15,7 +15,6 @@ function job(action: CommandAction, discordUserId = ALICE): CommandJob {
     discordUserId,
     accountId: 3,
     conversationId: 15,
-    ticketTitle: "Acme #15",
     action,
   };
 }
@@ -48,10 +47,19 @@ describe("executeCommand", () => {
     expect(await result).toBe("✅ Reopened.");
   });
 
-  it("blocks through Chatwoot's mute action", async () => {
-    const { result, requests } = run({ type: "block" }, ok("POST", `${conversation}/mute`));
+  it("blocks by resolving the conversation and blocking its contact", async () => {
+    const { result, requests } = run(
+      { type: "block" },
+      on("GET", conversation, () => json({ id: 15, status: "open", meta: { sender: { id: 88 } } })),
+      ok("POST", `${conversation}/toggle_status`),
+      ok("PUT", `${cw}/accounts/3/contacts/88`),
+    );
     expect(await result).toMatch(/^✅ Contact blocked and conversation resolved/);
-    expect(requests.at(-1)?.url.pathname).toBe("/api/v1/accounts/3/conversations/15/mute");
+    expect(requests.slice(1).map((request) => [`${request.method} ${request.url.pathname}`, request.body])).toEqual([
+      ["GET /api/v1/accounts/3/conversations/15", ""],
+      ["POST /api/v1/accounts/3/conversations/15/toggle_status", JSON.stringify({ status: "resolved" })],
+      ["PUT /api/v1/accounts/3/contacts/88", JSON.stringify({ blocked: true })],
+    ]);
   });
 
   it("assigns by the target agent's email", async () => {
@@ -65,7 +73,8 @@ describe("executeCommand", () => {
       ),
       ok("POST", `${conversation}/assignments`),
     );
-    expect(await result).toBe("✅ Assigned to Bob.");
+    // Chatwoot shows the assignee's `name`, which is also the post's assignee tag.
+    expect(await result).toBe("✅ Assigned to Bob Example.");
     expect(JSON.parse(requests.at(-1)?.body ?? "")).toEqual({ assignee_id: 43 });
   });
 
@@ -158,10 +167,18 @@ describe("executeCommand", () => {
 
   it("maps Chatwoot permission errors to a clear message", async () => {
     const { result } = run(
-      { type: "block" },
-      on("POST", `${conversation}/mute`, () => json({ error: "x" }, { status: 403 })),
+      { type: "status", status: "resolved" },
+      on("POST", `${conversation}/toggle_status`, () => json({ error: "x" }, { status: 403 })),
     );
     expect(await result).toBe("❌ You do not have access to this conversation.");
+  });
+
+  it("says when the conversation no longer exists", async () => {
+    const { result } = run(
+      { type: "block" },
+      on("GET", conversation, () => json({ error: "Resource could not be found" }, { status: 404 })),
+    );
+    expect(await result).toBe("❌ This conversation no longer exists in Chatwoot.");
   });
 
   it("does not leak unexpected errors", async () => {

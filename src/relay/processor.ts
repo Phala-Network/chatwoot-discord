@@ -1,5 +1,6 @@
 // Brings one conversation's forum post up to date from Chatwoot's API: relays every message
-// after the stored cursor, in order, then corrects the post's tags and archived flag.
+// after the stored cursor, in order, then corrects the post's tags and archived flag. Also
+// removes the Discord messages of a message deleted in Chatwoot.
 
 import { type Budget, BudgetExhaustedError } from "../budget.js";
 import {
@@ -16,6 +17,8 @@ import type { ForumClient, Relay } from "./relay.js";
 import type { RelayConversation } from "./types.js";
 
 const INBOX_CACHE_MS = 24 * 60 * 60 * 1000;
+/** Requests to bring a post's tags and archived flag up to date: the forum's tags and two updates. */
+const SYNC_REQUESTS = 3;
 
 export interface ProcessorContext {
   settings: Settings;
@@ -39,18 +42,23 @@ export async function processConversation(
   if (!account) return "done";
   const limits = settings.config.relay;
   // Worst case for one message: webhook lookup and creation, the forum channel, the card, the
-  // conversation link, the chunks, the truncation note, and a tag update.
-  const perMessage = limits.maxChunks + 9;
+  // conversation link, the chunks, and the truncation note. Room for the final sync is kept too.
+  const perMessage = limits.maxChunks + 6 + SYNC_REQUESTS;
 
   const raw = await chatwoot.getConversation(accountId, conversationId);
-  const conversation = toRelayConversation(raw);
+  if (!raw) {
+    log.warn("conversation no longer exists in Chatwoot", { accountId, conversationId });
+    await relay.closeDeleted(accountId, conversationId);
+    return "done";
+  }
+  const conversation = toRelayConversation(conversationId, raw);
   if (!store.thread(accountId, conversationId))
     await recoverThread(context, accountId, account.forumChannelId, conversation);
 
   let cursor = store.conversation(accountId, conversationId)?.cursor;
   if (cursor === undefined && store.thread(accountId, conversationId)) {
-    // A post created by a previous relay (adopted from the link attribute) already holds the history. With a
-    // cutover watermark, continue after it; otherwise start after the latest message.
+    // An adopted post (from the link attribute) already holds the history. With a cutover
+    // watermark, continue after it; otherwise start after the latest message.
     if (limits.startAfterMessageId > 0) {
       cursor = limits.startAfterMessageId;
     } else {
@@ -104,10 +112,33 @@ export async function processConversation(
 
   const threadId = store.thread(accountId, conversationId);
   if (threadId) {
-    if (budget.remaining < 3) return "yield";
-    await relay.sync(accountId, conversation, threadId, false);
+    if (budget.remaining < SYNC_REQUESTS) return "yield";
+    await relay.sync(accountId, conversation, threadId);
   }
   return "done";
+}
+
+/**
+ * Deletes the Discord messages of a relayed message once Chatwoot's API confirms that the
+ * message was deleted (its content attributes carry `deleted: true`).
+ */
+export async function processDeletedMessage(
+  { settings, store, forum, chatwoot }: ProcessorContext,
+  accountId: number,
+  conversationId: number,
+  messageId: number,
+): Promise<void> {
+  const account = settings.account(accountId);
+  const threadId = store.thread(accountId, conversationId);
+  const parts = store.postedParts(accountId, conversationId, messageId);
+  if (!account || !threadId || parts.length === 0) return;
+  const message = await chatwoot.getMessage(accountId, conversationId, messageId);
+  if (message?.content_attributes?.deleted !== true) return;
+  for (const discordId of parts) {
+    await forum.deleteMessage(account.forumChannelId, threadId, discordId);
+    store.deletePostedPart(accountId, conversationId, messageId, discordId);
+  }
+  log.info("deleted message removed from post", { accountId, conversationId, messageId, parts: parts.length });
 }
 
 /**
@@ -140,7 +171,7 @@ export function threadIdFromUrl(value: unknown): string | undefined {
 
 /** The newest message id Chatwoot included with a conversation, if any. */
 export function latestMessageId(conversation: ChatwootConversation): number | undefined {
-  const ids = (conversation.messages ?? []).map((message) => message.id);
+  const ids = (conversation.messages ?? []).flatMap((message) => (message.id === undefined ? [] : [message.id]));
   return ids.length === 0 ? undefined : Math.max(...ids);
 }
 
@@ -157,6 +188,7 @@ async function cachedInboxName(
   if (cached !== undefined) return cached;
   try {
     const name = await chatwoot.inboxName(accountId, inboxId);
+    if (name === undefined) return null;
     store.set(key, name, INBOX_CACHE_MS);
     return name;
   } catch (error) {

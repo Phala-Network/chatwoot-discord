@@ -20,17 +20,19 @@ function relayWith(options: Partial<RelayOptions> = {}) {
 
 const triage = { userId: TRIAGE, name: "Triage bot", perConversationPerHour: 5, perHour: 30 };
 const resolved = { status: "resolved" };
+const tagsFor = (status: string) => ({ archived: false, applied_tags: ["t-acme", `t-${status}`] });
 
 describe("Relay", () => {
   let forum: FakeForum;
   let relay: Relay;
+  let store: MemoryStore;
 
   beforeEach(() => {
-    ({ relay, forum } = relayWith());
+    ({ relay, forum, store } = relayWith());
   });
 
   it("opens a tagged post with a ticket card, then posts the message as a reply", async () => {
-    expect(await relay.relay(message())).toBe("relayed");
+    await relay.relay(message());
     const [[cardThread, card], [messageThread, first]] = forum.calls as [
       [string | undefined, Record<string, unknown>],
       [string | undefined, Record<string, unknown>],
@@ -69,7 +71,7 @@ describe("Relay", () => {
       },
       onIgnoredError: (error) => ignored.push(error),
     }));
-    expect(await relay.relay(message())).toBe("relayed");
+    await relay.relay(message());
     expect(forum.calls).toHaveLength(2);
     expect(ignored).toHaveLength(1);
   });
@@ -92,36 +94,82 @@ describe("Relay", () => {
 
   it("resolving posts the activity, then retags and archives; a new message reopens", async () => {
     await relay.relay(message());
-    await relay.relay(
-      message({ id: 103, messageType: "activity", content: "Resolved by Sam", conversation: resolved }),
-    );
-    expect(forum.calls.at(-1)?.[1].content).toBe("_Resolved by Sam_");
-    expect(forum.patches.at(-1)).toEqual(["thread-1", { applied_tags: ["t-acme", "t-resolved"], archived: true }]);
+    await relay.sync(3, message().conversation, "thread-1");
+    expect(forum.patches).toEqual([]);
 
-    await relay.relay(message({ id: 104, content: "Still broken" }));
-    expect(forum.patches.at(-1)).toEqual(["thread-1", { applied_tags: ["t-acme", "t-open"], archived: false }]);
-    expect(forum.patches).toHaveLength(2);
+    const resolving = message({ id: 103, messageType: "activity", content: "Resolved by Sam", conversation: resolved });
+    await relay.relay(resolving);
+    await relay.sync(3, resolving.conversation, "thread-1");
+    expect(forum.calls.at(-1)?.[1].content).toBe("_Resolved by Sam_");
+    // Tags change while unarchiving; archiving is a separate update.
+    expect(forum.patches).toEqual([
+      ["thread-1", tagsFor("resolved")],
+      ["thread-1", { archived: true }],
+    ]);
+
+    const reopened = message({ id: 104, content: "Still broken" });
+    await relay.relay(reopened);
+    await relay.sync(3, reopened.conversation, "thread-1");
+    expect(forum.patches.at(-1)).toEqual(["thread-1", tagsFor("open")]);
+    expect(forum.archived.has("thread-1")).toBe(false);
   });
 
   it("archives a resolved post again after any message", async () => {
+    const note = message({ id: 105, messageType: "outgoing", private: true, content: "note", conversation: resolved });
     await relay.relay(message({ conversation: resolved }));
-    await relay.relay(
-      message({ id: 105, messageType: "outgoing", private: true, content: "note", conversation: resolved }),
-    );
+    await relay.sync(3, note.conversation, "thread-1");
+    expect(forum.archived.has("thread-1")).toBe(true);
+
+    await relay.relay(note); // Posting unarchives the post.
+    await relay.sync(3, note.conversation, "thread-1");
+    expect(forum.archived.has("thread-1")).toBe(true);
     expect(forum.patches.map(([, patch]) => patch)).toEqual([
-      { applied_tags: ["t-acme", "t-resolved"], archived: true },
-      { applied_tags: ["t-acme", "t-resolved"], archived: true },
+      tagsFor("resolved"),
+      { archived: true },
+      tagsFor("resolved"),
+      { archived: true },
     ]);
   });
 
-  it("sync without a new message only patches when the state changed", async () => {
+  it("sync without a new message only updates the post when the state changed", async () => {
     await relay.relay(message());
     const conversation = message().conversation;
-    await relay.sync(3, conversation, "thread-1", false);
+    await relay.sync(3, conversation, "thread-1");
     expect(forum.patches).toEqual([]);
-    await relay.sync(3, { ...conversation, status: "resolved" }, "thread-1", false);
-    await relay.sync(3, { ...conversation, status: "resolved" }, "thread-1", false);
-    expect(forum.patches).toEqual([["thread-1", { applied_tags: ["t-acme", "t-resolved"], archived: true }]]);
+    await relay.sync(3, { ...conversation, status: "resolved" }, "thread-1");
+    await relay.sync(3, { ...conversation, status: "resolved" }, "thread-1");
+    expect(forum.patches).toEqual([
+      ["thread-1", tagsFor("resolved")],
+      ["thread-1", { archived: true }],
+    ]);
+  });
+
+  it("changes the tags of an archived post by unarchiving it in the same update", async () => {
+    const tagged = new FakeForum({ ...TAGS, billing: "t-billing" });
+    ({ relay, forum } = relayWith({ forum: tagged }));
+    await relay.relay(message({ conversation: resolved }));
+    await relay.sync(3, message({ conversation: resolved }).conversation, "thread-1");
+    // The topic changes after the post was archived, without a new message.
+    const retopic = message({ conversation: { ...resolved, customAttributes: { topic: "Billing" } } }).conversation;
+    await relay.sync(3, retopic, "thread-1");
+    expect(forum.patches.slice(2)).toEqual([
+      ["thread-1", { archived: false, applied_tags: ["t-acme", "t-resolved", "t-billing"] }],
+      ["thread-1", { archived: true }],
+    ]);
+    expect(forum.archived.has("thread-1")).toBe(true);
+
+    // An open post that Discord archived for inactivity gets its new tags too.
+    await relay.relay(message({ id: 102, conversation: { id: 13 } }));
+    forum.archived.add("thread-4");
+    await relay.sync(3, message({ conversation: { id: 13, status: "pending" } }).conversation, "thread-4");
+    expect(forum.patches.at(-1)).toEqual(["thread-4", { archived: false, applied_tags: ["t-acme", "t-pending"] }]);
+  });
+
+  it("tags the conversation's status as it is in Chatwoot and archives only resolved posts", async () => {
+    await relay.relay(message({ conversation: { status: "pending" } }));
+    expect(forum.calls[0]?.[1].applied_tags).toEqual(["t-acme", "t-pending"]);
+    await relay.sync(3, message({ conversation: { status: "snoozed" } }).conversation, "thread-1");
+    expect(forum.patches).toEqual([["thread-1", { archived: false, applied_tags: ["t-acme"] }]]);
   });
 
   it("tags the topic and the assignee, at most five tags", async () => {
@@ -130,19 +178,19 @@ describe("Relay", () => {
     await relay.relay(message({ conversation: { customAttributes: { topic: "Billing" } } }));
     expect(forum.calls[0]?.[1].applied_tags).toEqual(["t-acme", "t-open", "t-none", "t-billing"]);
 
-    const assigned = { customAttributes: { topic: "Billing" }, assignee: { name: "Sam" } };
-    await relay.relay(
-      message({ id: 106, messageType: "activity", content: "Assigned to Sam", conversation: assigned }),
-    );
-    await relay.relay(message({ id: 107, messageType: "outgoing", content: "On it", conversation: assigned }));
+    const assigned = message({ conversation: { customAttributes: { topic: "Billing" }, assignee: { name: "Sam" } } });
+    await relay.relay({ ...assigned, id: 106, messageType: "activity", content: "Assigned to Sam" });
+    await relay.relay({ ...assigned, id: 107, messageType: "outgoing", content: "On it" });
+    await relay.sync(3, assigned.conversation, "thread-1");
     expect(forum.patches.map(([, patch]) => patch)).toEqual([
-      { applied_tags: ["t-acme", "t-open", "t-sam", "t-billing"], archived: false },
+      { archived: false, applied_tags: ["t-acme", "t-open", "t-sam", "t-billing"] },
     ]);
   });
 
-  it("skips templates and empty messages", async () => {
-    expect(await relay.relay(message({ messageType: "template" }))).toBe("skipped");
-    expect(await relay.relay(message({ content: "  " }))).toBe("empty");
+  it("skips templates, empty messages, and deleted messages", async () => {
+    await relay.relay(message({ messageType: "template" }));
+    await relay.relay(message({ content: "  " }));
+    await relay.relay(message({ deleted: true, content: "This message was deleted" }));
     expect(forum.calls).toEqual([]);
   });
 
@@ -225,13 +273,12 @@ describe("Relay", () => {
 
   it("mutes blocked contacts but still posts activity", async () => {
     const blocked = { status: "resolved", contact: { name: "Spammer", blocked: true } };
-    expect(await relay.relay(message({ conversation: blocked }))).toBe("muted");
+    await relay.relay(message({ conversation: blocked }));
     expect(forum.calls).toEqual([]);
-    expect(
-      await relay.relay(
-        message({ messageType: "activity", content: "Sam muted the conversation", conversation: blocked }),
-      ),
-    ).toBe("relayed");
+    await relay.relay(
+      message({ messageType: "activity", content: "Sam muted the conversation", conversation: blocked }),
+    );
+    expect(forum.contents().at(-1)).toBe("_Sam muted the conversation_");
   });
 
   it("pings a newly assigned, linked agent once, allowing only that mention", async () => {
@@ -266,17 +313,71 @@ describe("Relay", () => {
     expect(first?.allowed_mentions).toEqual({ parse: [], users: ["592"] });
   });
 
-  it("does not ping the assignee of an adopted post without a recorded state", async () => {
+  it("does not announce the assignee of an adopted post without a recorded state", async () => {
     const adopted = relayWith({ discordUserFor: () => "592" });
     adopted.store.saveThread(3, 12, "adopted-thread");
-    await adopted.relay.relay(message({ conversation: { assignee: { id: 7, name: "Kim" } } }));
+    const reply = message({
+      messageType: "outgoing",
+      content: "On it",
+      sender: { name: "Sam", type: "user" },
+      conversation: { assignee: { id: 7, name: "Kim" } },
+    });
+    await adopted.relay.relay(reply);
     expect(adopted.forum.calls).toEqual([
-      [
-        "adopted-thread",
-        { content: "My agent will not connect", username: "Jane Doe", allowed_mentions: { parse: [] } },
-      ],
+      ["adopted-thread", { content: "On it", username: "Sam · Acme", allowed_mentions: { parse: [] } }],
     ]);
-    expect(adopted.forum.patches.map(([threadId]) => threadId)).toEqual(["adopted-thread"]);
+  });
+
+  it("pings the linked assignee on every customer message", async () => {
+    ({ relay, forum } = relayWith({ triage, discordUserFor: (assignee) => (assignee.id === 7 ? "592" : undefined) }));
+    const assigned = { assignee: { id: 7, name: "Kim" } };
+    await relay.relay(message({ conversation: assigned })); // announced: "Assigned to"
+    await relay.relay(message({ id: 102, content: "Hello?", conversation: assigned }));
+    await relay.relay(message({ id: 103, content: "Anyone?", conversation: assigned }));
+    await relay.relay(message({ id: 104, messageType: "outgoing", content: "Here", conversation: assigned }));
+    await relay.relay(
+      message({ id: 105, messageType: "outgoing", private: true, content: "Note", conversation: assigned }),
+    );
+    await relay.relay(message({ id: 106, messageType: "activity", content: "Snoozed", conversation: assigned }));
+    await relay.relay(message({ id: 107, content: "Other agent", conversation: { assignee: { id: 9, name: "Lee" } } }));
+    await relay.relay(message({ id: 108, content: "Nobody", conversation: { assignee: null } }));
+
+    const replies = forum.calls.slice(1).map(([, payload]) => [payload.content, payload.allowed_mentions]);
+    const users = { parse: [], users: ["592"] };
+    expect(replies).toEqual([
+      [`My agent will not connect\n-# <@${TRIAGE}>\n-# Assigned to <@592>`, users],
+      [`Hello?\n-# <@${TRIAGE}> <@592>`, users],
+      [`Anyone?\n-# <@${TRIAGE}> <@592>`, users],
+      ["Here", { parse: [] }],
+      ["🔒 **Internal note**\nNote", { parse: [] }],
+      ["_Snoozed_", { parse: [] }],
+      [`Other agent\n-# <@${TRIAGE}>`, { parse: [] }],
+      [`Nobody\n-# <@${TRIAGE}>`, { parse: [] }],
+    ]);
+  });
+
+  it("resumes a long message after the parts already posted", async () => {
+    const text = `${"a".repeat(1500)}\n${"b".repeat(1500)}\n${"c".repeat(1500)}`;
+    await relay.relay(message());
+    forum.failAfter = 1;
+    await expect(relay.relay(message({ id: 102, content: text }))).rejects.toThrow("Discord HTTP 500");
+    await relay.relay(message({ id: 102, content: text }));
+    expect(forum.contents().slice(2)).toEqual(["a".repeat(1500), "b".repeat(1500), "c".repeat(1500)]);
+  });
+
+  it("says so, archives, and forgets a post whose conversation was deleted", async () => {
+    await relay.relay(message());
+    await relay.closeDeleted(3, 12);
+    expect(forum.calls.at(-1)).toEqual([
+      "thread-1",
+      {
+        content: "This conversation no longer exists in Chatwoot.",
+        username: "Chatwoot",
+        allowed_mentions: { parse: [] },
+      },
+    ]);
+    expect(forum.archived.has("thread-1")).toBe(true);
+    expect(store.thread(3, 12)).toBeUndefined();
   });
 
   it("does not mention anyone without a configured triage bot", async () => {
