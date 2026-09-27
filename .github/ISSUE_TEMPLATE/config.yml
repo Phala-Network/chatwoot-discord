@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Ask a question
+    url: https://github.com/Phala-Network/chatwoot-discord/discussions
+    about: Questions and setup help go to GitHub Discussions.
   - name: Report a security vulnerability
     url: https://github.com/Phala-Network/chatwoot-discord/security/policy
     about: Please report vulnerabilities privately, not in a public issue.

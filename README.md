@@ -12,6 +12,16 @@ answer customers from Discord with slash commands.
 want humans and an AI agent to handle tickets together without leaving Discord. It runs on
 Cloudflare Workers (the Free plan is enough).
 
+> [!NOTE]
+> An independent, community-maintained integration. It is not affiliated with, endorsed by, or
+> supported by Chatwoot or Discord.
+
+**Status:** in production use. Versions are `0.x`: per [SemVer](https://semver.org/#spec-item-4),
+a minor release may change configuration or setup; the [changelog](CHANGELOG.md) says what to
+do when it does.
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Phala-Network/chatwoot-discord)
+
 ![A Discord forum with one post per Chatwoot conversation, filtered by brand, status, assignee, and topic tags](docs/assets/forum.png)
 
 *Illustration with fictional data.*
@@ -33,6 +43,18 @@ Cron (every 5 min) ─▶ Worker ──▶ Hub Durable Object ──▶ sweep: r
   [other commands](#commands). Each runs in Chatwoot as the agent who used it.
 - An optional AI agent (a Discord bot) is called on each customer message and posts a draft;
   a human sends it with **Apps → Reply with this**.
+
+## Deploy
+
+You need a Cloudflare account, a Chatwoot instance (v4.18 or later) reachable from the internet,
+and a Discord server where you can add an application and a forum channel.
+
+1. [Create the Discord application and forum](#1-discord).
+2. [Prepare Chatwoot](#2-chatwoot): a relay user, the link attribute, and each agent's token.
+3. [Deploy the Worker](#3-cloudflare) with the **Deploy to Cloudflare** button at the top or from a checkout: the secrets,
+   and `CONFIG` in `wrangler.jsonc`.
+4. [Connect them](#4-connect): the Discord interactions URL, the commands, and the Chatwoot
+   webhooks.
 
 ## Design
 
@@ -63,20 +85,6 @@ Cron (every 5 min) ─▶ Worker ──▶ Hub Durable Object ──▶ sweep: r
 
 To connect an AI agent, see [Connecting an AI agent](docs/ai-agent.md).
 
-## Deploy
-
-You need a Cloudflare account, a Chatwoot instance (v4.18 or later) reachable from the internet,
-and a Discord server where you can add an application and a forum channel.
-
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Phala-Network/chatwoot-discord)
-
-1. [Create the Discord application and forum](#1-discord).
-2. [Prepare Chatwoot](#2-chatwoot): a relay user, the link attribute, and each agent's token.
-3. [Deploy the Worker](#3-cloudflare) with the button above or from a checkout: the secrets,
-   and `CONFIG` in `wrangler.jsonc`.
-4. [Connect them](#4-connect): the Discord interactions URL, the commands, and the Chatwoot
-   webhooks.
-
 ## Contents
 
 - [Setup](#setup)
@@ -88,6 +96,7 @@ and a Discord server where you can add an application and a forum channel.
 - [Internals](#internals)
 - [Cutover from an existing relay](#cutover-from-an-existing-relay)
 - [Development](#development)
+- [Getting help](#getting-help)
 
 ## Setup
 
@@ -348,6 +357,17 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and releases, and
 [CHANGELOG.md](CHANGELOG.md) for the release history. This project follows the
 [Contributor Covenant](CODE_OF_CONDUCT.md).
 
+## Getting help
+
+- Questions and setup help: [GitHub Discussions](https://github.com/Phala-Network/chatwoot-discord/discussions).
+- Bug reports and feature requests: [GitHub Issues](https://github.com/Phala-Network/chatwoot-discord/issues).
+- Security vulnerabilities: report privately as described in [SECURITY.md](SECURITY.md), not in a
+  public issue.
+- Chatwoot or Discord behaviour itself: their own documentation and support channels.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+Chatwoot and Discord are trademarks of their respective owners, used here only to describe what
+this project works with.
