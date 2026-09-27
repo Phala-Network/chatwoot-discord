@@ -23,7 +23,7 @@ import {
   titleSubject,
   topicTag,
 } from "./format.ts";
-import { Notifier, type TriageOptions } from "./notify.ts";
+import { assignedLine, Notifier, type TriageOptions } from "./notify.ts";
 import type { RelayAssignee, RelayConversation, RelayMessage } from "./types.ts";
 
 export type WebhookMessage = RESTPostAPIWebhookWithTokenJSONBody;
@@ -140,14 +140,15 @@ export class Relay {
   /**
    * Posts a message into its conversation's post, creating the post if needed. Each Discord
    * message is recorded as soon as it is sent, so a retry resumes after the last one. Templates,
-   * deleted and empty messages, and messages from a blocked contact are not relayed.
+   * deleted and empty messages, and messages from a blocked contact are not relayed. Returns
+   * whether it posted a live message (see `announceAssignee`).
    */
-  async relay(message: RelayMessage): Promise<void> {
-    if (!RELAYED_TYPES.has(message.messageType) || message.deleted) return;
+  async relay(message: RelayMessage): Promise<boolean> {
+    if (!RELAYED_TYPES.has(message.messageType) || message.deleted) return false;
     // A blocked contact's messages are muted in Chatwoot (no notifications); keep them out of Discord too.
-    if (message.messageType === "incoming" && message.conversation.contact.blocked) return;
+    if (message.messageType === "incoming" && message.conversation.contact.blocked) return false;
     const text = body(message);
-    if (text === "") return;
+    if (text === "") return false;
 
     const { store } = this.options;
     const accountId = message.account.id;
@@ -167,8 +168,26 @@ export class Relay {
       threadId = await this.createPost(message);
       await this.post(message, parts, threadId);
     }
-    this.notifier.posted(message);
     this.unarchived(accountId, conversation);
+    return this.notifier.live(message);
+  }
+
+  /**
+   * After a run's live messages: pings a newly assigned, linked agent in a notice of its own, so
+   * the ping follows the latest assignment line and names the current assignee however often the
+   * conversation was reassigned in between. The assignee counts as announced either way.
+   */
+  async announceAssignee(accountId: number, conversation: RelayConversation): Promise<void> {
+    const discordId = this.notifier.newAssignee(accountId, conversation);
+    if (discordId) {
+      const notice = this.notice(assignedLine(`<@${discordId}>`));
+      const posted = await this.postMessage(accountId, conversation, {
+        ...notice,
+        allowed_mentions: { parse: [], users: [discordId] },
+      });
+      if (!posted) return;
+    }
+    this.options.store.updateConversation(accountId, conversation.id, { announcedAssignee: assigneeTag(conversation) });
   }
 
   /**

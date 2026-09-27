@@ -21,11 +21,12 @@ export const PAGE_REQUESTS = 1;
 const MESSAGE_REQUESTS = 12;
 
 /**
- * After the messages: linking the post from its conversation (the forum's guild and the
- * attribute update), and bringing the post's tags, title, and archived flag up to date (the
- * forum's tags, the update, the update again with the tags looked up again, and archiving).
+ * After the messages: the notice that pings a new assignee; linking the post from its
+ * conversation (the forum's guild and the attribute update); and bringing the post's tags, title,
+ * and archived flag up to date (the forum's tags, the update, the update again with the tags
+ * looked up again, and archiving).
  */
-export const FINISH_REQUESTS = 2 + 5;
+export const FINISH_REQUESTS = 1 + 2 + 5;
 
 /** What one message may need, with room left to finish the run afterwards. */
 export function requestsPerMessage(maxChunks: number): number {

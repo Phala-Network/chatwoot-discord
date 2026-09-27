@@ -26,8 +26,8 @@ describe("configuration", () => {
     const result = budget(25);
     expect(result.success).toBe(false);
     expect(result.error?.issues.map((issue) => issue.path.join("."))).toEqual(["relay.subrequestBudget"]);
-    expect(budget(32).success).toBe(false);
-    expect(budget(33).success).toBe(true);
+    expect(budget(33).success).toBe(false);
+    expect(budget(34).success).toBe(true);
   });
 
   it("bounds the triage bot's name, which its budget notes repeat", () => {

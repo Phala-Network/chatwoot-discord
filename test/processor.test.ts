@@ -338,6 +338,33 @@ describe("processConversation", () => {
     });
   });
 
+  it("after two reassignments in one run, pings the latest assignee once, after both activity lines", async () => {
+    const world = new World();
+    world.messages = [{ id: 1, content: "hello", message_type: 0, created_at: now() - 60 }];
+    await withStore(async (store) => {
+      const settings = testSettings();
+      await sync(store, settings);
+      world.conversation.meta = {
+        ...Object(world.conversation.meta),
+        assignee: { id: 43, name: "Bob", email: "bob@example.com" },
+      };
+      world.messages.push(
+        { id: 2, content: "Assigned to Alice by Sam", message_type: 2, created_at: now() - 8 },
+        { id: 3, content: "Assigned to Bob by Sam", message_type: 2, created_at: now() - 4 },
+      );
+      await sync(store, settings);
+      const posted = world
+        .posts()
+        .slice(-3)
+        .map((post) => [post.body.content, post.body.allowed_mentions]);
+      expect(posted).toEqual([
+        ["_Assigned to Alice by Sam_", { parse: [] }],
+        ["_Assigned to Bob by Sam_", { parse: [] }],
+        [`-# Assigned to <@${BOB}>`, { parse: [], users: [BOB] }],
+      ]);
+    });
+  });
+
   it("pings linked agents mentioned in private notes, reading the account's agents once", async () => {
     const world = new World();
     world.messages = [

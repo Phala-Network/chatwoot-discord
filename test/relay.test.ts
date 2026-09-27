@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { CONTENT_LIMIT } from "../src/relay/format.ts";
 import { Relay, type RelayOptions } from "../src/relay/relay.ts";
+import type { RelayMessage } from "../src/relay/types.ts";
 import { FakeForum, FORUM, MemoryStore, message, TAGS, TRIAGE } from "./helpers.ts";
 
 function relayWith(options: Partial<RelayOptions> = {}) {
@@ -326,36 +327,52 @@ describe("Relay", () => {
     expect(forum.contents().at(-1)).toBe("_Sam muted the conversation_");
   });
 
-  it("pings a newly assigned, linked agent once, allowing only that mention", async () => {
+  it("pings a newly assigned, linked agent once, in a notice after the run's live messages", async () => {
     ({ relay, forum } = relayWith({ discordUserFor: (assignee) => (assignee.id === 7 ? "592" : undefined) }));
-    await relay.relay(message());
+    // What the processor does in each run: relay the messages, then announce after live ones.
+    const run = async (relayed: RelayMessage) => {
+      if (await relay.relay(relayed)) await relay.announceAssignee(3, relayed.conversation);
+    };
+    await run(message());
     expect(forum.calls.some(([, payload]) => payload.allowed_mentions?.users)).toBe(false);
 
     const assigned = { assignee: { id: 7, name: "Kim" } };
-    await relay.relay(
-      message({ id: 110, messageType: "activity", content: "Assigned to Kim by Sam", conversation: assigned }),
-    );
-    const ping = forum.calls.at(-1)?.[1];
-    expect(ping?.content).toBe("_Assigned to Kim by Sam_\n-# Assigned to <@592>");
-    expect(ping?.allowed_mentions).toEqual({ parse: [], users: ["592"] });
+    await run(message({ id: 110, messageType: "activity", content: "Assigned to Kim by Sam", conversation: assigned }));
+    expect(forum.calls.slice(-2).map(([, payload]) => payload)).toEqual([
+      {
+        content: "_Assigned to Kim by Sam_",
+        username: "Chatwoot",
+        avatar_url: AVATARS.chatwoot,
+        allowed_mentions: { parse: [] },
+      },
+      {
+        content: "-# Assigned to <@592>",
+        username: "Chatwoot",
+        avatar_url: AVATARS.chatwoot,
+        allowed_mentions: { parse: [], users: ["592"] },
+      },
+    ]);
 
-    await relay.relay(message({ id: 111, messageType: "outgoing", content: "On it", conversation: assigned }));
-    expect(forum.calls.at(-1)?.[1].allowed_mentions).toEqual({ parse: [] });
-
+    const posted = forum.calls.length;
+    await run(message({ id: 111, messageType: "outgoing", content: "On it", conversation: assigned }));
     const unlinked = { assignee: { id: 9, name: "Bot" } };
-    await relay.relay(
-      message({ id: 112, messageType: "activity", content: "Assigned to Bot", conversation: unlinked }),
-    );
-    expect(forum.calls.at(-1)?.[1].allowed_mentions).toEqual({ parse: [] });
+    await run(message({ id: 112, messageType: "activity", content: "Assigned to Bot", conversation: unlinked }));
+    expect(forum.contents().slice(posted)).toEqual(["On it", "_Assigned to Bot_"]);
   });
 
-  it("pings in the first message when a conversation is assigned at creation", async () => {
+  it("announces the assignee after the first message when a conversation is assigned at creation", async () => {
     ({ relay, forum } = relayWith({ triage, discordUserFor: () => "592" }));
-    await relay.relay(message({ conversation: { assignee: { id: 7, name: "Kim" } } }));
-    const [card, first] = forum.calls.map(([, payload]) => payload);
+    const first = message({ conversation: { assignee: { id: 7, name: "Kim" } } });
+    expect(await relay.relay(first)).toBe(true);
+    await relay.announceAssignee(3, first.conversation);
+    const [card, reply, notice] = forum.calls.map(([, payload]) => payload);
     expect(card?.allowed_mentions).toEqual({ parse: [] });
-    expect(first?.content).toBe(`My agent will not connect\n-# <@${TRIAGE}>\n-# Assigned to <@592>`);
-    expect(first?.allowed_mentions).toEqual({ parse: [], users: ["592"] });
+    // The announcement pings the assignee, so the customer message does not as well.
+    expect(reply).toMatchObject({
+      content: `My agent will not connect\n-# <@${TRIAGE}>`,
+      allowed_mentions: { parse: [] },
+    });
+    expect(notice).toMatchObject({ content: "-# Assigned to <@592>", allowed_mentions: { parse: [], users: ["592"] } });
   });
 
   it("does not announce the assignee of an adopted post without a recorded state", async () => {
@@ -368,18 +385,21 @@ describe("Relay", () => {
       conversation: { assignee: { id: 7, name: "Kim" } },
     });
     await adopted.relay.relay(reply);
+    await adopted.relay.announceAssignee(3, reply.conversation);
     expect(adopted.forum.calls).toEqual([
       [
         "adopted-thread",
         { content: "On it", username: "Sam · Acme", avatar_url: AVATARS.chatwoot, allowed_mentions: { parse: [] } },
       ],
     ]);
+    expect(adopted.store.conversation(3, 12)?.announcedAssignee).toBe("Kim");
   });
 
   it("pings the linked assignee on every customer message", async () => {
     ({ relay, forum } = relayWith({ triage, discordUserFor: (assignee) => (assignee.id === 7 ? "592" : undefined) }));
     const assigned = { assignee: { id: 7, name: "Kim" } };
-    await relay.relay(message({ conversation: assigned })); // announced: "Assigned to"
+    await relay.relay(message({ conversation: assigned }));
+    await relay.announceAssignee(3, message({ conversation: assigned }).conversation);
     await relay.relay(message({ id: 102, content: "Hello?", conversation: assigned }));
     await relay.relay(message({ id: 103, content: "Anyone?", conversation: assigned }));
     await relay.relay(message({ id: 104, messageType: "outgoing", content: "Here", conversation: assigned }));
@@ -393,7 +413,8 @@ describe("Relay", () => {
     const replies = forum.calls.slice(1).map(([, payload]) => [payload.content, payload.allowed_mentions]);
     const users = { parse: [], users: ["592"] };
     expect(replies).toEqual([
-      [`My agent will not connect\n-# <@${TRIAGE}>\n-# Assigned to <@592>`, users],
+      [`My agent will not connect\n-# <@${TRIAGE}>`, { parse: [] }],
+      ["-# Assigned to <@592>", users],
       [`Hello?\n-# <@${TRIAGE}> <@592>`, users],
       [`Anyone?\n-# <@${TRIAGE}> <@592>`, users],
       ["Here", { parse: [] }],
@@ -482,20 +503,25 @@ describe("Relay", () => {
     expect(store.thread(3, 12)).toBeUndefined();
   });
 
-  it("relays history without notifications, and announces the assignee on the first live message", async () => {
+  it("relays history without notifications, reporting only live messages for the announcement", async () => {
     ({ relay, forum, store } = relayWith({ triage, discordUserFor: () => "592" }));
     const assigned = { assignee: { id: 7, name: "Kim" } };
     const hourAgo = NOW_SECONDS - 3601;
-    await relay.relay(message({ createdAt: hourAgo - 86400, content: "old question", conversation: assigned }));
-    await relay.relay(message({ id: 102, createdAt: hourAgo, content: "old follow-up", conversation: assigned }));
-    await relay.relay(
-      message({ id: 103, createdAt: NOW_SECONDS - 60, content: "still there?", conversation: assigned }),
-    );
+    const history = [
+      message({ createdAt: hourAgo - 86400, content: "old question", conversation: assigned }),
+      message({ id: 102, createdAt: hourAgo, content: "old follow-up", conversation: assigned }),
+    ];
+    for (const old of history) expect(await relay.relay(old)).toBe(false);
+    expect(
+      await relay.relay(
+        message({ id: 103, createdAt: NOW_SECONDS - 60, content: "still there?", conversation: assigned }),
+      ),
+    ).toBe(true);
     const replies = forum.calls.slice(1).map(([, payload]) => [payload.content, payload.allowed_mentions]);
     expect(replies).toEqual([
       ["old question", { parse: [] }],
       ["old follow-up", { parse: [] }],
-      [`still there?\n-# <@${TRIAGE}>\n-# Assigned to <@592>`, { parse: [], users: ["592"] }],
+      [`still there?\n-# <@${TRIAGE}>`, { parse: [] }],
     ]);
     // History used none of the triage budget.
     expect([...store.counters.values()]).toEqual([1, 1]);
@@ -503,11 +529,12 @@ describe("Relay", () => {
 
   it("pings on the last part of a split message only", async () => {
     ({ relay, forum } = relayWith({ triage, discordUserFor: () => "592" }));
-    const assigned = { assignee: { id: 7, name: "Kim" } };
-    await relay.relay(message({ conversation: assigned }));
+    const assigned = message({ conversation: { assignee: { id: 7, name: "Kim" } } });
+    await relay.relay(assigned);
+    await relay.announceAssignee(3, assigned.conversation);
     const text = `${"a".repeat(1500)}\n${"b".repeat(1500)}`;
-    await relay.relay(message({ id: 102, content: text, conversation: assigned }));
-    const [first, last] = forum.calls.slice(2).map(([, payload]) => payload);
+    await relay.relay(message({ id: 102, content: text, conversation: assigned.conversation }));
+    const [first, last] = forum.calls.slice(3).map(([, payload]) => payload);
     expect(first).toMatchObject({ content: "a".repeat(1500), allowed_mentions: { parse: [] } });
     expect(last).toMatchObject({
       content: `${"b".repeat(1500)}\n-# <@${TRIAGE}> <@592>`,
