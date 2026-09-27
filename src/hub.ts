@@ -1,6 +1,6 @@
 // The single Durable Object that owns all state and does all background work.
 //
-// Requests (webhook events, deferred commands, sweeps, imports) only write a job row and set an
+// Requests (webhook events, deferred commands, sweeps) only write a job row and set an
 // alarm, so they return quickly. The alarm drains due jobs one at a time, which serializes work
 // per conversation (and globally), and yields to a fresh invocation before it would exceed the
 // per-invocation subrequest limit. Failed jobs back off and retry; nothing depends on a single
@@ -34,6 +34,12 @@ const SWEEP_BUDGET = 2;
 const MAX_BACKOFF_MS = 30 * 60 * 1000;
 /** Stop draining and continue in a new invocation after this long (alarms may run 15 minutes). */
 const RUN_WALL_MS = 5 * 60 * 1000;
+/**
+ * Discord interaction tokens are valid for 15 minutes. A command that cannot start within this
+ * time is dropped: it could not report its result, and the invoker may already have acted in
+ * Chatwoot, so running it could, for example, send a reply twice.
+ */
+const COMMAND_START_DEADLINE_MS = 12 * 60 * 1000;
 
 export class Hub extends DurableObject<Env> {
   private readonly store: Store;
@@ -118,6 +124,13 @@ export class Hub extends DurableObject<Env> {
         case "command":
           // At most once: a command that sends a message must never run twice.
           this.store.deleteJob(job.key);
+          if (Date.now() - job.createdAt > COMMAND_START_DEADLINE_MS) {
+            log.warn("command expired before it could run; dropped", {
+              interactionId: payload.job.interactionId,
+              action: payload.job.action.type,
+            });
+            return "done";
+          }
           await this.runCommand(payload.job, services);
           return "done";
         case "sweep":
@@ -184,7 +197,7 @@ export class Hub extends DurableObject<Env> {
     for (const conversation of conversations) {
       const row = this.store.conversation(accountId, conversation.id);
       const latest = latestMessageId(conversation);
-      // An imported post without a cursor needs one run to pick its starting point.
+      // An adopted post without a cursor needs one run to pick its starting point.
       const needsCursor = row?.threadId !== undefined && row.cursor === undefined;
       const cursor = row?.cursor ?? settings.config.relay.startAfterMessageId;
       const behind = needsCursor || (latest !== undefined && latest > cursor);

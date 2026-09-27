@@ -442,6 +442,32 @@ describe("worker", () => {
     const toggled = world.requests.find((request) => request.url.pathname.endsWith("/toggle_status"));
     expect(toggled?.headers.get("api_access_token")).toBe("token-alice");
   });
+
+  it("drops a command whose interaction token expires before it could report the result", async () => {
+    const job = {
+      interactionId: "900002",
+      applicationId: "100000000000000001",
+      token: "interaction-token",
+      discordUserId: ALICE,
+      accountId: 3,
+      conversationId: 17,
+      ticketTitle: "Acme #17",
+      action: { type: "message", private: false, content: "Hello", files: [] },
+    };
+    const queuedAt = Date.now() - 13 * 60 * 1000;
+    await runInDurableObject(hub(), async (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO jobs (key, priority, payload, not_before, created_at) VALUES (?, 0, ?, ?, ?)",
+        `command:${job.interactionId}`,
+        JSON.stringify({ type: "command", job }),
+        queuedAt,
+        queuedAt,
+      );
+      await state.storage.setAlarm(Date.now());
+    });
+    await drain();
+    expect(world.requests).toEqual([]);
+  });
 });
 
 function cursorOf(conversationId: number): Promise<number | null> {

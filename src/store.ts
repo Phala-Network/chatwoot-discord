@@ -37,7 +37,7 @@ const DELIVERY_TTL_MS = 24 * 60 * 60 * 1000;
 export interface ConversationRow {
   threadId: string | undefined;
   state: string | undefined;
-  /** Id of the last message handled; undefined for a mapping imported without one. */
+  /** Id of the last message handled; undefined for an adopted post until its first run. */
   cursor: number | undefined;
   failMessageId: number | undefined;
   failCount: number;
@@ -48,6 +48,8 @@ export interface Job {
   payload: string;
   version: number;
   attempts: number;
+  /** When the job was first queued (ms since the epoch). */
+  createdAt: number;
 }
 
 export class Store implements RelayStore, Cache {
@@ -256,12 +258,15 @@ export class Store implements RelayStore, Cache {
   }
 
   nextDueJob(): Job | undefined {
-    return this.sql
-      .exec<{ key: string; payload: string; version: number; attempts: number }>(
-        "SELECT key, payload, version, attempts FROM jobs WHERE not_before <= ? ORDER BY priority, not_before, created_at LIMIT 1",
+    const row = this.sql
+      .exec<{ key: string; payload: string; version: number; attempts: number; created_at: number }>(
+        "SELECT key, payload, version, attempts, created_at FROM jobs WHERE not_before <= ? ORDER BY priority, not_before, created_at LIMIT 1",
         this.now(),
       )
       .toArray()[0];
+    if (!row) return undefined;
+    const { created_at: createdAt, ...job } = row;
+    return { ...job, createdAt };
   }
 
   /** Earliest time any job is due, if there are jobs. */
