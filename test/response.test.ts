@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { eventTarget } from "../src/chatwoot/webhook.js";
+import { ACTIVITY_WAIT_MS, eventTarget } from "../src/chatwoot/webhook.js";
 import { hasResponse, interactiveMessage, plainText, responseText } from "../src/relay/response.js";
 
 const response = (contentType: string, content: string, attributes: Record<string, unknown>) =>
@@ -79,6 +79,25 @@ describe("responses to interactive messages", () => {
   });
 });
 
+describe("conversation event routing", () => {
+  it("queues message_created at once, and conversation changes after their activity message", () => {
+    expect(eventTarget({ event: "message_created", id: 1, account: { id: 3 }, conversation: { id: 12 } })).toEqual({
+      type: "conversation",
+      accountId: 3,
+      conversationId: 12,
+      delayMs: 0,
+    });
+    for (const event of ["conversation_updated", "conversation_status_changed"]) {
+      expect(eventTarget({ event, id: 12, account: { id: 3 } })).toEqual({
+        type: "conversation",
+        accountId: 3,
+        conversationId: 12,
+        delayMs: ACTIVITY_WAIT_MS,
+      });
+    }
+  });
+});
+
 describe("message_updated routing", () => {
   const updated = (fields: Record<string, unknown>) => ({
     event: "message_updated",
@@ -101,6 +120,12 @@ describe("message_updated routing", () => {
     }
   });
 
+  it("queues an outgoing message the channel failed to deliver", () => {
+    const failed = { message_type: "outgoing", content_attributes: { external_error: "Outside the 24 hour window" } };
+    expect(eventTarget(updated(failed))).toEqual(target);
+    expect(eventTarget(updated({ ...failed, message_type: "incoming" }))).toBeUndefined();
+  });
+
   it("ignores other message updates", () => {
     for (const fields of [
       { content_type: "text", content: "edited", content_attributes: {} },
@@ -108,6 +133,7 @@ describe("message_updated routing", () => {
       { content_type: "input_email", content_attributes: { submitted_email: "" } },
       { content_type: "cards", content_attributes: { submitted_values: [{ title: "A" }] } },
       { content_type: "input_csat", content_attributes: { submitted_values: {} } },
+      { message_type: "outgoing", content_attributes: { external_error: null } },
     ]) {
       expect(eventTarget(updated(fields))).toBeUndefined();
     }

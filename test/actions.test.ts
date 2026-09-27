@@ -26,7 +26,8 @@ const ok = (method: string, path: string) => on(method, path, () => json({}));
 
 function run(action: CommandAction, ...routes: Route[]) {
   const mock = mockFetch(profile, ...routes);
-  return { result: executeCommand(job(action), settings, (request) => fetch(request)), requests: mock.requests };
+  const outcome = executeCommand(job(action), settings, (request) => fetch(request));
+  return { outcome, result: outcome.then(({ content }) => content), requests: mock.requests };
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -210,7 +211,7 @@ describe("executeCommand", () => {
     mockFetch(
       on("GET", `${cw}/profile`, () => json({ id: 42, name: "A", email: "a@example.com", accounts: [{ id: 99 }] })),
     );
-    expect(await executeCommand(job({ type: "block" }), settings, (request) => fetch(request))).toBe(
+    expect((await executeCommand(job({ type: "block" }), settings, (request) => fetch(request))).content).toBe(
       "❌ Your Discord account is not linked to a Chatwoot agent.",
     );
   });
@@ -223,12 +224,27 @@ describe("executeCommand", () => {
     expect(await result).toBe("❌ You do not have access to this conversation.");
   });
 
-  it("says when the conversation no longer exists", async () => {
-    const { result } = run(
+  it("says when the conversation no longer exists, so its post can be closed", async () => {
+    const { outcome } = run(
       { type: "block" },
       on("GET", conversation, () => json({ error: "Resource could not be found" }, { status: 404 })),
     );
-    expect(await result).toBe("❌ This conversation no longer exists in Chatwoot.");
+    expect(await outcome).toEqual({
+      content: "❌ This conversation no longer exists in Chatwoot.",
+      conversationGone: true,
+    });
+    const other = run({ type: "status", status: "resolved" }, ok("POST", `${conversation}/toggle_status`));
+    expect((await other.outcome).conversationGone).toBe(false);
+  });
+
+  it("does not send a reply the channel cannot deliver", async () => {
+    const { result, requests } = run(
+      { type: "message", private: false, content: "Hello again", files: [] },
+      on("GET", conversation, () => json({ id: 15, status: "open", can_reply: false, meta: { assignee: { id: 42 } } })),
+      ok("POST", `${conversation}/messages`),
+    );
+    expect(await result).toMatch(/^❌ This conversation's channel does not accept a reply right now/);
+    expect(requests.some((request) => request.method === "POST")).toBe(false);
   });
 
   it("does not leak unexpected errors", async () => {

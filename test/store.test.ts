@@ -38,7 +38,8 @@ describe("Store", () => {
       // The assignee a post announced was the assignee field of its state.
       expect(store.announcedAssignee(3, 12)).toBe("Kim Lee");
       expect(store.announcedAssignee(3, 13)).toBeUndefined();
-      expect(sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM deliveries").one().n).toBe(0);
+      const tables = sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'").toArray();
+      expect(tables.map((table) => table.name)).not.toContain("deliveries");
 
       store.savePostedPart(3, 12, 501, 0, "m1");
       store.savePostedPart(3, 12, 501, 1, "m2");

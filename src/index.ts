@@ -6,7 +6,8 @@ import { verifyKey } from "discord-interactions";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { eventTarget, isFreshTimestamp, verifyChatwootSignature } from "./chatwoot/webhook.js";
-import { FAILED, handleInteraction, privately } from "./commands/handler.js";
+import { FAILED } from "./commands/common.js";
+import { handleInteraction, privately } from "./commands/handler.js";
 import { ConfigError, loadSettings } from "./config.js";
 import { HUB_NAME } from "./hub.js";
 import { errorFields, log } from "./log.js";
@@ -62,7 +63,7 @@ app.post("/chatwoot/webhook", bodyLimit({ maxSize: 2 * 1024 * 1024 }), async (c)
   if (target.type === "message-updated") {
     await stub.enqueueMessageUpdate(target.accountId, target.conversationId, target.messageId);
   } else {
-    await stub.enqueueConversation(target.accountId, target.conversationId);
+    await stub.enqueueConversation(target.accountId, target.conversationId, target.delayMs);
   }
   return c.json({ ok: true });
 });

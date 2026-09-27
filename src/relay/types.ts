@@ -9,13 +9,21 @@ export interface RelayAssignee {
   email?: string | null | undefined;
 }
 
+/** A file (its URL), or a shared contact or location, which has no file. */
+export type RelayAttachment =
+  | { type: "file"; url: string }
+  | { type: "contact"; name: string; phone: string }
+  | { type: "location"; title: string; latitude: number; longitude: number; url: string };
+
 export interface RelayConversation {
   /** The conversation's display id (the number shown in Chatwoot). */
   id: number;
   /** open, pending, snoozed, or resolved. */
   status?: string | undefined;
   channel?: string | null;
-  inboxId?: number | null;
+  /** urgent, high, medium, low, or null. */
+  priority?: string | null;
+  labels: string[];
   contact: { name?: string | null; email?: string | null; blocked?: boolean; avatarUrl?: string | null };
   assignee?: RelayAssignee | null;
   customAttributes: Record<string, unknown>;
@@ -23,13 +31,17 @@ export interface RelayConversation {
 
 export interface RelayMessage {
   id: number;
+  /** Unix seconds. */
+  createdAt?: number | null;
   messageType: MessageType;
   private: boolean;
   /** Deleted in Chatwoot (its content is replaced by a placeholder). */
   deleted?: boolean;
   content: string;
   emailSubject?: string | null;
-  attachmentUrls: string[];
+  attachments: RelayAttachment[];
+  /** Chatwoot user id -> Discord user id of the linked agents a private note mentions. */
+  mentionedAgents?: ReadonlyMap<number, string>;
   sender?:
     | {
         name?: string | null | undefined;

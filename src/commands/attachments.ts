@@ -2,7 +2,7 @@
 // fetched, redirects are refused, and the body is read with a size cap (files are held in memory).
 
 import type { Fetch } from "../chatwoot/api.js";
-import { isDiscordAttachmentUrl, UserError } from "./handler.js";
+import { fileTooLarge, isDiscordAttachmentUrl, UserError } from "./common.js";
 import type { AttachmentRef } from "./job.js";
 
 export async function downloadAttachment(
@@ -11,8 +11,6 @@ export async function downloadAttachment(
   fetch: Fetch,
 ): Promise<{ blob: Blob; filename: string }> {
   if (!isDiscordAttachmentUrl(file.url)) throw new UserError("Attachments must be uploaded in Discord.");
-  const tooLarge = () =>
-    new UserError(`Each attachment must be ${Math.floor(maxBytes / (1024 * 1024))} MB or smaller.`);
 
   const response = await fetch(new Request(file.url, { redirect: "manual" }));
   if (!response.ok || !response.body) {
@@ -22,7 +20,7 @@ export async function downloadAttachment(
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > maxBytes) {
     await response.body.cancel();
-    throw tooLarge();
+    throw fileTooLarge(maxBytes);
   }
 
   const chunks: Uint8Array[] = [];
@@ -34,7 +32,7 @@ export async function downloadAttachment(
     total += value.byteLength;
     if (total > maxBytes) {
       await reader.cancel();
-      throw tooLarge();
+      throw fileTooLarge(maxBytes);
     }
     chunks.push(value);
   }

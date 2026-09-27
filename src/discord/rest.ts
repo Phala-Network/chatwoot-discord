@@ -7,6 +7,7 @@
 // sleeps for long; longer limits fail the job, which then retries with backoff.
 
 import type { Fetch } from "../chatwoot/api.js";
+import { isRecord, parseJson } from "../json.js";
 
 const API_BASE = "https://discord.com/api/v10";
 const USER_AGENT = "DiscordBot (chatwoot-discord, 1)";
@@ -26,7 +27,7 @@ export class DiscordHttpError extends Error {
   }
 }
 
-export interface DiscordRequest<Body = never, Query extends object = never> {
+interface DiscordRequest<Body = never, Query extends object = never> {
   body?: Body;
   query?: Query;
   /** Webhook and interaction-token routes authenticate by URL; send no bot token. */
@@ -147,16 +148,8 @@ function result(text: string) {
   return text === "" ? undefined : JSON.parse(text);
 }
 
-function parseJson(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-}
-
 function field(data: unknown, key: string): unknown {
-  return typeof data === "object" && data !== null && key in data ? Reflect.get(data, key) : undefined;
+  return isRecord(data) ? data[key] : undefined;
 }
 
 function seconds(value: unknown): number {

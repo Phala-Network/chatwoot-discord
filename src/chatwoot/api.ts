@@ -5,7 +5,7 @@
 
 import createClient from "openapi-fetch";
 import { z } from "zod";
-import type { MessageType, RelayConversation, RelayMessage } from "../relay/types.js";
+import type { MessageType, RelayAttachment, RelayConversation, RelayMessage } from "../relay/types.js";
 import type { components, operations, paths } from "./schema.js";
 
 export type Fetch = (input: Request) => Promise<Response>;
@@ -30,23 +30,43 @@ export type ChatwootConversation = components["schemas"]["conversation_show"];
 const text = z.string().nullish();
 
 /**
+ * An attachment as Attachment#push_event_data returns it (app/models/attachment.rb): files have
+ * a `data_url`; a shared location has coordinates, a `fallback_title` (the place), and maybe a
+ * `data_url`; a shared contact has its phone number as `fallback_title` and its name in `meta`.
+ */
+const attachmentSchema = z.object({
+  file_type: text,
+  data_url: text,
+  fallback_title: text,
+  coordinates_lat: z.number().nullish(),
+  coordinates_long: z.number().nullish(),
+  meta: z.object({ firstName: text, lastName: text }).nullish().catch(null),
+});
+
+/**
  * The spec's `message` schema describes a single `attachment` object and leaves `sender` and
  * `content_attributes` untyped, while the API returns `attachments[]` (app/views/api/v1/models/
  * _message.json.jbuilder), a sender with `name`/`email`/`type`/`thumbnail`, and content
- * attributes such as `email.subject`, `deleted`, and the response to an interactive message
- * (`submitted_values`, `submitted_email`, `items`; app/models/message.rb). Only those fields
- * are read; the shape of a response is checked where it is formatted (relay/response.ts).
+ * attributes such as `email.subject`, `deleted`, `external_error` (why a failed message was not
+ * delivered), and the response to an interactive message (`submitted_values`,
+ * `submitted_email`, `items`; app/models/message.rb). Only those fields are read; the shape of a
+ * response is checked where it is formatted (relay/response.ts).
  */
 const messageSchema = z.object({
   id: z.number(),
   content: text,
   message_type: z.number(),
   content_type: text,
+  /** sent, delivered, read, or failed. */
+  status: text,
+  /** Unix seconds. */
+  created_at: z.number().nullish(),
   private: z.boolean().nullish(),
   content_attributes: z
     .object({
       email: z.object({ subject: text }).nullish(),
       deleted: z.boolean().nullish(),
+      external_error: text,
       submitted_values: z.unknown().optional(),
       submitted_email: z.unknown().optional(),
       items: z.unknown().optional(),
@@ -54,7 +74,7 @@ const messageSchema = z.object({
     .nullish()
     .catch(null),
   sender: z.object({ name: text, email: text, type: text, thumbnail: text }).nullish(),
-  attachments: z.array(z.object({ data_url: text })).nullish(),
+  attachments: z.array(attachmentSchema).nullish(),
 });
 export type ChatwootMessage = z.infer<typeof messageSchema>;
 const messageListSchema = z.object({ payload: z.array(messageSchema) });
@@ -69,11 +89,11 @@ type MultipartMessage =
 export type StatusChange = operations["toggle-status-of-a-conversation"]["requestBody"]["content"]["application/json"];
 
 /** A priority for POST conversations/{id}/toggle_priority; null clears it. */
-export type ConversationPriority = NonNullable<
+type ConversationPriority = NonNullable<
   NonNullable<operations["toggle-priority-of-a-conversation"]["requestBody"]>["content"]["application/json"]["priority"]
 >;
 
-export interface NewMessage {
+interface NewMessage {
   content: string;
   private: boolean;
   files: ReadonlyArray<{ blob: Blob; filename: string }>;
@@ -273,7 +293,8 @@ export function toRelayConversation(conversationId: number, conversation: Chatwo
     id: conversationId,
     status: conversation.status,
     channel: meta?.channel ?? null,
-    inboxId: conversation.inbox_id ?? null,
+    priority: conversation.priority ?? null,
+    labels: conversation.labels ?? [],
     contact: {
       name: meta?.sender?.name ?? null,
       email: meta?.sender?.email ?? null,
@@ -287,18 +308,22 @@ export function toRelayConversation(conversationId: number, conversation: Chatwo
 
 export function toRelayMessage(
   message: ChatwootMessage,
-  context: { account: { id: number; name: string }; inboxName?: string | null; conversation: RelayConversation },
+  context: {
+    account: { id: number; name: string };
+    inboxName?: string | null;
+    conversation: RelayConversation;
+    mentionedAgents?: ReadonlyMap<number, string>;
+  },
 ): RelayMessage {
   return {
     id: message.id,
+    createdAt: message.created_at ?? null,
     messageType: MESSAGE_TYPES[message.message_type] ?? "template",
     private: message.private ?? false,
     deleted: message.content_attributes?.deleted === true,
     content: message.content ?? "",
     emailSubject: message.content_attributes?.email?.subject ?? null,
-    attachmentUrls: (message.attachments ?? []).flatMap((attachment) =>
-      attachment.data_url ? [attachment.data_url] : [],
-    ),
+    attachments: (message.attachments ?? []).flatMap(toRelayAttachment),
     sender: message.sender
       ? {
           name: message.sender.name,
@@ -310,5 +335,27 @@ export function toRelayMessage(
     account: context.account,
     inboxName: context.inboxName ?? null,
     conversation: context.conversation,
+    ...(context.mentionedAgents ? { mentionedAgents: context.mentionedAgents } : {}),
   };
+}
+
+function toRelayAttachment(attachment: z.infer<typeof attachmentSchema>): RelayAttachment[] {
+  switch (attachment.file_type) {
+    case "contact": {
+      const name = [attachment.meta?.firstName, attachment.meta?.lastName].filter(Boolean).join(" ");
+      return [{ type: "contact", name, phone: attachment.fallback_title ?? "" }];
+    }
+    case "location":
+      return [
+        {
+          type: "location",
+          title: attachment.fallback_title ?? "",
+          latitude: attachment.coordinates_lat ?? 0,
+          longitude: attachment.coordinates_long ?? 0,
+          url: attachment.data_url ?? "",
+        },
+      ];
+    default:
+      return attachment.data_url ? [{ type: "file", url: attachment.data_url }] : [];
+  }
 }

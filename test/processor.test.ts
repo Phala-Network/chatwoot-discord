@@ -1,0 +1,306 @@
+// The processor against the real Store (in a Durable Object's SQLite), with Chatwoot and
+// Discord faked at the fetch boundary, so every request counts against the budget.
+
+import { runInDurableObject } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { Budget } from "../src/budget.js";
+import { chatwootClient } from "../src/chatwoot/api.js";
+import type { Settings } from "../src/config.js";
+import { DiscordForum } from "../src/discord/forum.js";
+import { DiscordRest } from "../src/discord/rest.js";
+import {
+  type ProcessOutcome,
+  processConversation,
+  processMessageUpdate,
+  relayFor,
+  requestsPerMessage,
+} from "../src/relay/processor.js";
+import { Store } from "../src/store.js";
+import { BOB, FORUM, json, mockFetch, on, type Recorded, TRIAGE, testSettings } from "./helpers.js";
+
+const GUILD = "100000000000000044";
+const now = () => Math.floor(Date.now() / 1000);
+
+interface FakeMessage {
+  id: number;
+  content: string;
+  message_type: number;
+  private?: boolean;
+  created_at?: number;
+  status?: string;
+  content_attributes?: Record<string, unknown>;
+}
+
+/** One Chatwoot conversation (#12 in account 3) and its messages, and the Discord forum. */
+class World {
+  conversation: Record<string, unknown> = {
+    id: 12,
+    status: "open",
+    inbox_id: 2,
+    custom_attributes: {},
+    meta: { sender: { name: "Jane Doe" }, channel: "Channel::WebWidget" },
+  };
+  messages: FakeMessage[] = [];
+  failLinks = 0;
+  private threads = 0;
+  readonly requests: Recorded[];
+
+  constructor() {
+    const base = "chatwoot.example.com/api/v1/accounts/3";
+    this.requests = mockFetch(
+      on("GET", `${base}/conversations/12`, () => json(this.conversation)),
+      on("GET", `${base}/conversations/12/messages`, (request) => {
+        const after = request.url.searchParams.get("after");
+        const before = request.url.searchParams.get("before");
+        const found = this.messages.filter(
+          (message) =>
+            (after === null || message.id > Number(after)) && (before === null || message.id < Number(before)),
+        );
+        return json({ meta: {}, payload: after === null ? found.slice(-20) : found.slice(0, 100) });
+      }),
+      on("POST", `${base}/conversations/12/custom_attributes`, (request) => {
+        if (this.failLinks > 0) {
+          this.failLinks -= 1;
+          return json({ error: "unavailable" }, { status: 503 });
+        }
+        const attributes = JSON.parse(request.body).custom_attributes;
+        this.conversation.custom_attributes = { ...Object(this.conversation.custom_attributes), ...attributes };
+        return json({});
+      }),
+      on("GET", `${base}/inboxes/2`, () => json({ id: 2, name: "Web" })),
+      on("GET", `${base}/agents`, () =>
+        json([
+          { id: 42, name: "Alice", email: "alice@example.com" },
+          { id: 43, name: "Bob", email: "bob@example.com" },
+          { id: 44, name: "Dana", email: "dana@example.com" },
+        ]),
+      ),
+      on("GET", `discord.com/api/v10/channels/${FORUM}/webhooks`, () =>
+        json([{ id: "1", token: "tok", type: 1, name: "Chatwoot" }]),
+      ),
+      on("GET", `discord.com/api/v10/channels/${FORUM}`, () =>
+        json({ id: FORUM, guild_id: GUILD, available_tags: [] }),
+      ),
+      on("GET", /^discord\.com\/api\/v10\/channels\/\d+$/, (request) =>
+        json({ id: request.url.pathname.split("/").at(-1), parent_id: FORUM }),
+      ),
+      on("PATCH", /^discord\.com\/api\/v10\/channels\/\d+$/, () => json({})),
+      on("POST", "discord.com/api/v10/webhooks/1/tok", (request) => {
+        const thread = request.url.searchParams.get("thread_id");
+        if (thread) return json({ id: `m-${this.requests.length}`, channel_id: thread });
+        this.threads += 1;
+        return json({ id: "card", channel_id: `20000000000000000${this.threads}` });
+      }),
+    ).requests;
+  }
+
+  /** The contents posted into threads. */
+  replies(): string[] {
+    return this.posts()
+      .filter((post) => post.thread)
+      .map((post) => String(post.body.content));
+  }
+
+  posts(): Array<{ thread: string | null; body: Record<string, unknown> }> {
+    return this.sent("POST", "/webhooks/1/tok").map((request) => ({
+      thread: request.url.searchParams.get("thread_id"),
+      body: JSON.parse(request.body),
+    }));
+  }
+
+  sent(method: string, path: string): Recorded[] {
+    return this.requests.filter((request) => request.method === method && request.url.pathname.endsWith(path));
+  }
+}
+
+async function withStore<T>(run: (store: Store) => Promise<T>): Promise<T> {
+  return runInDurableObject(env.HUB.getByName(`processor-${crypto.randomUUID()}`), (_instance, state) => {
+    const store = new Store(state.storage.sql);
+    store.migrate();
+    return run(store);
+  });
+}
+
+/** What the Hub gives a job: services over one invocation's budget. */
+function context(store: Store, settings: Settings, limit = settings.config.relay.subrequestBudget) {
+  const budget = new Budget(limit);
+  const chatwoot = chatwootClient(settings.config.chatwoot.baseUrl, "relay-token", budget.fetch);
+  const forum = new DiscordForum(new DiscordRest("bot", budget.fetch), store);
+  return { settings, store, forum, budget, chatwoot, relay: relayFor(settings, forum, store) };
+}
+
+/** Runs the conversation job until it is done, each run with a fresh budget, like the Hub does. */
+async function sync(store: Store, settings: Settings, limit?: number): Promise<ProcessOutcome[]> {
+  const outcomes: ProcessOutcome[] = [];
+  for (let run = 0; run < 30; run += 1) {
+    const outcome = await processConversation(context(store, settings, limit), 3, 12);
+    outcomes.push(outcome);
+    if (outcome === "done") return outcomes;
+  }
+  throw new Error("never finished");
+}
+
+afterEach(() => vi.restoreAllMocks());
+
+describe("processConversation", () => {
+  it("starts after the cutover watermark, for new and adopted posts alike", async () => {
+    const settings = testSettings({ relay: { startAfterMessageId: 500 } });
+    const world = new World();
+    world.messages = [
+      { id: 499, content: "before the cutover", message_type: 0 },
+      { id: 500, content: "the other relay's last", message_type: 0 },
+      { id: 501, content: "after", message_type: 0 },
+    ];
+    await withStore(async (store) => {
+      await sync(store, settings);
+      expect(world.replies()).toEqual([`after\n-# <@${TRIAGE}>`]);
+    });
+
+    // An adopted post (linked from the conversation) continues after the watermark too.
+    world.conversation.custom_attributes = {
+      discord_thread: `https://discord.com/channels/${GUILD}/300000000000000001`,
+    };
+    const before = world.posts().length;
+    await withStore(async (store) => {
+      await sync(store, settings);
+      expect(world.posts().slice(before)).toEqual([
+        { thread: "300000000000000001", body: expect.objectContaining({ content: `after\n-# <@${TRIAGE}>` }) },
+      ]);
+      expect(store.conversation(3, 12)?.cursor).toBe(501);
+    });
+  });
+
+  it("relays an older conversation's history without calling anyone, then notifies on live messages", async () => {
+    const world = new World();
+    world.messages = [
+      { id: 1, content: "last month", message_type: 0, created_at: now() - 30 * 86400 },
+      { id: 2, content: "an answer", message_type: 1, created_at: now() - 30 * 86400 },
+      { id: 3, content: "just now", message_type: 0, created_at: now() - 5 },
+    ];
+    await withStore(async (store) => {
+      await sync(store, testSettings());
+      expect(world.replies()).toEqual(["last month", "an answer", `just now\n-# <@${TRIAGE}>`]);
+    });
+  });
+
+  it("pages through more than 100 messages in one run", async () => {
+    const world = new World();
+    world.messages = Array.from({ length: 130 }, (_, index) => ({
+      id: index + 1,
+      content: `n${index + 1}`,
+      message_type: 1,
+    }));
+    await withStore(async (store) => {
+      expect(await sync(store, testSettings(), 1000)).toEqual(["done"]);
+      expect(world.replies()).toEqual(world.messages.map((message) => message.content));
+      const pages = world.sent("GET", "/messages").map((request) => request.url.searchParams.get("after"));
+      expect(pages).toEqual(["0", "100"]);
+    });
+  });
+
+  it("yields before the subrequest budget runs out and resumes without posting anything twice", async () => {
+    const settings = testSettings();
+    const world = new World();
+    world.messages = Array.from({ length: 60 }, (_, index) => ({
+      id: index + 1,
+      content: `n${index + 1}`,
+      message_type: 1,
+    }));
+    const limit = requestsPerMessage(settings.config.relay.maxChunks) + 10;
+    await withStore(async (store) => {
+      const outcomes = await sync(store, settings, limit);
+      expect(outcomes.length).toBeGreaterThan(2);
+      expect(outcomes.slice(0, -1).every((outcome) => outcome === "yield")).toBe(true);
+      expect(world.replies()).toEqual(world.messages.map((message) => message.content));
+    });
+  });
+
+  it("links the post from its conversation, and tries again on a later sync when that fails", async () => {
+    const world = new World();
+    world.messages = [{ id: 1, content: "hello", message_type: 0 }];
+    world.failLinks = 1;
+    await withStore(async (store) => {
+      const settings = testSettings();
+      await sync(store, settings);
+      expect(world.conversation.custom_attributes).toEqual({});
+      await sync(store, settings);
+      const link = `https://discord.com/channels/${GUILD}/${store.thread(3, 12)}`;
+      expect(world.conversation.custom_attributes).toEqual({ discord_thread: link });
+      // Linked: later syncs do not write it again.
+      await sync(store, settings);
+      expect(world.sent("POST", "/custom_attributes")).toHaveLength(2);
+      expect(world.replies()).toEqual([`hello\n-# <@${TRIAGE}>`]);
+    });
+  });
+
+  it("relays only the account's allowed inboxes", async () => {
+    const world = new World();
+    world.messages = [{ id: 1, content: "hello", message_type: 0 }];
+    const accounts = (inboxIds: number[]) =>
+      testSettings({ accounts: [{ id: 3, name: "Acme", forumChannelId: "100000000000000055", inboxIds }] });
+    await withStore(async (store) => {
+      await sync(store, accounts([9]));
+      expect(world.posts()).toEqual([]);
+      await sync(store, accounts([2, 9]));
+      expect(world.replies()).toEqual([`hello\n-# <@${TRIAGE}>`]);
+    });
+  });
+
+  it("pings linked agents mentioned in private notes, reading the account's agents once", async () => {
+    const world = new World();
+    world.messages = [
+      { id: 1, content: "[@Bob](mention://user/43/Bob) can you check?", message_type: 1, private: true },
+      {
+        id: 2,
+        content: "[@Dana](mention://user/44/Dana) and [@Bob](mention://user/43/Bob)",
+        message_type: 1,
+        private: true,
+      },
+      { id: 3, content: "[@Bob](mention://user/43/Bob) in a reply", message_type: 1 },
+    ];
+    await withStore(async (store) => {
+      await sync(store, testSettings());
+      const posted = world
+        .posts()
+        .filter((post) => post.thread)
+        .map((post) => [post.body.content, post.body.allowed_mentions]);
+      expect(posted).toEqual([
+        [`🔒 **Internal note**\n<@${BOB}> can you check?`, { parse: [], users: [BOB] }],
+        // Dana is not linked to a Discord user.
+        [`🔒 **Internal note**\n@Dana and <@${BOB}>`, { parse: [], users: [BOB] }],
+        // Chatwoot notifies mentions in private notes only.
+        ["@Bob in a reply", { parse: [] }],
+      ]);
+      expect(world.sent("GET", "/agents")).toHaveLength(1);
+    });
+  });
+});
+
+describe("processMessageUpdate", () => {
+  it("says once in the post when an agent's reply could not be delivered", async () => {
+    const world = new World();
+    world.messages = [{ id: 1, content: "hello", message_type: 0 }];
+    await withStore(async (store) => {
+      const settings = testSettings();
+      await sync(store, settings);
+      const failed: FakeMessage = {
+        id: 2,
+        content: "Here is your refund",
+        message_type: 1,
+        status: "failed",
+        content_attributes: { external_error: "Message outside the 24 hour window" },
+      };
+      world.messages.push(failed);
+      await processMessageUpdate(context(store, settings), 3, 12, 2);
+      await processMessageUpdate(context(store, settings), 3, 12, 2);
+      const notices = world.replies().filter((content) => content?.startsWith("⚠️"));
+      expect(notices).toEqual(["⚠️ A reply could not be delivered to the customer: Message outside the 24 hour window"]);
+
+      // A delivered message posts nothing.
+      world.messages.push({ id: 3, content: "ok", message_type: 1, status: "sent" });
+      await processMessageUpdate(context(store, settings), 3, 12, 3);
+      expect(world.replies().filter((content) => content?.startsWith("⚠️"))).toHaveLength(1);
+    });
+  });
+});

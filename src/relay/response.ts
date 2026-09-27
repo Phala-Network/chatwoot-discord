@@ -3,16 +3,14 @@
 // (lib/integrations/slack/update_slack_message_service.rb at v4.18.0), in Discord markdown.
 // Nothing here performs I/O.
 
+import { isRecord } from "../json.js";
+import { chatwootMentions } from "./format.js";
+
 /** Message content types whose submitted response is posted (SUPPORTED_CONTENT_TYPES). */
-export const RESPONSE_CONTENT_TYPES: ReadonlySet<string> = new Set([
-  "input_select",
-  "form",
-  "input_csat",
-  "input_email",
-]);
+const RESPONSE_CONTENT_TYPES: ReadonlySet<string> = new Set(["input_select", "form", "input_csat", "input_email"]);
 
 /** The fields of a Chatwoot message (webhook payload or API) that carry a submitted response. */
-export interface InteractiveMessage {
+interface InteractiveMessage {
   contentType: unknown;
   /** The question: the message content. */
   content: unknown;
@@ -52,7 +50,7 @@ export function responseText(message: InteractiveMessage): string | undefined {
   if (!hasResponse(message)) return undefined;
   const response = formattedResponse(message);
   if (!response) return undefined;
-  const question = plainText(withoutMentions(message.content));
+  const question = plainText(typeof message.content === "string" ? chatwootMentions(message.content) : message.content);
   return [question, response].filter((part) => part !== "").join("\n\n");
 }
 
@@ -131,12 +129,6 @@ export function plainText(value: unknown): string {
   return decodeEntities(text).trim();
 }
 
-/** Mentions become their `@name` (MENTION_REGEX in lib/regex_helper.rb). */
-function withoutMentions(content: unknown): unknown {
-  if (typeof content !== "string") return content;
-  return content.replace(/\[(@[^\]]+)\]\(mention:\/\/(?:user|team)\/\d+\/([^)]+)\)/g, "$1");
-}
-
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: "\u00a0" };
 
 function decodeEntities(text: string): string {
@@ -168,8 +160,4 @@ function toArray(value: unknown): unknown[] {
   if (Array.isArray(value)) return value;
   if (value === null || value === undefined || isRecord(value)) return [];
   return [value];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

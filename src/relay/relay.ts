@@ -9,18 +9,21 @@ import {
   body,
   CONTENT_LIMIT,
   charLength,
+  contactName,
   conversationUrl,
   customerAvatar,
   customerName,
-  fromCustomer,
   postHeader,
   SYSTEM_USERNAME,
   senderAvatar,
   senderName,
   split,
+  tagNames,
   threadTitle,
+  titleSubject,
   topicTag,
 } from "./format.js";
+import { Notifier, type TriageOptions } from "./notify.js";
 import type { RelayAssignee, RelayConversation, RelayMessage } from "./types.js";
 
 export type WebhookMessage = RESTPostAPIWebhookWithTokenJSONBody;
@@ -44,7 +47,7 @@ export interface ForumClient {
    * Modifies a post. Discord rejects changes to an archived post unless the same request
    * unarchives it. Throws UnknownThreadError if the post no longer exists.
    */
-  updateThread(threadId: string, patch: { archived: boolean; applied_tags?: string[] }): Promise<void>;
+  updateThread(threadId: string, patch: { archived: boolean; applied_tags?: string[]; name?: string }): Promise<void>;
   /** Deletes a message the forum's webhook posted; a message that is already gone counts as deleted. */
   deleteMessage(forumChannelId: string, threadId: string, messageId: string): Promise<void>;
   /** Tag ids matched by name, case-insensitively; missing tags are skipped. At most 5. */
@@ -58,6 +61,12 @@ export interface ForumClient {
 export interface RelayStore {
   thread(accountId: number, conversationId: number): string | undefined;
   saveThread(accountId: number, conversationId: number, threadId: string): void;
+  /**
+   * The subject a post's title ends with and the title last applied; undefined for a post whose
+   * title this service did not record (adopted, or created by an earlier version).
+   */
+  title(accountId: number, conversationId: number): { subject: string; applied: string } | undefined;
+  saveTitle(accountId: number, conversationId: number, subject: string, applied: string): void;
   /** The tags and archived flag last applied to the post (see Relay.stateOf). */
   state(accountId: number, conversationId: number): string | undefined;
   saveState(accountId: number, conversationId: number, state: string): void;
@@ -75,17 +84,12 @@ export interface RelayStore {
   increment(name: string): number;
 }
 
-export interface AccountTarget {
+interface AccountTarget {
   forumChannelId: string;
+  /** Shown in post titles. */
+  name: string;
   /** Forum tag for the account (product/brand). */
   tag: string;
-}
-
-export interface TriageOptions {
-  userId: string;
-  name: string;
-  perConversationPerHour: number;
-  perHour: number;
 }
 
 export interface RelayOptions {
@@ -96,36 +100,29 @@ export interface RelayOptions {
   target(accountId: number): AccountTarget;
   topicAttribute: string;
   maxChunks: number;
-  triage?: TriageOptions;
+  triage?: TriageOptions | undefined;
   /** The Discord user linked to a Chatwoot assignee, if any. */
-  discordUserFor?: (assignee: RelayAssignee) => string | undefined;
-  /** Called when a post is created, so the conversation can link back to it. */
-  linkPost?: (accountId: number, conversationId: number, url: string) => Promise<void>;
-  /** Receives errors that are swallowed because they must not stop the relay. */
-  onIgnoredError?: (error: unknown) => void;
+  discordUserFor?: ((assignee: RelayAssignee) => string | undefined) | undefined;
+  /** Messages created longer ago than this are relayed without notifications. */
+  liveSeconds: number;
   now?: () => Date;
 }
 
 /** A stored state that matches no conversation: the post's archived flag must be applied again. */
 const OUT_OF_DATE = "";
 const RELAYED_TYPES = new Set(["incoming", "outgoing", "activity"]);
-/** The longest user mention (snowflakes have at most 20 digits). */
-const LONGEST_MENTION = `<@${"9".repeat(20)}>`;
 
 export class Relay {
-  /**
-   * Room kept in a message's first part for its notification lines, so a message splits into
-   * the same parts on every attempt and a retry can resume after the parts already posted.
-   */
-  private readonly reserve: number;
+  private readonly notifier: Notifier;
 
   constructor(private readonly options: RelayOptions) {
-    const lines = [
-      `-# ${LONGEST_MENTION} ${LONGEST_MENTION}`,
-      assignedLine(LONGEST_MENTION),
-      ...(options.triage ? [conversationBudgetNote(options.triage), hourlyBudgetNote(options.triage)] : []),
-    ];
-    this.reserve = lines.reduce((sum, line) => sum + line.length + 1, 0);
+    this.notifier = new Notifier({
+      store: options.store,
+      triage: options.triage,
+      discordUserFor: options.discordUserFor,
+      liveSeconds: options.liveSeconds,
+      now: options.now ?? (() => new Date()),
+    });
   }
 
   /**
@@ -158,29 +155,30 @@ export class Relay {
       threadId = await this.createPost(message);
       await this.post(message, parts, threadId);
     }
-
-    const assignee = assigneeTag(conversation);
-    if (store.announcedAssignee(accountId, conversation.id) !== assignee) {
-      store.saveAnnouncedAssignee(accountId, conversation.id, assignee);
-    }
-    // Posting into an archived post unarchives it: a resolved post must be archived again.
-    if (conversation.status === "resolved") store.saveState(accountId, conversation.id, OUT_OF_DATE);
+    this.notifier.posted(message);
+    this.unarchived(accountId, conversation);
   }
 
   /**
-   * Brings the post's tags and archived flag in line with the conversation. Discord only lets a
-   * request change an archived post's tags if it also unarchives it, so tags are applied with
-   * `archived: false` and a resolved post is archived by a second request.
+   * Brings the post's tags, title, and archived flag in line with the conversation. Discord only
+   * lets a request change an archived post if it also unarchives it, so the changes are applied
+   * with `archived: false` and a resolved post is archived by a second request.
    */
   async sync(accountId: number, conversation: RelayConversation, threadId: string): Promise<void> {
     const { store, forum } = this.options;
     const state = this.stateOf(conversation);
     if (store.state(accountId, conversation.id) === state) return;
+    const titled = store.title(accountId, conversation.id);
+    const title = titled ? threadTitle(this.options.target(accountId).name, conversation, titled.subject) : undefined;
+    // Only a changed title is sent: other updates leave the post's name alone.
+    const rename = titled && title !== titled.applied ? title : undefined;
     try {
       await forum.updateThread(threadId, {
         archived: false,
         applied_tags: await this.postTags(accountId, conversation),
+        ...(rename ? { name: rename } : {}),
       });
+      if (titled && rename) store.saveTitle(accountId, conversation.id, titled.subject, rename);
       if (conversation.status === "resolved") await forum.updateThread(threadId, { archived: true });
     } catch (error) {
       if (!(error instanceof UnknownThreadError)) throw error;
@@ -221,23 +219,28 @@ export class Relay {
       store.forgetThread(accountId, conversation.id);
       return false;
     }
-    if (conversation.status === "resolved") store.saveState(accountId, conversation.id, OUT_OF_DATE);
+    this.unarchived(accountId, conversation);
     return true;
   }
 
-  /** Posts a notice into the conversation's post when one of its messages could not be relayed. */
-  async notifyFailure(accountId: number, conversationId: number, messageId: number): Promise<void> {
-    const threadId = this.options.store.thread(accountId, conversationId);
-    if (!threadId) return;
+  /**
+   * Posts a notice into the conversation's post, e.g. when one of its messages could not be
+   * relayed or delivered. Returns false if there is no post. Like any message, it unarchives the
+   * post; a resolved post needs a sync.
+   */
+  async notify(accountId: number, conversation: RelayConversation, content: string): Promise<boolean> {
+    const { store } = this.options;
+    const threadId = store.thread(accountId, conversation.id);
+    if (!threadId) return false;
     try {
-      await this.notice(
-        accountId,
-        threadId,
-        `⚠️ Chatwoot message ${messageId} could not be relayed. Check it in Chatwoot.`,
-      );
-    } catch {
-      // Best effort: the failure is already logged by the caller.
+      await this.notice(accountId, threadId, content);
+    } catch (error) {
+      if (!(error instanceof UnknownThreadError)) throw error;
+      store.forgetThread(accountId, conversation.id);
+      return false;
     }
+    this.unarchived(accountId, conversation);
+    return true;
   }
 
   /** The conversation was deleted in Chatwoot: says so in its post, archives it, and forgets it. */
@@ -254,41 +257,57 @@ export class Relay {
     store.forgetThread(accountId, conversationId);
   }
 
+  /** What the post shows of the conversation: a post is synced when this changes. */
   stateOf(conversation: RelayConversation): string {
-    return `${conversation.status ?? ""}|${assigneeTag(conversation)}|${topicTag(conversation, this.options.topicAttribute) ?? ""}`;
+    return JSON.stringify([
+      conversation.status ?? "",
+      assigneeTag(conversation),
+      topicTag(conversation, this.options.topicAttribute) ?? "",
+      conversation.priority ?? "",
+      conversation.labels.toSorted(),
+      contactName(conversation.contact),
+    ]);
   }
 
-  /** The Discord messages for one Chatwoot message; only the first carries notification lines. */
+  /**
+   * The Discord messages for one Chatwoot message. The notification lines go on the last part
+   * (before a truncation note), so a bot they call sees the whole message. Every part is split
+   * with room for them, so a message splits the same way on every attempt and a retry can
+   * resume after the parts already posted.
+   */
   private parts(message: RelayMessage, text: string): WebhookMessage[] {
     const { frontendUrl, maxChunks } = this.options;
-    const announced = this.newAssignee(message);
-    const assignee = fromCustomer(message) && !announced ? this.linkedAssignee(message) : undefined;
-    const triage = this.triage(message);
-    const mentions = [triage.mention, assignee].filter((id) => id !== undefined).map((id) => `<@${id}>`);
-    const lines = [
-      mentions.length > 0 ? `-# ${mentions.join(" ")}` : undefined,
-      triage.note,
-      announced ? assignedLine(`<@${announced}>`) : undefined,
-    ].filter((line) => line !== undefined);
-
-    let chunks = split(text, CONTENT_LIMIT - this.reserve);
-    if (chunks.length > maxChunks) {
-      const link = conversationUrl(frontendUrl, message.account.id, message.conversation.id);
-      chunks = [
-        ...chunks.slice(0, maxChunks),
-        `-# Message truncated (${charLength(text)} characters). Full text: <${link}>`,
-      ];
-    }
+    const notification = this.notifier.notification(message);
+    const chunks = split(text, CONTENT_LIMIT - this.notifier.reserve);
+    const kept = chunks.slice(0, maxChunks);
     const username = senderName(message);
     const avatar = senderAvatar(message, this.options.avatars);
-    const pinged = announced ?? assignee;
-    return chunks.map((chunk, index) => ({
-      content: index === 0 ? [chunk, ...lines].join("\n") : chunk,
-      username,
-      avatar_url: avatar,
-      // Only the notified assignee may be pinged; the triage mention stays a literal token.
-      allowed_mentions: index === 0 && pinged ? { parse: [], users: [pinged] } : { parse: [] },
-    }));
+    const agents = [...(message.mentionedAgents?.values() ?? [])];
+    const parts: WebhookMessage[] = kept.map((chunk, index) => {
+      const last = index === kept.length - 1;
+      const content = last ? [chunk, ...notification.lines].join("\n") : chunk;
+      // Linked agents mentioned in a private note are pinged where the mention is.
+      const users = new Set([
+        ...(last ? notification.users : []),
+        ...agents.filter((id) => chunk.includes(`<@${id}>`)),
+      ]);
+      return {
+        content,
+        username,
+        avatar_url: avatar,
+        allowed_mentions: users.size > 0 ? { parse: [], users: [...users] } : { parse: [] },
+      };
+    });
+    if (chunks.length > maxChunks) {
+      const link = conversationUrl(frontendUrl, message.account.id, message.conversation.id);
+      parts.push({
+        content: `-# Message truncated (${charLength(text)} characters). Full text: <${link}>`,
+        username,
+        avatar_url: avatar,
+        allowed_mentions: { parse: [] },
+      });
+    }
+    return parts;
   }
 
   /** Posts the parts not yet posted, recording each one. */
@@ -305,45 +324,6 @@ export class Relay {
     }
   }
 
-  /** The triage bot mention for a customer message, or a note when its hourly budget is used up. */
-  private triage(message: RelayMessage): { mention?: string; note?: string } {
-    const { triage, store } = this.options;
-    if (!triage || !fromCustomer(message)) return {};
-    // Count each message once: a retry after a failed post must not use up the budget.
-    if (!store.firstAttempt(`triage:seen:${message.account.id}:${message.id}`)) return { mention: triage.userId };
-
-    const hour = this.now().toISOString().slice(0, 13);
-    const key = `${message.account.id}:${message.conversation.id}`;
-    if (store.increment(`triage:${key}:${hour}`) > triage.perConversationPerHour) {
-      return { note: conversationBudgetNote(triage) };
-    }
-    if (store.increment(`triage:${hour}`) > triage.perHour) return { note: hourlyBudgetNote(triage) };
-    return { mention: triage.userId };
-  }
-
-  /** The linked Discord user of the conversation's assignee, if any. */
-  private linkedAssignee(message: RelayMessage): string | undefined {
-    const assignee = message.conversation.assignee;
-    return assignee?.id ? this.options.discordUserFor?.(assignee) : undefined;
-  }
-
-  /**
-   * When the conversation has an assignee the post has not announced yet, their Discord id, so
-   * the message pings them (which also adds them to the post).
-   */
-  private newAssignee(message: RelayMessage): string | undefined {
-    const { store } = this.options;
-    const accountId = message.account.id;
-    const conversationId = message.conversation.id;
-    // A post adopted from the link attribute has no recorded state, so an unchanged assignee
-    // cannot be told apart from a new one: do not ping (its tags are still brought up to date).
-    if (store.state(accountId, conversationId) === undefined && store.thread(accountId, conversationId)) {
-      return undefined;
-    }
-    if (store.announcedAssignee(accountId, conversationId) === assigneeTag(message.conversation)) return undefined;
-    return this.linkedAssignee(message);
-  }
-
   /**
    * The post opens with a ticket card (channel, inbox, customer email, Chatwoot link); the message
    * itself follows as the first reply. Bots act on replies but not on a forum post's opening
@@ -353,10 +333,13 @@ export class Relay {
     const { store, forum, frontendUrl } = this.options;
     const accountId = message.account.id;
     const conversation = message.conversation;
+    const target = this.options.target(accountId);
     const link = conversationUrl(frontendUrl, accountId, conversation.id);
     const header = postHeader(message);
+    const subject = titleSubject(message);
+    const title = threadTitle(target.name, conversation, subject);
     const post: WebhookMessage = {
-      thread_name: threadTitle(message),
+      thread_name: title,
       content: [header, `[Open in Chatwoot](<${link}>)`].filter((line) => line !== "").join("\n"),
       username: SYSTEM_USERNAME,
       avatar_url: this.options.avatars.chatwoot,
@@ -364,11 +347,10 @@ export class Relay {
     };
     const tags = await this.postTags(accountId, conversation);
     if (tags.length > 0) post.applied_tags = tags;
-    const forumChannelId = this.options.target(accountId).forumChannelId;
-    const { channelId: threadId } = await forum.execute(forumChannelId, post);
+    const { channelId: threadId } = await forum.execute(target.forumChannelId, post);
     store.saveThread(accountId, conversation.id, threadId);
+    store.saveTitle(accountId, conversation.id, subject, title);
     store.saveState(accountId, conversation.id, this.stateOf(conversation));
-    await this.linkPost(accountId, conversation.id, forumChannelId, threadId);
     return threadId;
   }
 
@@ -386,41 +368,16 @@ export class Relay {
     );
   }
 
-  /** The link is a convenience; failing to record it must not stop the relay. */
-  private async linkPost(accountId: number, conversationId: number, forumChannelId: string, threadId: string) {
-    const { linkPost, forum, onIgnoredError } = this.options;
-    if (!linkPost) return;
-    try {
-      await linkPost(accountId, conversationId, await forum.postUrl(forumChannelId, threadId));
-    } catch (error) {
-      onIgnoredError?.(error);
-    }
+  /** Posting into an archived post unarchives it: a resolved post must be archived again. */
+  private unarchived(accountId: number, conversation: RelayConversation): void {
+    if (conversation.status === "resolved") this.options.store.saveState(accountId, conversation.id, OUT_OF_DATE);
   }
 
-  /** Tags: account, status, assignee, and topic (when set). */
   private postTags(accountId: number, conversation: RelayConversation): Promise<string[]> {
     const target = this.options.target(accountId);
-    return this.options.forum.tagIds(target.forumChannelId, [
-      target.tag,
-      conversation.status,
-      assigneeTag(conversation),
-      topicTag(conversation, this.options.topicAttribute),
-    ]);
+    return this.options.forum.tagIds(
+      target.forumChannelId,
+      tagNames(target.tag, conversation, this.options.topicAttribute),
+    );
   }
-
-  private now(): Date {
-    return this.options.now ? this.options.now() : new Date();
-  }
-}
-
-function assignedLine(mention: string): string {
-  return `-# Assigned to ${mention}`;
-}
-
-function conversationBudgetNote(triage: TriageOptions): string {
-  return `-# ${triage.name} not called: more than ${triage.perConversationPerHour} customer messages in this conversation this hour. Ask it here if needed.`;
-}
-
-function hourlyBudgetNote(triage: TriageOptions): string {
-  return `-# ${triage.name} not called: more than ${triage.perHour} customer messages this hour. Ask it here if needed.`;
 }

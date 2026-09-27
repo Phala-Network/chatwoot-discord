@@ -2,6 +2,8 @@
 // Worker secrets. Both are validated once per isolate.
 
 import { z } from "zod";
+import { parseJson } from "./json.js";
+import { requestsPerMessage } from "./relay/processor.js";
 
 /** Gravatar's built-in "mp" default image, forced (it does not depend on any email). */
 const DEFAULT_CONTACT_AVATAR = "https://gravatar.com/avatar/?d=mp&f=y&s=256";
@@ -9,105 +11,121 @@ const DEFAULT_CONTACT_AVATAR = "https://gravatar.com/avatar/?d=mp&f=y&s=256";
 const snowflake = z.string().regex(/^\d{17,20}$/, "must be a Discord snowflake id");
 const MB = 1024 * 1024;
 
-export const configSchema = z.object({
-  chatwoot: z.object({
-    /** Base URL for Chatwoot's REST API, e.g. https://chatwoot.example.com */
-    baseUrl: z.url({ protocol: /^https?$/ }),
-    /** Base URL for dashboard links in Discord. Defaults to baseUrl. */
-    publicUrl: z.url({ protocol: /^https?$/ }).optional(),
-  }),
-  accounts: z
-    .array(
-      z.object({
-        id: z.number().int().positive(),
-        /** Shown in post titles ("[Name #12] ...") and command confirmations. */
-        name: z.string().min(1),
-        forumChannelId: snowflake,
-        /** Forum tag applied to the account's posts. Defaults to `name`. */
-        tag: z.string().min(1).optional(),
-      }),
-    )
-    .min(1)
-    .refine((accounts) => new Set(accounts.map((account) => account.id)).size === accounts.length, {
-      message: "account ids must be unique",
+export const configSchema = z
+  .strictObject({
+    /** Removed in 0.2.0 (`discord.applicationId` is no longer needed); accepted and ignored. */
+    discord: z.unknown().optional(),
+    chatwoot: z.strictObject({
+      /** Base URL for Chatwoot's REST API, e.g. https://chatwoot.example.com */
+      baseUrl: z.url({ protocol: /^https?$/ }),
+      /** Base URL for dashboard links in Discord. Defaults to baseUrl. */
+      publicUrl: z.url({ protocol: /^https?$/ }).optional(),
     }),
-  agents: z
-    .array(
-      z.object({
-        discordUserId: snowflake,
-        /** The Chatwoot agent's email. Used to ping assignees and to resolve /assign targets. */
-        email: z.email(),
+    accounts: z
+      .array(
+        z.strictObject({
+          id: z.number().int().positive(),
+          /** Shown in post titles ("[Name #12] ...") and command confirmations. */
+          name: z.string().min(1),
+          forumChannelId: snowflake,
+          /** Forum tag applied to the account's posts. Defaults to `name`. */
+          tag: z.string().min(1).optional(),
+          /** Relay only conversations of these inboxes. Unset: every inbox. */
+          inboxIds: z.array(z.number().int().positive()).min(1).optional(),
+        }),
+      )
+      .min(1)
+      .refine((accounts) => new Set(accounts.map((account) => account.id)).size === accounts.length, {
+        message: "account ids must be unique",
       }),
-    )
-    .default([]),
-  triage: z
-    .object({
-      /** Discord user id of a triage bot to mention on customer messages. Unset: no mention. */
-      userId: snowflake.optional(),
-      name: z.string().min(1).default("Triage bot"),
-      perConversationPerHour: z.number().int().positive().default(5),
-      perHour: z.number().int().positive().default(30),
-      /** Labels that introduce the triage bot's draft code block ("Reply with this"). */
-      draftLabels: z.array(z.string().min(1)).min(1).default(["Draft"]),
-    })
-    .prefault({}),
-  relay: z
-    .object({
-      /** A very long message is cut after this many Discord messages. */
-      maxChunks: z.number().int().min(1).max(10).default(4),
-      /** Conversation custom attribute used as a topic tag. */
-      topicAttribute: z.string().min(1).default("topic"),
-      /** Conversation custom attribute that receives the post URL (a Link attribute). Empty disables it. */
-      linkAttribute: z.string().default("discord_thread"),
-      /** Messages with an id at or below this are never relayed (cutover watermark). */
-      startAfterMessageId: z.number().int().min(0).default(0),
-      /** A message that fails this many times is skipped with a notice in its post. */
-      maxAttempts: z.number().int().min(1).default(5),
-      /** Outbound requests per Durable Object alarm run (the Workers Free limit is 50). */
-      subrequestBudget: z.number().int().min(20).max(1000).default(45),
-    })
-    .prefault({}),
-  avatars: z
-    .object({
-      /** Avatar of messages from Chatwoot (agents, notes, activity). Default: the instance's own icon. */
-      chatwoot: z.url({ protocol: /^https$/ }).optional(),
-      /** Avatar of customers who have none in Chatwoot. Default: Gravatar's "mystery person" image. */
-      contact: z.url({ protocol: /^https$/ }).default(DEFAULT_CONTACT_AVATAR),
-    })
-    .prefault({}),
-  reconcile: z
-    .object({
-      /** The sweep looks at conversations with activity within at least this window. */
-      lookbackSeconds: z.number().int().min(60).default(3600),
-      /** After downtime, the sweep catches up at most this far back. */
-      maxCatchUpSeconds: z
-        .number()
-        .int()
-        .min(60)
-        .default(7 * 24 * 3600),
-    })
-    .prefault({}),
-  attachments: z
-    .object({
-      maxFiles: z.number().int().min(0).max(10).default(10),
-      /** Per file. Files are held in memory (128 MB per isolate), so keep the total modest. */
-      maxFileBytes: z
-        .number()
-        .int()
-        .positive()
-        .default(25 * MB),
-      maxTotalBytes: z
-        .number()
-        .int()
-        .positive()
-        .max(80 * MB)
-        .default(50 * MB),
-    })
-    .prefault({}),
-});
+    agents: z
+      .array(
+        z.strictObject({
+          discordUserId: snowflake,
+          /** The Chatwoot agent's email. Used to ping assignees and to resolve /assign targets. */
+          email: z.email(),
+        }),
+      )
+      .default([]),
+    triage: z
+      .strictObject({
+        /** Discord user id of a triage bot to mention on customer messages. Unset: no mention. */
+        userId: snowflake.optional(),
+        /** Shown in budget notes; bounded so a message's notification lines always fit. */
+        name: z.string().min(1).max(100).default("Triage bot"),
+        perConversationPerHour: z.number().int().positive().default(5),
+        perHour: z.number().int().positive().default(30),
+        /** Labels that introduce the triage bot's draft code block ("Reply with this"). */
+        draftLabels: z.array(z.string().min(1)).min(1).default(["Draft"]),
+      })
+      .prefault({}),
+    relay: z
+      .strictObject({
+        /** A very long message is cut after this many Discord messages. */
+        maxChunks: z.number().int().min(1).max(10).default(4),
+        /** Conversation custom attribute used as a topic tag. */
+        topicAttribute: z.string().min(1).default("topic"),
+        /** Conversation custom attribute that receives the post URL (a Link attribute). Empty disables it. */
+        linkAttribute: z.string().default("discord_thread"),
+        /** Messages with an id at or below this are never relayed (cutover watermark). */
+        startAfterMessageId: z.number().int().min(0).default(0),
+        /** A message that fails this many times is skipped with a notice in its post. */
+        maxAttempts: z.number().int().min(1).default(5),
+        /** Outbound requests per Durable Object alarm run (the Workers Free limit is 50). */
+        subrequestBudget: z.number().int().min(20).max(1000).default(45),
+      })
+      .prefault({}),
+    avatars: z
+      .strictObject({
+        /** Avatar of messages from Chatwoot (agents, notes, activity). Default: the instance's own icon. */
+        chatwoot: z.url({ protocol: /^https$/ }).optional(),
+        /** Avatar of customers who have none in Chatwoot. Default: Gravatar's "mystery person" image. */
+        contact: z.url({ protocol: /^https$/ }).default(DEFAULT_CONTACT_AVATAR),
+      })
+      .prefault({}),
+    reconcile: z
+      .strictObject({
+        /** The sweep looks at conversations with activity within at least this window. */
+        lookbackSeconds: z.number().int().min(60).default(3600),
+        /** After downtime, the sweep catches up at most this far back. */
+        maxCatchUpSeconds: z
+          .number()
+          .int()
+          .min(60)
+          .default(7 * 24 * 3600),
+      })
+      .prefault({}),
+    attachments: z
+      .strictObject({
+        maxFiles: z.number().int().min(0).max(10).default(10),
+        /** Per file. Files are held in memory (128 MB per isolate), so keep the total modest. */
+        maxFileBytes: z
+          .number()
+          .int()
+          .positive()
+          .default(25 * MB),
+        maxTotalBytes: z
+          .number()
+          .int()
+          .positive()
+          .max(80 * MB)
+          .default(50 * MB),
+      })
+      .prefault({}),
+  })
+  .refine((config) => config.relay.subrequestBudget > requestsPerMessage(config.relay.maxChunks), {
+    path: ["relay", "subrequestBudget"],
+    message: "must leave room for one message of relay.maxChunks parts (see requestsPerMessage)",
+  })
+  .transform(({ discord: _removed, ...config }) => config);
 
-export type Config = z.infer<typeof configSchema>;
-export type AccountConfig = Config["accounts"][number];
+type Config = z.infer<typeof configSchema>;
+type AccountConfig = Config["accounts"][number];
+
+/** Whether conversations of `inboxId` are relayed for the account (see `inboxIds`). */
+export function relaysInbox(account: AccountConfig, inboxId: number | undefined): boolean {
+  return !account.inboxIds || (inboxId !== undefined && account.inboxIds.includes(inboxId));
+}
 
 const jsonRecord = z
   .string()
@@ -132,7 +150,7 @@ export const secretsSchema = z.object({
   CHATWOOT_AGENT_TOKENS: jsonRecord.default({}),
 });
 
-export type Secrets = z.infer<typeof secretsSchema>;
+type Secrets = z.infer<typeof secretsSchema>;
 
 export interface Settings {
   config: Config;
@@ -161,7 +179,7 @@ export function loadSettings(env: Env): Settings {
   const cached = cache.get(env);
   if (cached) return cached;
 
-  const rawConfig: unknown = typeof env.CONFIG === "string" ? safeJson(env.CONFIG) : env.CONFIG;
+  const rawConfig: unknown = typeof env.CONFIG === "string" ? parseJson(env.CONFIG) : env.CONFIG;
   const config = configSchema.safeParse(rawConfig);
   if (!config.success) throw new ConfigError(`Invalid CONFIG: ${describe(config.error)}`);
   const secrets = secretsSchema.safeParse({
@@ -197,14 +215,6 @@ export function buildSettings(config: Config, secrets: Secrets): Settings {
     discordUserForEmail: (email) => (email ? discordByEmail.get(email.toLowerCase()) : undefined),
     agentToken: (discordUserId) => secrets.CHATWOOT_AGENT_TOKENS[discordUserId],
   };
-}
-
-function safeJson(value: string): unknown {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return undefined;
-  }
 }
 
 function describe(error: z.ZodError): string {

@@ -17,10 +17,11 @@ import {
   WebhookType,
 } from "discord-api-types/v10";
 import { z } from "zod";
+import { parseJson } from "../json.js";
 import { type ForumClient, UnknownThreadError, type WebhookMessage } from "../relay/relay.js";
 import { DiscordHttpError, type DiscordRest } from "./rest.js";
 
-export const WEBHOOK_NAME = "Chatwoot";
+const WEBHOOK_NAME = "Chatwoot";
 const MAX_TAGS = 5;
 const TAG_CACHE_MS = 10 * 60 * 1000;
 const UNKNOWN_WEBHOOK = 10015;
@@ -72,7 +73,10 @@ export class DiscordForum implements ForumClient {
     }
   }
 
-  async updateThread(threadId: string, patch: { archived: boolean; applied_tags?: string[] }): Promise<void> {
+  async updateThread(
+    threadId: string,
+    patch: { archived: boolean; applied_tags?: string[]; name?: string },
+  ): Promise<void> {
     try {
       await this.rest.patch<RESTPatchAPIChannelResult, RESTPatchAPIChannelJSONBody>(Routes.channel(threadId), {
         body: patch,
@@ -163,13 +167,4 @@ export class DiscordForum implements ForumClient {
 
 function webhookKey(forumChannelId: string): string {
   return `forum:${forumChannelId}:webhook`;
-}
-
-function parseJson(value: string | undefined): unknown {
-  if (value === undefined) return undefined;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return undefined;
-  }
 }
