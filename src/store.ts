@@ -413,9 +413,12 @@ export class Store implements RelayStore, Cache {
     );
   }
 
-  /** Makes a job due now without counting an attempt (used when an invocation runs out of budget). */
-  deferJob(job: Job): void {
-    this.sql.exec("UPDATE jobs SET not_before = ? WHERE key = ?", this.now(), job.key);
+  /**
+   * Makes a job due after `delayMs` without counting an attempt: when an invocation runs out of
+   * budget, or Discord rate limits it.
+   */
+  deferJob(job: Job, delayMs = 0): void {
+    this.sql.exec("UPDATE jobs SET not_before = ? WHERE key = ?", this.now() + delayMs, job.key);
   }
 
   prune(): void {

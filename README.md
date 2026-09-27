@@ -248,8 +248,11 @@ while the conversation is resolved.
 - A conversation deleted in Chatwoot gets a notice in its post, which is archived and forgotten.
   Chatwoot sends no webhook for a deletion (v4.18.0), so this happens when the next event for it
   arrives or a command in the post finds it gone.
-- A post deleted in Discord is recreated on the next message. A message that still fails after
-  `relay.maxAttempts` (5) attempts is skipped with a ⚠️ notice in its post.
+- A post deleted in Discord is recreated on the next message. A message Discord refuses as
+  invalid (an HTTP 4xx other than 401, 403, 404, 408, and 429) is skipped with a ⚠️ notice in its
+  post after `relay.maxAttempts` (5) attempts. Rate limits, Discord server errors, timeouts, and
+  missing permissions never skip a message: its job retries until Discord accepts it, and waits
+  as long as Discord asks when rate limited.
 
 ## Configuration reference
 
@@ -271,7 +274,7 @@ replace:
 | `relay.topicAttribute` | `topic` | Conversation attribute used as a topic tag. |
 | `relay.linkAttribute` | `discord_thread` | Conversation attribute that receives the post URL (`""` disables). |
 | `relay.startAfterMessageId` | `0` | Messages with an id at or below this are never relayed (cutover watermark). |
-| `relay.maxAttempts` | `5` | Attempts before a message is skipped with a notice. |
+| `relay.maxAttempts` | `5` | Attempts before a message Discord refuses as invalid is skipped with a notice. |
 | `relay.subrequestBudget` | `45` | Outbound requests per alarm invocation (Free plan limit: 50). At least `relay.maxChunks` + 19: a run's setup and one message's worst case (`src/relay/limits.ts`). |
 | `reconcile.lookbackSeconds` | `3600` | Minimum sweep window (conversations with activity within it are checked). Messages older than this are relayed without notifications. |
 | `reconcile.maxCatchUpSeconds` | `604800` | Maximum sweep window after downtime. |
@@ -333,8 +336,10 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
   work serialized per conversation and makes the triage budget and post lookups coordination-free;
   support volumes are far below its throughput. Jobs run by priority (commands first), failures
   retry with exponential backoff (5 s … 30 min), and a run yields before the subrequest limit.
+  A job that Discord rate limits waits as long as Discord asks, without counting an attempt.
   A job that fails 10 times (about 70 minutes) is dropped: the sweep queues its conversation
-  again while it is behind, and its next webhook starts a new job. While a conversation's job is
+  again while it is behind, and its next webhook starts a new job. Every outbound request times
+  out after 60 seconds, which counts as a failed attempt. While a conversation's job is
   backing off, new events for it wait for its next attempt.
 - **Relaying** (`src/relay/`): a webhook only queues "sync conversation N" (conversation events
   wait 10 seconds first, for Chatwoot to create the change's activity message, which sends no

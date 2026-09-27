@@ -43,6 +43,7 @@ class World {
   conversations = new Map<number, FakeConversation>();
   threads = new Map<string, string>(); // thread id -> parent forum
   failReplies = 0;
+  rateLimitReplies = 0;
   failPatches = 0;
   failConversations = 0;
   private replies = 0;
@@ -163,6 +164,10 @@ class World {
       on("POST", "discord.com/api/v10/webhooks/1/tok", (request) => {
         const thread = request.url.searchParams.get("thread_id");
         if (thread) {
+          if (this.rateLimitReplies > 0) {
+            this.rateLimitReplies -= 1;
+            return json({ message: "You are being rate limited.", retry_after: 64.5, global: false }, { status: 429 });
+          }
           if (this.failReplies > 0) {
             this.failReplies -= 1;
             return json({ message: "Internal Server Error" }, { status: 500 });
@@ -396,6 +401,25 @@ describe("worker", () => {
       "hello\n-# <@100000000000000777>", // attempt answered with HTTP 500
       "hello\n-# <@100000000000000777>",
     ]);
+  });
+
+  it("waits out a rate limit as long as Discord asks, without counting it as a failed attempt", async () => {
+    world.conversation(40, [{ id: 4001, content: "hello", message_type: 0 }]);
+    world.rateLimitReplies = 12; // more rounds than a job's attempt limit
+    await chatwootWebhook(created(40));
+    await drain();
+    for (let round = 1; round < 12; round += 1) {
+      expect(await jobAttempts("conversation:3:40")).toBe(0);
+      expect(await jobDelay("conversation:3:40")).toBeGreaterThan(60_000);
+      await makeJobsDue();
+      await drain();
+    }
+    await makeJobsDue();
+    await drain();
+    expect(await jobAttempts("conversation:3:40")).toBeUndefined();
+    expect(await cursorOf(40)).toBe(4001);
+    const replies = world.webhookPosts().filter((post) => post.thread);
+    expect(replies.at(-1)?.body.content).toBe("hello\n-# <@100000000000000777>");
   });
 
   it("recovers a missing mapping from the conversation's link attribute instead of opening a second post", async () => {

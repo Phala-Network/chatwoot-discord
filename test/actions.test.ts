@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { Budget } from "../src/budget.ts";
 import { executeCommand } from "../src/commands/actions.ts";
 import { type CommandAction, type CommandJob, commandJobSchema } from "../src/commands/job.ts";
 import { ALICE, json, mockFetch, on, type Route, testSettings } from "./helpers.ts";
@@ -255,5 +256,21 @@ describe("executeCommand", () => {
       ),
     );
     expect(await result).toBe("❌ That did not work. Please do it in Chatwoot.");
+  });
+
+  it("gives up on a request that does not answer in time, saying it may have been done", async () => {
+    // Answers the profile, then never answers until the request is aborted.
+    const hanging = (request: Request) =>
+      request.url.endsWith("/profile")
+        ? Promise.resolve(json({ id: 42, accounts: [{ id: 3 }] }))
+        : new Promise<Response>((_resolve, reject) => {
+            request.signal.addEventListener("abort", () => reject(request.signal.reason));
+          });
+    const { content } = await executeCommand(
+      job({ type: "status", status: "resolved" }),
+      settings,
+      new Budget(20, hanging, 20).fetch,
+    );
+    expect(content).toMatch(/^❌ Chatwoot or Discord did not answer in time\. Check in Chatwoot whether it was done/);
   });
 });

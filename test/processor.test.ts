@@ -41,6 +41,8 @@ class World {
   failLinks = 0;
   /** Posts deleted in Discord. */
   goneThreads = new Set<string>();
+  /** Discord's answer to posting into a thread, while it fails. */
+  threadFailure: (() => Response) | undefined;
   /** Discord users by id; others are unknown to Discord. */
   discordUsers: Record<string, { avatar: string | null; discriminator: string }> = {};
   private threads = 0;
@@ -98,6 +100,7 @@ class World {
       }),
       on("POST", "discord.com/api/v10/webhooks/1/tok", (request) => {
         const thread = request.url.searchParams.get("thread_id");
+        if (thread && this.threadFailure) return this.threadFailure();
         if (thread) return json({ id: `m-${this.requests.length}`, channel_id: thread });
         this.threads += 1;
         return json({ id: "card", channel_id: `20000000000000000${this.threads}` });
@@ -232,7 +235,9 @@ describe("processConversation", () => {
     const world = new World();
     // The link attribute names a post deleted in Discord: checked, then a new post is opened.
     world.goneThreads.add("300000000000000009");
-    world.conversation.custom_attributes = { discord_thread: `https://discord.com/channels/${GUILD}/300000000000000009` };
+    world.conversation.custom_attributes = {
+      discord_thread: `https://discord.com/channels/${GUILD}/300000000000000009`,
+    };
     world.discordUsers = { [BOB]: { avatar: "a_bob", discriminator: "0" } };
     world.messages = [
       { id: 1, content: "x\n".repeat(15_000), message_type: 1, sender: { id: 43, type: "user", name: "Bob" } },
@@ -242,6 +247,62 @@ describe("processConversation", () => {
       const replies = world.replies();
       expect(replies).toHaveLength(11);
       expect(replies.at(-1)).toMatch(/^-# Message truncated/);
+    });
+  });
+
+  it.each([
+    [
+      "a rate limit",
+      () => json({ message: "You are being rate limited.", retry_after: 64.5, global: false }, { status: 429 }),
+    ],
+    ["a server error", () => json({ message: "Internal Server Error" }, { status: 500 })],
+    ["missing permissions", () => json({ message: "Missing Permissions", code: 50013 }, { status: 403 })],
+  ])("never skips a message because of %s, however often it fails", async (_name, failure) => {
+    const settings = testSettings();
+    const world = new World();
+    world.messages = [
+      { id: 1, content: "first", message_type: 1 },
+      { id: 2, content: "second", message_type: 1 },
+    ];
+    world.threadFailure = failure;
+    await withStore(async (store) => {
+      // Every job attempt fails, far more often than relay.maxAttempts.
+      for (let attempt = 0; attempt < settings.config.relay.maxAttempts * 2; attempt += 1) {
+        await expect(processConversation(context(store, settings), 3, 12)).rejects.toThrow(/Discord HTTP/);
+      }
+      expect(store.conversation(3, 12)?.cursor).toBe(0);
+      world.threadFailure = undefined;
+      await sync(store, settings);
+      // Each failed attempt was at the first message; "second" never went ahead of it.
+      const attempts = settings.config.relay.maxAttempts * 2;
+      expect(world.replies()).toEqual([...Array<string>(attempts + 1).fill("first"), "second"]);
+    });
+  });
+
+  it("skips a message Discord keeps refusing as invalid, with a notice, after relay.maxAttempts", async () => {
+    const settings = testSettings();
+    const { maxAttempts } = settings.config.relay;
+    const world = new World();
+    world.messages = [{ id: 1, content: "first", message_type: 1 }];
+    await withStore(async (store) => {
+      await sync(store, settings);
+      world.messages.push({ id: 2, content: "refused", message_type: 1 });
+      // Refused on every attempt; the notice afterwards is accepted.
+      let refusals = maxAttempts;
+      world.threadFailure = () => {
+        refusals -= 1;
+        return refusals >= 0
+          ? json({ message: "Invalid Form Body", code: 50035 }, { status: 400 })
+          : json({ id: "notice", channel_id: "x" });
+      };
+      for (let attempt = 1; attempt < maxAttempts; attempt += 1) {
+        await expect(processConversation(context(store, settings), 3, 12)).rejects.toThrow(/Discord HTTP 400/);
+      }
+      expect(await processConversation(context(store, settings), 3, 12)).toBe("done");
+      expect(store.conversation(3, 12)?.cursor).toBe(2);
+      expect(world.posts().at(-1)?.body.content).toBe(
+        "⚠️ Chatwoot message 2 could not be relayed. Check it in Chatwoot.",
+      );
     });
   });
 

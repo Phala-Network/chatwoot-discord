@@ -117,8 +117,13 @@ function failure(error: unknown, { action, accountId, conversationId }: CommandJ
     return "❌ You do not have access to this conversation.";
   }
   log.error("command failed", { action: action.type, accountId, conversationId, ...errorFields(error) });
+  // A request that timed out may still have been carried out.
+  if (error instanceof DOMException && error.name === "TimeoutError") return TIMED_OUT;
   return FAILED;
 }
+
+const TIMED_OUT =
+  "❌ Chatwoot or Discord did not answer in time. Check in Chatwoot whether it was done before trying again.";
 
 function statusMessage(status: StatusChange["status"], snoozedUntil: number | undefined): string {
   switch (status) {

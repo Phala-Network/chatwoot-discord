@@ -220,7 +220,16 @@ describe("DiscordRest", () => {
       (request) => fetch(request),
       async () => {},
     );
-    await expect(rest.get("/channels/1")).rejects.toMatchObject({ status: 429 });
+    // The error says how long Discord asked to wait, so the job can wait that long.
+    await expect(rest.get("/channels/1")).rejects.toMatchObject({
+      status: 429,
+      retryAfterMs: expect.closeTo(60_000, -3),
+    });
+    // The route stays limited: the next call fails at once, with the time left.
+    await expect(rest.get("/channels/1")).rejects.toMatchObject({
+      status: 429,
+      retryAfterMs: expect.closeTo(60_000, -3),
+    });
     const error = await rest.get("/channels/2").catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(DiscordHttpError);
     expect(error).toMatchObject({ status: 403, code: 50001 });

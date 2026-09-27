@@ -15,7 +15,7 @@ import {
   toRelayMessage,
 } from "../chatwoot/api.ts";
 import { relaysInbox, type Settings } from "../config.ts";
-import type { DiscordRest } from "../discord/rest.ts";
+import { type DiscordRest, isInvalidRequest } from "../discord/rest.ts";
 import { fetchAvatarUrl } from "../discord/users.ts";
 import { parseJson } from "../json.ts";
 import { errorFields, log } from "../log.ts";
@@ -129,6 +129,10 @@ export async function processConversation(
         await relay.relay(relayMessage);
       } catch (error) {
         if (error instanceof BudgetExhaustedError) return "yield";
+        // Only a request Discord refuses as invalid counts towards skipping the message. Anything
+        // else (a rate limit, a server error, a timeout, a missing permission) waits for the
+        // job's retry, however long it takes, so the message is never skipped for it.
+        if (!isInvalidRequest(error)) throw error;
         const attempts = store.recordFailure(accountId, conversationId, message.id);
         if (attempts < limits.maxAttempts) throw error;
         log.error("relay gave up on message", {
