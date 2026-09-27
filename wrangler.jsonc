@@ -6,7 +6,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "chatwoot-discord",
   "main": "src/index.ts",
-  // Keep in step with test/wrangler.test.jsonc; run `bun run types` after changing it.
+  // Keep in step with test/wrangler.test.jsonc; run `npm run types` after changing it.
   "compatibility_date": "2026-08-15",
   "observability": { "enabled": true },
   // Reconciliation sweep. The Free plan allows 5 cron triggers per account; this uses one.

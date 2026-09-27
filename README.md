@@ -68,10 +68,12 @@ To connect an AI agent, see [Connecting an AI agent](docs/ai-agent.md).
 You need a Cloudflare account, a Chatwoot instance (v4.18 or later) reachable from the internet,
 and a Discord server where you can add an application and a forum channel.
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Phala-Network/chatwoot-discord)
+
 1. [Create the Discord application and forum](#1-discord).
 2. [Prepare Chatwoot](#2-chatwoot): a relay user, the link attribute, and each agent's token.
-3. [Deploy the Worker](#3-cloudflare): set `CONFIG` in `wrangler.jsonc`, the secrets, and run
-   `bun run deploy`.
+3. [Deploy the Worker](#3-cloudflare) with the button above or from a checkout: the secrets,
+   and `CONFIG` in `wrangler.jsonc`.
 4. [Connect them](#4-connect): the Discord interactions URL, the commands, and the Chatwoot
    webhooks.
 
@@ -114,22 +116,38 @@ The account must have the API/webhooks feature enabled (it is by default on self
 
 ### 3. Cloudflare
 
-Requirements: Bun (the version in `packageManager` in `package.json`) and Node 24.
+The secrets are described in [`.dev.vars.example`](.dev.vars.example). Use `{}` for
+`CHATWOOT_WEBHOOK_SECRETS` until step 4, and `{"<discord user id>":"<chatwoot token>"}` for
+`CHATWOOT_AGENT_TOKENS`.
+
+**With the Deploy to Cloudflare button** ([how it works](https://developers.cloudflare.com/workers/platform/deploy-buttons/)):
+
+1. Select the button under [Deploy](#deploy). Cloudflare copies this repository to your GitHub or
+   GitLab account, asks for the Worker name and each secret, and deploys with
+   [Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/), which then deploys
+   every push to your copy. Keep the detected commands: `npm run build` (a wrangler dry run) and
+   `npm run deploy`.
+2. In your copy, replace the placeholder `CONFIG` in `wrangler.jsonc` (see the
+   [configuration reference](#configuration-reference)) and push; Workers Builds deploys it.
+3. Change a secret later in the Cloudflare dashboard (your Worker > **Settings** >
+   **Variables and Secrets**) or with `npx wrangler secret put <NAME>` from a checkout.
+
+**From a checkout.** Requirements: Node 24 (24.15 or later) and npm (the version in
+`packageManager` in `package.json`).
 
 ```sh
-bun install
+npm ci
 # Replace the placeholder CONFIG in wrangler.jsonc (see the configuration reference).
-bun run wrangler secret put DISCORD_BOT_TOKEN
-bun run wrangler secret put DISCORD_PUBLIC_KEY
-bun run wrangler secret put CHATWOOT_RELAY_TOKEN
-bun run wrangler secret put CHATWOOT_WEBHOOK_SECRETS   # {} for now; filled in step 4
-bun run wrangler secret put CHATWOOT_AGENT_TOKENS      # {"<discord user id>":"<chatwoot token>"}
-bun run deploy
-curl https://<worker>/healthz                           # {"ok":true}
+npx wrangler secret put DISCORD_BOT_TOKEN
+npx wrangler secret put DISCORD_PUBLIC_KEY
+npx wrangler secret put CHATWOOT_RELAY_TOKEN
+npx wrangler secret put CHATWOOT_WEBHOOK_SECRETS   # {} for now; filled in step 4
+npx wrangler secret put CHATWOOT_AGENT_TOKENS      # {"<discord user id>":"<chatwoot token>"}
+npm run deploy
 ```
 
-The secrets are described in [`.dev.vars.example`](.dev.vars.example). `/healthz` answers 503
-while `CONFIG` or a secret is invalid; the reason is in Workers Logs.
+Either way, check the Worker: `curl https://<worker>/healthz` answers `{"ok":true}`, or 503 while
+`CONFIG` or a secret is invalid; the reason is in Workers Logs.
 
 Self-hosting without Cloudflare is possible with the open-source
 [workerd](https://github.com/cloudflare/workerd) runtime (Durable Objects with SQLite and alarms
@@ -140,15 +158,16 @@ are supported); you provide TLS, the cron trigger, and storage persistence.
 1. In the Discord application, set **Interactions Endpoint URL** to
    `https://<worker>/discord/interactions`. Discord verifies it with a signed request, so the
    Worker must be deployed first.
-2. Register the commands in your server (again whenever `src/commands/definitions.ts` changes):
+2. Register the commands in your server (again whenever `src/commands/definitions.ts` changes),
+   from a checkout after `npm ci`:
    ```sh
-   DISCORD_BOT_TOKEN=... bun run register-commands --application <app id> --guild <guild id>
+   DISCORD_BOT_TOKEN=... npm run register-commands -- --application <app id> --guild <guild id>
    ```
 3. In each Chatwoot account, add a webhook (Settings → Integrations → Webhooks) for
    `https://<worker>/chatwoot/webhook`, subscribed to `message_created`, `message_updated`
    (deleted messages and responses to interactive messages), `conversation_updated` (assignee and
    topic), and `conversation_status_changed`. Then store the webhook secrets by account id,
-   `{"<account id>":"<webhook secret>"}`, with `bun run wrangler secret put CHATWOOT_WEBHOOK_SECRETS`.
+   `{"<account id>":"<webhook secret>"}`, in the `CHATWOOT_WEBHOOK_SECRETS` secret.
 
 ## Commands
 
@@ -316,13 +335,13 @@ post for those conversations.
 ## Development
 
 ```sh
-bun install --frozen-lockfile
-bun run lint && bun run typecheck && bun run test   # tests run inside workerd (@cloudflare/vitest-pool-workers)
-bun run build                                        # wrangler dry run into dist/
-bun run dev                                          # local Worker; copy .dev.vars.example to .dev.vars first
-bun run types                                        # regenerate worker-configuration.d.ts (runtime types)
-bun run gen:chatwoot                                 # regenerate src/chatwoot/schema.d.ts (Chatwoot v4.18.0 OpenAPI)
-sh docs/assets/render.sh                             # re-render the README illustrations (needs Docker)
+npm ci
+npm run lint && npm run typecheck && npm test   # tests run inside workerd (@cloudflare/vitest-pool-workers)
+npm run build                                   # wrangler dry run into dist/
+npm run dev                                     # local Worker; copy .dev.vars.example to .dev.vars first
+npm run types                                   # regenerate worker-configuration.d.ts (runtime types)
+npm run gen:chatwoot                            # regenerate src/chatwoot/schema.d.ts (Chatwoot v4.18.0 OpenAPI)
+sh docs/assets/render.sh                        # re-render the README illustrations (needs Docker)
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and releases, and

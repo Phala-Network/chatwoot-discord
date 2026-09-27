@@ -15,13 +15,14 @@ const MAX_ATTEMPTS = 3;
 
 /** A non-2xx answer from Discord. `code` is Discord's JSON error code when present. */
 export class DiscordHttpError extends Error {
-  constructor(
-    readonly status: number,
-    readonly code: number | undefined,
-    discordMessage: string,
-  ) {
+  readonly status: number;
+  readonly code: number | undefined;
+
+  constructor(status: number, code: number | undefined, discordMessage: string) {
     super(`Discord HTTP ${status}${code === undefined ? "" : ` (code ${code})`}: ${discordMessage}`);
     this.name = "DiscordHttpError";
+    this.status = status;
+    this.code = code;
   }
 }
 
@@ -38,12 +39,19 @@ export class DiscordRest {
   /** Bucket key -> when it has requests again (ms since the epoch). */
   private readonly resets = new Map<string, number>();
   private globalReset = 0;
+  private readonly token: string | undefined;
+  private readonly fetch: Fetch;
+  private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(
-    private readonly token: string | undefined,
-    private readonly fetch: Fetch,
-    private readonly sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-  ) {}
+    token: string | undefined,
+    fetch: Fetch,
+    sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  ) {
+    this.token = token;
+    this.fetch = fetch;
+    this.sleep = sleep;
+  }
 
   get<Result, Query extends object = never>(path: string, request?: DiscordRequest<never, Query>): Promise<Result> {
     return this.request("GET", path, request);

@@ -12,12 +12,12 @@ export type Fetch = (input: Request) => Promise<Response>;
 
 /** A non-2xx answer from Chatwoot. Only the status is kept: bodies may echo user content. */
 export class ChatwootError extends Error {
-  constructor(
-    readonly status: number,
-    operation: string,
-  ) {
+  readonly status: number;
+
+  constructor(status: number, operation: string) {
     super(`Chatwoot ${operation} failed with HTTP ${status}`);
     this.name = "ChatwootError";
+    this.status = status;
   }
 }
 
