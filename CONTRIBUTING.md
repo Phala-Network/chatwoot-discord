@@ -1,6 +1,8 @@
 # Contributing
 
-Thanks for helping! Bug reports and pull requests are welcome.
+Thanks for helping! Bug reports and pull requests are welcome. Everyone taking part is expected
+to follow the [Code of Conduct](CODE_OF_CONDUCT.md). Report security issues privately as described
+in [SECURITY.md](SECURITY.md), not in a public issue.
 
 ## Development
 
@@ -32,3 +34,27 @@ pnpm build       # wrangler dry-run bundle (no deploy)
 ## Pull requests
 
 Describe the change and how you verified it. CI must pass (lint, typecheck, tests, dry-run build).
+Add user-visible changes to the "Unreleased" section of [CHANGELOG.md](CHANGELOG.md), following
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## Releases
+
+Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The public interface
+is what an operator depends on: the `CONFIG` keys, the Worker secrets, the HTTP endpoints, the
+Discord commands, and the required Chatwoot and Discord setup. A change that makes an existing
+deployment need operator action is a major version (a minor version while the major is `0`).
+
+To release, a maintainer:
+
+1. Opens a pull request that moves the "Unreleased" entries in `CHANGELOG.md` under a new
+   `## [x.y.z] - YYYY-MM-DD` heading, updates the comparison links at the bottom, and sets
+   `version` in `package.json` to `x.y.z`.
+2. Merges it once CI passes.
+3. Tags the merge commit and publishes a GitHub release with that changelog section as notes:
+   ```sh
+   git tag -a vx.y.z -m "vx.y.z" && git push origin vx.y.z
+   gh release create vx.y.z --title "vx.y.z" --notes "<changelog section>"
+   ```
+
+The package is not published to npm (`"private": true`); operators deploy a release with
+`wrangler deploy`.

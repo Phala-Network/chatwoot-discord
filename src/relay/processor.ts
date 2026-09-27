@@ -49,7 +49,7 @@ export async function processConversation(
 
   let cursor = store.conversation(accountId, conversationId)?.cursor;
   if (cursor === undefined && store.thread(accountId, conversationId)) {
-    // A post created by a previous relay (imported or recovered) already holds the history. With a
+    // A post created by a previous relay (adopted from the link attribute) already holds the history. With a
     // cutover watermark, continue after it; otherwise start after the latest message.
     if (limits.startAfterMessageId > 0) {
       cursor = limits.startAfterMessageId;
@@ -61,7 +61,7 @@ export async function processConversation(
   }
   if (cursor === undefined) {
     // Persist the starting point before posting, so a post created by a failed attempt is not
-    // mistaken for an imported one (whose history would be skipped) on retry.
+    // mistaken for an adopted one (whose history would be skipped) on retry.
     cursor = limits.startAfterMessageId;
     store.setCursor(accountId, conversationId, cursor);
   }

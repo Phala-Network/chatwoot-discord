@@ -2,6 +2,22 @@
   "name": "chatwoot-discord",
   "version": "0.1.0",
   "description": "Mirror Chatwoot conversations into a Discord forum and handle tickets with Discord commands.",
+  "keywords": [
+    "chatwoot",
+    "discord",
+    "cloudflare-workers",
+    "durable-objects",
+    "helpdesk",
+    "customer-support"
+  ],
+  "homepage": "https://github.com/Phala-Network/chatwoot-discord#readme",
+  "bugs": {
+    "url": "https://github.com/Phala-Network/chatwoot-discord/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Phala-Network/chatwoot-discord.git"
+  },
   "license": "MIT",
   "private": true,
   "type": "module",

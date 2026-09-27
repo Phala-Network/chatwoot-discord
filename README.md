@@ -1,13 +1,18 @@
 # chatwoot-discord
 
+[![CI](https://github.com/Phala-Network/chatwoot-discord/actions/workflows/ci.yml/badge.svg)](https://github.com/Phala-Network/chatwoot-discord/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/Phala-Network/chatwoot-discord/actions/workflows/codeql.yml/badge.svg)](https://github.com/Phala-Network/chatwoot-discord/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Phala-Network/chatwoot-discord/badge)](https://scorecard.dev/viewer/?uri=github.com/Phala-Network/chatwoot-discord)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Mirror [Chatwoot](https://www.chatwoot.com/) conversations into a Discord forum, and work tickets
 from Discord with slash commands. Runs on Cloudflare Workers (fits the Free plan) and talks to
 Chatwoot only through its official webhooks and REST API, and to Discord only through its HTTP
 API and HTTP interactions (no gateway connection).
 
-> _Screenshot placeholder: the forum, filtered by an agent's tag and `open`._
->
-> _Screenshot placeholder: a ticket post with the ticket card, replies, and the `/reply` editor._
+Support agents who already live in Discord can follow every conversation there, filter the forum
+by tags, and answer customers without switching to Chatwoot, while Chatwoot stays the system of
+record.
 
 ## What it does
 
@@ -89,17 +94,22 @@ Cron (every 5 min) ──▶ Worker ──RPC──▶   ├─▶ Chatwoot REST
   stored in the Durable Object and run from its alarm, which downloads attachments (only from
   `cdn.discordapp.com`/`media.discordapp.net`, no redirects, size-capped), calls Chatwoot as the
   agent, and edits the original response. Commands run at most once (never retried) so a reply is
-  never sent twice.
+  never sent twice, and a command that cannot start within 12 minutes is dropped, because Discord's
+  interaction token (valid 15 minutes) could no longer report its result.
 
 Discord calls use a small fetch-based client (`src/discord/rest.ts`) that honours `retry_after`
 and `X-RateLimit-*`. `@discordjs/rest` was evaluated: its web build runs on workerd, but its request
 hook is typed against Node/undici streams and it keeps timers and queues across calls, which does
 not fit per-invocation subrequest accounting on Workers.
 
-## Setup
+## Requirements
 
-Requirements: Node 24, pnpm (version pinned in `package.json`), a Cloudflare account (Free plan is
-enough), a Chatwoot instance (v4.18 or later) reachable from the internet, and a Discord server.
+- Node 24 and pnpm (version pinned in `package.json`)
+- A Cloudflare account (the Free plan is enough)
+- A Chatwoot instance (v4.18 or later) reachable from the internet
+- A Discord server where you can add an application and a forum channel
+
+## Setup
 
 ### 1. Discord
 
@@ -250,6 +260,13 @@ Chatwoot routes the relay needs that are missing from the published OpenAPI spec
 through small, documented wrappers in `src/chatwoot/api.ts` (conversation `mute`, and the
 `updated_within` filter on the conversation list), each verified against Chatwoot's source at
 v4.18.0.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development and release steps, and
+[CHANGELOG.md](CHANGELOG.md) for the release history. This project follows the
+[Contributor Covenant](CODE_OF_CONDUCT.md). Report vulnerabilities as described in
+[SECURITY.md](SECURITY.md).
 
 ## License
 
