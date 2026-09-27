@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A post deleted in Discord no longer makes a tags-only update retry forever; the mapping is
+  forgotten and the next message starts a new post.
 - Tags of an archived post (resolved, or archived by Discord for inactivity) are updated:
   the post is unarchived with the new tags, then archived again if resolved.
 - A retry no longer posts a message twice: each Discord message is recorded when it is sent, the

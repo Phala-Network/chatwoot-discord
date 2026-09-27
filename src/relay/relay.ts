@@ -37,7 +37,10 @@ export interface ForumClient {
     message: WebhookMessage,
     threadId?: string,
   ): Promise<{ channelId: string; messageId: string }>;
-  /** Modifies a post. Discord rejects changes to an archived post unless the same request unarchives it. */
+  /**
+   * Modifies a post. Discord rejects changes to an archived post unless the same request
+   * unarchives it. Throws UnknownThreadError if the post no longer exists.
+   */
   updateThread(threadId: string, patch: { archived: boolean; applied_tags?: string[] }): Promise<void>;
   /** Deletes a message the forum's webhook posted; a message that is already gone counts as deleted. */
   deleteMessage(forumChannelId: string, threadId: string, messageId: string): Promise<void>;
@@ -169,8 +172,17 @@ export class Relay {
     const { store, forum } = this.options;
     const state = this.stateOf(conversation);
     if (store.state(accountId, conversation.id) === state) return;
-    await forum.updateThread(threadId, { archived: false, applied_tags: await this.postTags(accountId, conversation) });
-    if (conversation.status === "resolved") await forum.updateThread(threadId, { archived: true });
+    try {
+      await forum.updateThread(threadId, {
+        archived: false,
+        applied_tags: await this.postTags(accountId, conversation),
+      });
+      if (conversation.status === "resolved") await forum.updateThread(threadId, { archived: true });
+    } catch (error) {
+      if (!(error instanceof UnknownThreadError)) throw error;
+      store.forgetThread(accountId, conversation.id); // Deleted in Discord: the next message starts a new post.
+      return;
+    }
     store.saveState(accountId, conversation.id, state);
   }
 

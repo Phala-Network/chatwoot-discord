@@ -202,6 +202,13 @@ describe("Relay", () => {
     expect(forum.calls.at(-1)?.[1].content).toBe("still broken");
   });
 
+  it("forgets a post deleted in Discord when only its tags change", async () => {
+    await relay.relay(message());
+    forum.failThreadWith = "gone";
+    await relay.sync(3, message({ conversation: { status: "resolved" } }).conversation, "thread-1");
+    expect(store.thread(3, 12)).toBeUndefined();
+  });
+
   it("lets other Discord errors propagate for a retry", async () => {
     await relay.relay(message());
     forum.failThreadWith = "error";

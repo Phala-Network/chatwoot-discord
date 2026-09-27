@@ -73,9 +73,14 @@ export class DiscordForum implements ForumClient {
   }
 
   async updateThread(threadId: string, patch: { archived: boolean; applied_tags?: string[] }): Promise<void> {
-    await this.rest.patch<RESTPatchAPIChannelResult, RESTPatchAPIChannelJSONBody>(Routes.channel(threadId), {
-      body: patch,
-    });
+    try {
+      await this.rest.patch<RESTPatchAPIChannelResult, RESTPatchAPIChannelJSONBody>(Routes.channel(threadId), {
+        body: patch,
+      });
+    } catch (error) {
+      if (error instanceof DiscordHttpError && error.status === 404) throw new UnknownThreadError(threadId);
+      throw error;
+    }
   }
 
   async deleteMessage(forumChannelId: string, threadId: string, messageId: string): Promise<void> {

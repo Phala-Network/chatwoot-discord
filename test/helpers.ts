@@ -137,6 +137,10 @@ export class FakeForum implements ForumClient {
   }
 
   async updateThread(threadId: string, patch: ThreadPatch) {
+    if (this.failThreadWith === "gone") {
+      this.failThreadWith = undefined;
+      throw new UnknownThreadError(threadId);
+    }
     if (this.archived.has(threadId) && patch.archived !== false) {
       throw new Error("Discord HTTP 400: Thread is archived");
     }
