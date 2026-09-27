@@ -9,8 +9,8 @@ import {
 } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import worker from "../src/index.js";
-import { ALICE, json, mockFetch, on, type Recorded, type Route } from "./helpers.js";
+import worker from "../src/index.ts";
+import { ALICE, json, mockFetch, on, type Recorded, type Route } from "./helpers.ts";
 
 const FORUM = "100000000000000055";
 const GUILD = "100000000000000044";
@@ -44,6 +44,7 @@ class World {
   threads = new Map<string, string>(); // thread id -> parent forum
   failReplies = 0;
   failPatches = 0;
+  failConversations = 0;
   private replies = 0;
   readonly mock: ReturnType<typeof mockFetch>;
 
@@ -91,6 +92,10 @@ class World {
     return [
       on("GET", new RegExp(`^${cw}/conversations/(\\d+)$`), (request) => {
         const conversation = this.conversations.get(Number(request.url.pathname.split("/").at(-1)));
+        if (this.failConversations > 0) {
+          this.failConversations -= 1;
+          return json({ error: "unavailable" }, { status: 503 });
+        }
         return conversation
           ? json(this.conversationJson(conversation))
           : json({ error: "Resource could not be found" }, { status: 404 });
@@ -564,24 +569,6 @@ describe("worker", () => {
     ).toEqual(["How did we do?\n\n**CSAT:**\n• Rating: 5", "How did we do?\n\n**CSAT:**\n• Rating: 4"]);
   });
 
-  it("runs deletion jobs queued by earlier versions", async () => {
-    world.conversation(24, [{ id: 1501, content: "oops", message_type: 1 }]);
-    await chatwootWebhook(created(24));
-    await drain();
-    const deleted = world.conversations.get(24)?.messages[0];
-    if (deleted) Object.assign(deleted, { content: "This message was deleted", content_attributes: { deleted: true } });
-    await runInDurableObject(hub(), async (_instance, state) => {
-      state.storage.sql.exec(
-        "INSERT INTO jobs (key, priority, payload, not_before, created_at) VALUES (?, 3, ?, 0, 0)",
-        "deleted-message:3:24:1501",
-        JSON.stringify({ type: "deleted-message", accountId: 3, conversationId: 24, messageId: 1501 }),
-      );
-      await state.storage.setAlarm(Date.now());
-    });
-    await drain();
-    expect(world.sent("DELETE", /^\/api\/v10\/webhooks\/1\/tok\/messages\//)).toHaveLength(1);
-  });
-
   it("closes the post of a conversation deleted in Chatwoot", async () => {
     world.conversation(22, [{ id: 1301, content: "hello", message_type: 0 }]);
     await chatwootWebhook(created(22));
@@ -688,9 +675,166 @@ describe("worker", () => {
       await state.storage.setAlarm(Date.now());
     });
     await drain();
-    expect(world.requests).toEqual([]);
+    // The token still works: the invoker learns that nothing was done.
+    expect(world.requests.map((request) => [request.method, decodeURIComponent(request.url.pathname)])).toEqual([
+      ["PATCH", "/api/v10/webhooks/100000000000000001/interaction-token/messages/@original"],
+    ]);
+    expect(JSON.parse(world.requests[0]?.body ?? "")).toEqual({
+      content: "❌ This could not start in time, so nothing was done. Please try again.",
+      allowed_mentions: { parse: [] },
+    });
+  });
+
+  it("syncs a conversation event after a short wait, so the change's activity message is posted with it", async () => {
+    world.conversation(30, [{ id: 3001, content: "hello", message_type: 0 }]);
+    await chatwootWebhook(created(30));
+    await drain();
+    const conversation = world.conversations.get(30);
+    if (conversation) conversation.status = "resolved";
+    await chatwootWebhook({ event: "conversation_status_changed", id: 30, account: { id: 3 } });
+    // Chatwoot creates "Resolved by …" afterwards, and sends no webhook for it.
+    conversation?.messages.push({ id: 3002, content: "Resolved by Sam", message_type: 2 });
+    expect(await jobDelay("conversation:3:30")).toBeGreaterThan(5000);
+
+    await makeJobsDue();
+    await drain();
+    expect(world.webhookPosts().at(-1)?.body.content).toBe("_Resolved by Sam_");
+    expect(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).map((request) => JSON.parse(request.body))).toEqual([
+      { archived: false, applied_tags: ["t-acme"] },
+      { archived: true },
+    ]);
+
+    if (conversation) conversation.status = "open";
+    await chatwootWebhook({ event: "conversation_updated", id: 30, account: { id: 3 } });
+    await makeJobsDue();
+    await drain();
+    expect(JSON.parse(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).at(-1)?.body ?? "")).toEqual({
+      archived: false,
+      applied_tags: ["t-acme", "t-open"],
+    });
+  });
+
+  it("drops a job that keeps failing instead of retrying it forever", async () => {
+    world.conversation(31, [{ id: 3101, content: "hello", message_type: 0 }]);
+    world.failConversations = 100;
+    await chatwootWebhook(created(31));
+    await drain();
+    expect(await jobAttempts("conversation:3:31")).toBe(1);
+
+    await runInDurableObject(hub(), (_instance, state) => {
+      state.storage.sql.exec("UPDATE jobs SET attempts = 9, not_before = 0 WHERE key = 'conversation:3:31'");
+    });
+    await setAlarmNow();
+    await drain();
+    expect(await jobAttempts("conversation:3:31")).toBeUndefined();
+
+    // The next event starts over.
+    world.failConversations = 0;
+    await chatwootWebhook(created(31));
+    await drain();
+    expect(world.webhookPosts().at(-1)?.body.content).toBe("hello\n-# <@100000000000000777>");
+  });
+
+  it("the sweep queues only conversations whose post is behind or out of date", async () => {
+    world.conversation(32, [{ id: 3201, content: "hello", message_type: 0 }]);
+    await chatwootWebhook(created(32));
+    await drain();
+    const reads = () => world.sent("GET", /^\/api\/v1\/accounts\/3\/conversations\/32$/).length;
+    const before = reads();
+
+    await sweep();
+    expect(reads()).toBe(before); // up to date: not queued
+
+    const conversation = world.conversations.get(32);
+    if (conversation) conversation.status = "resolved"; // missed webhook
+    await sweep();
+    expect(reads()).toBe(before + 1);
+    expect(JSON.parse(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).at(-1)?.body ?? "")).toEqual({
+      archived: true,
+    });
+  });
+
+  it("the sweep stops at its page limit and continues back from the oldest activity it read", async () => {
+    const start = Math.floor(Date.now() / 1000);
+    const busy = on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations", (request) => {
+      const page = Number(request.url.searchParams.get("page"));
+      const payload = Array.from({ length: 25 }, (_, index) => ({
+        id: 50000 + (page - 1) * 25 + index,
+        status: "open",
+        last_activity_at: start - ((page - 1) * 25 + index),
+        messages: [],
+      }));
+      return json({ data: { meta: {}, payload } });
+    });
+    world.mock.spy.mockRestore();
+    world = new World([busy]);
+    await sweep();
+    expect(world.sent("GET", /^\/api\/v1\/accounts\/3\/conversations$/)).toHaveLength(10);
+    const watermark = await runInDurableObject(hub(), (_instance, state) =>
+      state.storage.sql.exec<{ value: string }>("SELECT value FROM cache WHERE key = 'sweep:3:last'").one(),
+    );
+    expect(Number(watermark.value)).toBe((start - 249) * 1000);
+  });
+
+  it("closes the post when a command finds its conversation deleted", async () => {
+    world.conversation(33, [{ id: 3301, content: "spam", message_type: 0 }]);
+    await chatwootWebhook(created(33));
+    await drain();
+    const thread = world.webhookPosts()[1]?.thread ?? "";
+    world.conversations.delete(33);
+    const profile = on("GET", "chatwoot.example.com/api/v1/profile", () =>
+      json({ id: 42, name: "Alice", email: "alice@example.com", accounts: [{ id: 3 }] }),
+    );
+    world.mock.spy.mockRestore();
+    const conversations = world.conversations;
+    const threads = world.threads;
+    world = new World([profile]);
+    world.conversations = conversations;
+    world.threads = threads;
+    await discordInteraction({
+      id: "900003",
+      application_id: "100000000000000001",
+      token: "interaction-token",
+      type: 2,
+      channel_id: thread,
+      channel: { id: thread, type: 11 },
+      member: { user: { id: ALICE } },
+      data: { type: 1, name: "block" },
+    });
+    await drain();
+    await vi.waitFor(async () => expect(await hub().ticketForThread(thread)).toBeNull());
+    expect(world.webhookPosts().at(-1)?.body.content).toBe("This conversation no longer exists in Chatwoot.");
   });
 });
+
+async function sweep(): Promise<void> {
+  const ctx = createExecutionContext();
+  await worker.scheduled?.(createScheduledController({ cron: "*/5 * * * *" }), env, ctx);
+  await waitOnExecutionContext(ctx);
+  await drain();
+}
+
+function jobAttempts(key: string): Promise<number | undefined> {
+  return runInDurableObject(hub(), (_instance, state) => {
+    const rows = state.storage.sql.exec<{ attempts: number }>("SELECT attempts FROM jobs WHERE key = ?", key).toArray();
+    return rows[0]?.attempts;
+  });
+}
+
+/** How long until a queued job is due. */
+function jobDelay(key: string): Promise<number> {
+  return runInDurableObject(hub(), (_instance, state) => {
+    const row = state.storage.sql.exec<{ at: number }>("SELECT not_before AS at FROM jobs WHERE key = ?", key).one();
+    return row.at - Date.now();
+  });
+}
+
+async function makeJobsDue(): Promise<void> {
+  await runInDurableObject(hub(), (_instance, state) => {
+    state.storage.sql.exec("UPDATE jobs SET not_before = 0");
+  });
+  await setAlarmNow();
+}
 
 function cursorOf(conversationId: number): Promise<number | null> {
   return runInDurableObject(hub(), (_instance, state) => {

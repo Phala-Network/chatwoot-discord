@@ -2,7 +2,7 @@
 
 declare namespace Cloudflare {
   interface Env {
-    HUB: DurableObjectNamespace<import("./hub.js").Hub>;
+    HUB: DurableObjectNamespace<import("./hub.ts").Hub>;
     /** JSON object (wrangler vars accept objects) or a JSON string; see config.ts. */
     CONFIG: unknown;
     DISCORD_BOT_TOKEN: string;

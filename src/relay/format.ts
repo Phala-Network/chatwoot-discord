@@ -1,11 +1,11 @@
 // Pure formatting for the Discord side of the relay: titles, sender names, message bodies,
 // chunking, and tag names. Nothing here performs I/O.
 
-import type { RelayConversation, RelayMessage } from "./types.js";
+import type { RelayAttachment, RelayConversation, RelayMessage } from "./types.ts";
 
 export const CONTENT_LIMIT = 2000;
 export const TITLE_LIMIT = 100;
-export const USERNAME_LIMIT = 80;
+const USERNAME_LIMIT = 80;
 export const SYSTEM_USERNAME = "Chatwoot";
 
 const CHANNEL_LABELS: Record<string, string> = {
@@ -18,7 +18,7 @@ const CHANNEL_LABELS: Record<string, string> = {
 };
 
 /** The value when it has visible content, otherwise undefined. */
-export function filled(value: unknown): string | undefined {
+function filled(value: unknown): string | undefined {
   if (value === null || value === undefined) return undefined;
   const text = String(value);
   return text.trim() === "" ? undefined : text;
@@ -37,7 +37,7 @@ export function clip(value: string, limit: number): string {
 }
 
 /** Discord rejects webhook usernames containing "discord" or "clyde". */
-export function safeUsername(name: string): string {
+function safeUsername(name: string): string {
   const cleaned = name
     .replace(/discord/gi, (match) => match.replace(/i/i, "1"))
     .replace(/clyde/gi, (match) => match.replace(/l/i, "1"));
@@ -46,7 +46,6 @@ export function safeUsername(name: string): string {
 }
 
 export function senderName(message: RelayMessage): string {
-  const account = filled(message.account.name) ?? "Support";
   const sender = message.sender ?? {};
   switch (message.messageType) {
     case "activity":
@@ -55,17 +54,21 @@ export function senderName(message: RelayMessage): string {
       return customerName(sender);
     default: {
       const fallback = sender.type === "user" ? "Agent" : "Bot";
-      return safeUsername(`${filled(sender.name) ?? fallback} · ${account}`);
+      return safeUsername(`${filled(sender.name) ?? fallback} · ${message.account.name}`);
     }
   }
 }
 
+type Customer = { name?: string | null | undefined; email?: string | null | undefined };
+
 /** A customer's name, else their email. */
-export function customerName(customer: {
-  name?: string | null | undefined;
-  email?: string | null | undefined;
-}): string {
-  return safeUsername(filled(customer.name) ?? filled(customer.email) ?? "Customer");
+export function contactName(customer: Customer): string {
+  return filled(customer.name) ?? filled(customer.email) ?? "Customer";
+}
+
+/** A customer's name as a webhook username. */
+export function customerName(customer: Customer): string {
+  return safeUsername(contactName(customer));
 }
 
 export interface Avatars {
@@ -87,13 +90,15 @@ export function customerAvatar(avatarUrl: string | null | undefined, avatars: Av
   return url?.startsWith("https://") ? url : avatars.contact;
 }
 
-export function threadTitle(message: RelayMessage): string {
-  const account = filled(message.account.name) ?? "Support";
-  const contact = message.conversation.contact;
-  const who = filled(contact.name) ?? filled(contact.email) ?? "Customer";
-  const topic = filled(message.emailSubject) ?? message.content;
-  const title = `[${account} #${message.conversation.id}] ${who}`;
-  return clip(topic.trim() === "" ? title : `${title} — ${topic}`, TITLE_LIMIT);
+/** What a post's title says after the customer: the email subject or the first message. */
+export function titleSubject(message: RelayMessage): string {
+  return clip(filled(message.emailSubject) ?? chatwootMentions(message.content), TITLE_LIMIT);
+}
+
+/** `[<Account> #<id>] <customer> — <subject>`, at most 100 characters. */
+export function threadTitle(accountName: string, conversation: RelayConversation, subject: string): string {
+  const title = `[${accountName} #${conversation.id}] ${contactName(conversation.contact)}`;
+  return clip(subject.trim() === "" ? title : `${title} — ${subject}`, TITLE_LIMIT);
 }
 
 /** Context shown once, at the top of a new post: channel, inbox, and customer email. */
@@ -109,7 +114,7 @@ export function postHeader(message: RelayMessage): string {
 }
 
 export function body(message: RelayMessage): string {
-  const content = message.content.trim();
+  const content = chatwootMentions(message.content, message.mentionedAgents).trim();
   const parts: string[] = [];
   if (message.messageType === "activity") {
     if (content) parts.push(`_${content}_`);
@@ -117,10 +122,42 @@ export function body(message: RelayMessage): string {
     if (message.private) parts.push("🔒 **Internal note**");
     if (content) parts.push(content);
   }
-  for (const url of message.attachmentUrls) {
-    if (filled(url)) parts.push(`📎 ${url}`);
-  }
+  parts.push(...message.attachments.flatMap(attachmentLine));
   return parts.join("\n").trim();
+}
+
+function attachmentLine(attachment: RelayAttachment): string[] {
+  switch (attachment.type) {
+    case "file":
+      return filled(attachment.url) ? [`📎 ${attachment.url}`] : [];
+    case "contact": {
+      const contact = [filled(attachment.name), filled(attachment.phone)].filter(Boolean).join(": ");
+      return contact ? [`📇 ${contact}`] : [];
+    }
+    case "location": {
+      const place = [filled(attachment.title), `${attachment.latitude}, ${attachment.longitude}`];
+      return [`📍 ${place.filter(Boolean).join(" · ")}${filled(attachment.url) ? ` ${attachment.url}` : ""}`];
+    }
+  }
+}
+
+/** Chatwoot's mention markup (MENTION_REGEX in lib/regex_helper.rb at v4.18.0). */
+const MENTION = /\[(@[^\]]+)\]\(mention:\/\/(user|team)\/(\d+)\/[^)]+\)/g;
+
+/**
+ * Mentions of users and teams become their `@name`, as in Chatwoot's Slack integration, and
+ * mentions of the users in `agents` (Chatwoot user id -> Discord user id) become Discord mentions.
+ */
+export function chatwootMentions(content: string, agents?: ReadonlyMap<number, string>): string {
+  return content.replace(MENTION, (_match, name: string, kind: string, id: string) => {
+    const discordId = kind === "user" ? agents?.get(Number(id)) : undefined;
+    return discordId ? `<@${discordId}>` : name;
+  });
+}
+
+/** Ids of the Chatwoot users a message mentions. */
+export function mentionedUserIds(content: string): number[] {
+  return Array.from(content.matchAll(MENTION), (match) => (match[2] === "user" ? [Number(match[3])] : [])).flat();
 }
 
 /**
@@ -128,6 +165,8 @@ export function body(message: RelayMessage): string {
  * allows), preferring to cut at a line break.
  */
 export function split(input: string, limit = CONTENT_LIMIT): string[] {
+  // Two units always fit a character, so every chunk makes progress.
+  if (!Number.isInteger(limit) || limit < 2) throw new RangeError(`split limit must be at least 2, not ${limit}`);
   const chunks: string[] = [];
   let text = input;
   while (text.length > limit) {
@@ -165,6 +204,18 @@ export function assigneeTag(conversation: RelayConversation): string {
 /** Tag for the topic the customer picked (a conversation custom attribute), if any. */
 export function topicTag(conversation: RelayConversation, attribute: string): string | undefined {
   return filled(conversation.customAttributes[attribute]);
+}
+
+/** The post's tags by name, most important first (Discord applies at most 5). */
+export function tagNames(accountTag: string, conversation: RelayConversation, topicAttribute: string) {
+  return [
+    accountTag,
+    conversation.status,
+    assigneeTag(conversation),
+    topicTag(conversation, topicAttribute),
+    filled(conversation.priority),
+    ...conversation.labels,
+  ];
 }
 
 /** Extracts the draft a triage bot wrote after one of `labels`, e.g. "**Draft**:\n```\n...\n```". */

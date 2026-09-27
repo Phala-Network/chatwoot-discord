@@ -5,11 +5,12 @@ import type { APIInteraction } from "discord-api-types/v10";
 import { verifyKey } from "discord-interactions";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
-import { eventTarget, isFreshTimestamp, verifyChatwootSignature } from "./chatwoot/webhook.js";
-import { FAILED, handleInteraction, privately } from "./commands/handler.js";
-import { ConfigError, loadSettings } from "./config.js";
-import { HUB_NAME } from "./hub.js";
-import { errorFields, log } from "./log.js";
+import { eventTarget, isFreshTimestamp, verifyChatwootSignature } from "./chatwoot/webhook.ts";
+import { FAILED } from "./commands/common.ts";
+import { handleInteraction, privately } from "./commands/handler.ts";
+import { ConfigError, loadSettings } from "./config.ts";
+import { HUB_NAME } from "./hub.ts";
+import { errorFields, log } from "./log.ts";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -62,7 +63,7 @@ app.post("/chatwoot/webhook", bodyLimit({ maxSize: 2 * 1024 * 1024 }), async (c)
   if (target.type === "message-updated") {
     await stub.enqueueMessageUpdate(target.accountId, target.conversationId, target.messageId);
   } else {
-    await stub.enqueueConversation(target.accountId, target.conversationId);
+    await stub.enqueueConversation(target.accountId, target.conversationId, target.delayMs);
   }
   return c.json({ ok: true });
 });
@@ -114,4 +115,4 @@ const handler = {
 
 export default handler;
 
-export { Hub } from "./hub.js";
+export { Hub } from "./hub.ts";

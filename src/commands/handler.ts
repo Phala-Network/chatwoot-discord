@@ -16,22 +16,18 @@ import {
   MessageFlags,
   TextInputStyle,
 } from "discord-api-types/v10";
-import type { Settings } from "../config.js";
-import { draftFromMessage, draftFromTriage } from "../relay/format.js";
-import { REPLY_WITH_THIS } from "./definitions.js";
-import { type AttachmentRef, type CommandAction, type CommandJob, prioritySchema } from "./job.js";
-
-export const CONTENT_MAX = 4000;
-export const FAILED = "❌ That did not work. Please do it in Chatwoot.";
-export const NOT_LINKED = "Your Discord account is not linked to a Chatwoot agent.";
-export const ATTACHMENT_HOSTS = new Set(["cdn.discordapp.com", "media.discordapp.net"]);
+import type { Settings } from "../config.ts";
+import { draftFromMessage, draftFromTriage } from "../relay/format.ts";
+import { filesTooLarge, fileTooLarge, isDiscordAttachmentUrl, NOT_LINKED, UserError } from "./common.ts";
+import { CONTENT_MAX, REPLY_WITH_THIS } from "./definitions.ts";
+import { type AttachmentRef, type CommandAction, type CommandJob, prioritySchema } from "./job.ts";
 
 export interface Ticket {
   accountId: number;
   conversationId: number;
 }
 
-export interface HandlerDeps {
+interface HandlerDeps {
   settings: Settings;
   /** The conversation the relay mapped to this forum post, if any. */
   ticketForThread(threadId: string): Promise<Ticket | undefined>;
@@ -41,9 +37,6 @@ export interface HandlerResult {
   response: APIInteractionResponse;
   job?: CommandJob;
 }
-
-/** A problem the invoker should see. Other errors get a generic message. */
-export class UserError extends Error {}
 
 export async function handleInteraction(interaction: APIInteraction, deps: HandlerDeps): Promise<HandlerResult> {
   if (interaction.type === InteractionType.Ping) return { response: { type: InteractionResponseType.Pong } };
@@ -91,9 +84,8 @@ function command(context: Context, interaction: APIApplicationCommandInteraction
   }
   switch (data.name) {
     case "reply":
-      return { response: editor(context, "reply", undefined) };
     case "note":
-      return { response: editor(context, "note", undefined) };
+      return inline(context, interaction, data.name) ?? { response: editor(context, data.name, undefined) };
     case "resolve":
       return defer(context, { type: "status", status: "resolved" });
     case "reopen":
@@ -151,6 +143,34 @@ function stringOption(interaction: APIApplicationCommandInteraction, name: strin
   return option?.type === ApplicationCommandOptionType.String ? option.value : undefined;
 }
 
+/**
+ * /reply or /note with its `message` or `attachment` option sends at once; without either it
+ * opens the editor (undefined).
+ */
+function inline(
+  context: Context,
+  interaction: APIApplicationCommandInteraction,
+  kind: "reply" | "note",
+): HandlerResult | undefined {
+  const { data } = interaction;
+  if (data.type !== ApplicationCommandType.ChatInput) return undefined;
+  const text = stringOption(interaction, "message");
+  const upload = data.options?.find((option) => option.name === "attachment");
+  const fileId = upload?.type === ApplicationCommandOptionType.Attachment ? upload.value : undefined;
+  if (text === undefined && fileId === undefined) return undefined;
+
+  const file = fileId === undefined ? undefined : data.resolved?.attachments?.[fileId];
+  if (fileId !== undefined && !file) throw new UserError("That attachment could not be read. Try again.");
+  const files = file ? [attachmentRef(file)] : [];
+  return message(context, kind, text?.trim() ?? "", files);
+}
+
+function message(context: Context, kind: "reply" | "note", content: string, files: AttachmentRef[]): HandlerResult {
+  if (content === "" && files.length === 0) throw new UserError("Add a message or an attachment.");
+  checkFiles(files, context.deps.settings);
+  return defer(context, { type: "message", private: kind === "note", content, files });
+}
+
 function submit(context: Context, interaction: APIModalSubmitInteraction): HandlerResult {
   const kind = interaction.data.custom_id.split(":", 1)[0];
   if (kind !== "reply" && kind !== "note") throw new UserError("Unknown form.");
@@ -165,10 +185,7 @@ function submit(context: Context, interaction: APIModalSubmitInteraction): Handl
   const upload = input("files");
   const content = text?.type === ComponentType.TextInput ? text.value.trim() : "";
   const files = uploadedFiles(interaction, upload?.type === ComponentType.FileUpload ? upload.values : []);
-  if (content === "" && files.length === 0) throw new UserError("Add a message or an attachment.");
-  checkFiles(files, context.deps.settings);
-
-  return defer(context, { type: "message", private: kind === "note", content, files });
+  return message(context, kind, content, files);
 }
 
 /** Files from the editor's upload field, as Discord describes them in the resolved data. */
@@ -176,44 +193,27 @@ function uploadedFiles(interaction: APIModalSubmitInteraction, ids: string[]): A
   const resolved: Partial<Record<string, APIAttachment>> = interaction.data.resolved?.attachments ?? {};
   return ids.flatMap((id) => {
     const file = resolved[id];
-    return file
-      ? [
-          {
-            url: file.url,
-            filename: file.filename,
-            size: file.size,
-            ...(file.content_type ? { contentType: file.content_type } : {}),
-          },
-        ]
-      : [];
+    return file ? [attachmentRef(file)] : [];
   });
+}
+
+function attachmentRef(file: APIAttachment): AttachmentRef {
+  return {
+    url: file.url,
+    filename: file.filename,
+    size: file.size,
+    ...(file.content_type ? { contentType: file.content_type } : {}),
+  };
 }
 
 function checkFiles(files: AttachmentRef[], settings: Settings): void {
   const limits = settings.config.attachments;
   if (files.length > limits.maxFiles) throw new UserError(`Attach at most ${limits.maxFiles} files.`);
-  if (files.some((file) => file.size > limits.maxFileBytes)) {
-    throw new UserError(`Each attachment must be ${megabytes(limits.maxFileBytes)} MB or smaller.`);
-  }
-  if (files.reduce((sum, file) => sum + file.size, 0) > limits.maxTotalBytes) {
-    throw new UserError(`Attachments must add up to ${megabytes(limits.maxTotalBytes)} MB or less.`);
-  }
+  if (files.some((file) => file.size > limits.maxFileBytes)) throw fileTooLarge(limits.maxFileBytes);
+  if (files.reduce((sum, file) => sum + file.size, 0) > limits.maxTotalBytes) throw filesTooLarge(limits.maxTotalBytes);
   if (!files.every((file) => isDiscordAttachmentUrl(file.url))) {
     throw new UserError("Attachments must be uploaded in Discord.");
   }
-}
-
-export function isDiscordAttachmentUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return url.protocol === "https:" && ATTACHMENT_HOSTS.has(url.hostname) && url.port === "";
-  } catch {
-    return false;
-  }
-}
-
-function megabytes(bytes: number): number {
-  return Math.floor(bytes / (1024 * 1024));
 }
 
 function replyWithThis(context: Context, interaction: APIApplicationCommandInteraction): HandlerResult {

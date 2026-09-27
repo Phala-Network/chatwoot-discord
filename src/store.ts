@@ -2,8 +2,8 @@
 // for each Chatwoot message, responses posted for interactive messages, the job queue, hourly
 // counters, and a small cache.
 
-import type { Cache } from "./discord/forum.js";
-import type { RelayStore } from "./relay/relay.js";
+import type { Cache } from "./discord/forum.ts";
+import type { RelayStore } from "./relay/relay.ts";
 
 export const MIGRATIONS: string[] = [
   `CREATE TABLE conversations (
@@ -33,8 +33,8 @@ export const MIGRATIONS: string[] = [
   // posted_messages checkpoints relaying (a retry resumes after the parts already posted) and
   // finds the Discord messages to delete when a message is deleted in Chatwoot.
   // announced_assignee starts from the assignee field of the stored state, which was used for
-  // this before. Webhook deliveries are no longer deduplicated; the table is emptied but kept so
-  // that a previous version still runs if it is deployed again.
+  // this before. Webhook deliveries are no longer deduplicated; the table is emptied (and
+  // dropped by a later migration).
   `CREATE TABLE posted_messages (
      account_id INTEGER NOT NULL,
      conversation_id INTEGER NOT NULL,
@@ -57,11 +57,18 @@ export const MIGRATIONS: string[] = [
      digest TEXT NOT NULL,
      PRIMARY KEY (account_id, conversation_id, message_id)
    );`,
+  // title_subject and title keep what a post's title ends with and the title last applied, so
+  // the title can follow the contact's name; posts made before this stay as they are (NULL).
+  // deliveries has been unused since 0.2.0, which only emptied it; 0.1.0, the last version that
+  // read it, can no longer run on this database.
+  `ALTER TABLE conversations ADD COLUMN title_subject TEXT;
+   ALTER TABLE conversations ADD COLUMN title TEXT;
+   DROP TABLE IF EXISTS deliveries;`,
 ];
 
 const COUNTER_TTL_MS = 2 * 60 * 60 * 1000;
 
-export interface ConversationRow {
+interface ConversationRow {
   threadId: string | undefined;
   state: string | undefined;
   /** Id of the last message handled; undefined for an adopted post until its first run. */
@@ -148,7 +155,8 @@ export class Store implements RelayStore, Cache {
   adoptThread(accountId: number, conversationId: number, threadId: string): void {
     this.sql.exec(
       `INSERT INTO conversations (account_id, conversation_id, thread_id) VALUES (?, ?, ?)
-       ON CONFLICT (account_id, conversation_id) DO UPDATE SET thread_id = excluded.thread_id, state = NULL`,
+       ON CONFLICT (account_id, conversation_id) DO UPDATE SET thread_id = excluded.thread_id, state = NULL,
+         title_subject = NULL, title = NULL`,
       accountId,
       conversationId,
       threadId,
@@ -166,6 +174,29 @@ export class Store implements RelayStore, Cache {
     this.sql.exec(
       "UPDATE conversations SET thread_id = ? WHERE account_id = ? AND conversation_id = ?",
       threadId,
+      accountId,
+      conversationId,
+    );
+  }
+
+  title(accountId: number, conversationId: number): { subject: string; applied: string } | undefined {
+    const row = this.sql
+      .exec<{ title_subject: string | null; title: string | null }>(
+        "SELECT title_subject, title FROM conversations WHERE account_id = ? AND conversation_id = ?",
+        accountId,
+        conversationId,
+      )
+      .toArray()[0];
+    if (!row || row.title_subject === null || row.title === null) return undefined;
+    return { subject: row.title_subject, applied: row.title };
+  }
+
+  saveTitle(accountId: number, conversationId: number, subject: string, applied: string): void {
+    this.ensureRow(accountId, conversationId);
+    this.sql.exec(
+      "UPDATE conversations SET title_subject = ?, title = ? WHERE account_id = ? AND conversation_id = ?",
+      subject,
+      applied,
       accountId,
       conversationId,
     );
@@ -265,7 +296,8 @@ export class Store implements RelayStore, Cache {
 
   forgetThread(accountId: number, conversationId: number): void {
     this.sql.exec(
-      "UPDATE conversations SET thread_id = NULL, state = NULL, announced_assignee = NULL WHERE account_id = ? AND conversation_id = ?",
+      `UPDATE conversations SET thread_id = NULL, state = NULL, announced_assignee = NULL, title_subject = NULL, title = NULL
+       WHERE account_id = ? AND conversation_id = ?`,
       accountId,
       conversationId,
     );

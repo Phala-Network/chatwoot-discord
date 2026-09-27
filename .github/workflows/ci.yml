@@ -35,5 +35,8 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
+      - name: Scripts load under Node type stripping
+        # With no arguments the script prints its usage and exits 2.
+        run: node scripts/register-commands.ts || [ $? -eq 2 ]
       - name: Build (wrangler dry run, no deploy)
         run: npm run build

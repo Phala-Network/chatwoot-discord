@@ -6,9 +6,10 @@ import {
   MessageFlags,
 } from "discord-api-types/v10";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { COMMANDS, REPLY_WITH_THIS } from "../src/commands/definitions.js";
-import { FAILED, type HandlerResult, handleInteraction } from "../src/commands/handler.js";
-import { ALICE, BOB, CAROL, TRIAGE, testSettings } from "./helpers.js";
+import { FAILED } from "../src/commands/common.ts";
+import { COMMANDS, REPLY_WITH_THIS } from "../src/commands/definitions.ts";
+import { type HandlerResult, handleInteraction } from "../src/commands/handler.ts";
+import { ALICE, BOB, CAROL, TRIAGE, testSettings } from "./helpers.ts";
 
 const THREAD = "100000000000001500";
 const settings = testSettings();
@@ -109,6 +110,54 @@ describe("interaction handler", () => {
     });
   });
 
+  it("/reply and /note send an inline message or attachment at once, without the editor", async () => {
+    const file = {
+      id: "900",
+      filename: "log.txt",
+      content_type: "text/plain",
+      size: 64,
+      url: "https://cdn.discordapp.com/l.txt",
+    };
+    const quick = (name: string, options: unknown[]) =>
+      handleInteraction(interaction({ name, options, data: { resolved: { attachments: { "900": file } } } }), deps);
+    const text = { name: "message", type: 3, value: " Thanks, fixed now! " };
+    const attachment = { name: "attachment", type: 11, value: "900" };
+    const ref = { url: file.url, filename: "log.txt", size: 64, contentType: "text/plain" };
+
+    const reply = await quick("reply", [text]);
+    expect(reply.response).toEqual({ type: 5, data: { flags: MessageFlags.Ephemeral } });
+    expect(reply.job?.action).toEqual({ type: "message", private: false, content: "Thanks, fixed now!", files: [] });
+    expect((await quick("note", [attachment])).job?.action).toEqual({
+      type: "message",
+      private: true,
+      content: "",
+      files: [ref],
+    });
+    expect((await quick("reply", [text, attachment])).job?.action).toEqual({
+      type: "message",
+      private: false,
+      content: "Thanks, fixed now!",
+      files: [ref],
+    });
+  });
+
+  it("checks inline messages and attachments like the editor does", async () => {
+    const quick = (options: unknown[], attachments: Record<string, unknown> = {}) =>
+      handleInteraction(interaction({ name: "reply", options, data: { resolved: { attachments } } }), deps);
+    expect(privateText(await quick([{ name: "message", type: 3, value: "  " }]))).toBe(
+      "❌ Add a message or an attachment.",
+    );
+    const big = { id: "901", filename: "v.mp4", size: 26 * 1024 * 1024, url: "https://cdn.discordapp.com/v.mp4" };
+    expect(privateText(await quick([{ name: "attachment", type: 11, value: "901" }], { "901": big }))).toMatch(
+      /25 MB or smaller/,
+    );
+    const elsewhere = { id: "902", filename: "a.txt", size: 1, url: "https://files.example.com/a.txt" };
+    expect(privateText(await quick([{ name: "attachment", type: 11, value: "902" }], { "902": elsewhere }))).toMatch(
+      /uploaded in Discord/,
+    );
+    expect(privateText(await quick([{ name: "attachment", type: 11, value: "903" }]))).toMatch(/could not be read/);
+  });
+
   it("/note opens the private-note editor", async () => {
     const { response } = await handleInteraction(interaction({ name: "note" }), deps);
     expect(response.type === InteractionResponseType.Modal && response.data.custom_id).toBe("note:777001");
@@ -147,6 +196,13 @@ describe("interaction handler", () => {
       "block",
       "unblock",
     ]);
+    for (const name of ["reply", "note"]) {
+      const command = COMMANDS.find((candidate) => candidate.name === name);
+      expect(command && "options" in command ? command.options : undefined).toEqual([
+        expect.objectContaining({ type: 3, name: "message", max_length: 4000 }),
+        expect.objectContaining({ type: 11, name: "attachment" }),
+      ]);
+    }
     const menuCommands = COMMANDS.filter((command) => command.type === 3);
     expect(menuCommands.map((command) => command.name)).toEqual([REPLY_WITH_THIS]);
     expect(menuCommands[0]).not.toHaveProperty("description");

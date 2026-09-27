@@ -1,10 +1,10 @@
 // Shared fixtures and fakes. Outbound HTTP is mocked at the fetch boundary.
 
 import { vi } from "vitest";
-import { buildSettings, configSchema, type Settings, secretsSchema } from "../src/config.js";
-import type { ForumClient, RelayStore, WebhookMessage } from "../src/relay/relay.js";
-import { UnknownThreadError } from "../src/relay/relay.js";
-import type { RelayMessage } from "../src/relay/types.js";
+import { buildSettings, configSchema, type Settings, secretsSchema } from "../src/config.ts";
+import type { ForumClient, RelayStore, WebhookMessage } from "../src/relay/relay.ts";
+import { UnknownThreadError } from "../src/relay/relay.ts";
+import type { RelayMessage } from "../src/relay/types.ts";
 
 export const ALICE = "100000000000000011";
 export const BOB = "100000000000000012";
@@ -21,7 +21,7 @@ export function message(overrides: Overrides = {}): RelayMessage {
     messageType: "incoming",
     private: false,
     content: "My agent will not connect",
-    attachmentUrls: [],
+    attachments: [],
     account: { id: 3, name: "Acme" },
     inboxName: "Acme — Product App",
     sender: { name: "Jane Doe", type: "contact" },
@@ -31,6 +31,7 @@ export function message(overrides: Overrides = {}): RelayMessage {
       status: "open",
       channel: "Channel::WebWidget",
       contact: { name: "Jane Doe", email: "jane@example.com" },
+      labels: [],
       customAttributes: {},
       ...conversation,
     },
@@ -41,6 +42,7 @@ export class MemoryStore implements RelayStore {
   threads = new Map<string, string>();
   states = new Map<string, string>();
   announced = new Map<string, string>();
+  titles = new Map<string, { subject: string; applied: string }>();
   parts = new Map<string, string[]>();
   counters = new Map<string, number>();
   seen = new Set<string>();
@@ -50,6 +52,12 @@ export class MemoryStore implements RelayStore {
   }
   saveThread(a: number, c: number, threadId: string) {
     this.threads.set(`${a}:${c}`, threadId);
+  }
+  title(a: number, c: number) {
+    return this.titles.get(`${a}:${c}`);
+  }
+  saveTitle(a: number, c: number, subject: string, applied: string) {
+    this.titles.set(`${a}:${c}`, { subject, applied });
   }
   state(a: number, c: number) {
     return this.states.get(`${a}:${c}`);
@@ -75,6 +83,7 @@ export class MemoryStore implements RelayStore {
     this.threads.delete(`${a}:${c}`);
     this.states.delete(`${a}:${c}`);
     this.announced.delete(`${a}:${c}`);
+    this.titles.delete(`${a}:${c}`);
     for (const key of this.parts.keys()) if (key.startsWith(`${a}:${c}:`)) this.parts.delete(key);
   }
   firstAttempt(name: string) {
@@ -97,7 +106,7 @@ export const TAGS: Record<string, string> = {
   resolved: "t-resolved",
 };
 
-type ThreadPatch = { archived: boolean; applied_tags?: string[] };
+type ThreadPatch = { archived: boolean; applied_tags?: string[]; name?: string };
 
 /**
  * Records webhook executions like Discord would: a new post gets channel id "thread-<n>" and

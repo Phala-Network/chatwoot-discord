@@ -2,7 +2,7 @@
 // limit (50 per invocation on the Free plan). Work checks `remaining` before starting a unit
 // that must not be cut in half, and yields to a fresh invocation when it is low.
 
-import type { Fetch } from "./chatwoot/api.js";
+import type { Fetch } from "./chatwoot/api.ts";
 
 export class BudgetExhaustedError extends Error {
   constructor() {

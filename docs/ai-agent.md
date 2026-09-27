@@ -25,17 +25,23 @@ messages in posts (threads).
 
 ## When the agent is called
 
-Each customer message relayed into a post ends with a line that mentions the agent:
+Each new customer message relayed into a post ends with a line that mentions the agent:
 
 ```text
 -# <@AGENT_USER_ID>
 ```
 
+A customer message longer than one Discord message is split into several; the mention is on the
+last of them (before a "Message truncated" note, if any), so when the agent sees it, the whole
+message is already in the post.
+
 The mention is a literal token in the message content; Discord sends no notification for it
 (the relay's `allowed_mentions` leaves it out), so nobody is pinged by it. Only customer
 messages carry it. Agent replies, private notes, activity lines, the ticket card that opens a
 post, and customers' responses to interactive messages (option picks, forms, CSAT ratings) do
-not.
+not. Neither do customer messages created more than `reconcile.lookbackSeconds` (an hour by
+default) before they are relayed: the history posted when an older conversation gets its post,
+or messages caught up after downtime.
 
 When a conversation has had more than `perConversationPerHour` customer messages in the current
 hour, or all conversations together more than `perHour`, the mention is replaced by a note such

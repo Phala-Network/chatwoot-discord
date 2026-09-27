@@ -7,15 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Upgrading: re-register the commands after deploying (`npm run register-commands`), for the new
+`/reply` and `/note` options. `CONFIG` is now validated strictly: remove any key the
+[configuration reference](README.md#configuration-reference) does not list (the old
+`discord.applicationId` is still accepted). On deploy, the database migrates once: posts gain
+two title columns (empty for existing posts, which keep their titles), and the unused
+`deliveries` table is dropped, so versions before 0.2.0 can no longer run on it. Each existing
+post's stored state no longer matches its new format, so the next sync of each conversation
+(its next event, or the sweep for recent ones) updates its tags once. Queued jobs keep working.
+
 ### Added
 
 - The README explains what the service is for, how it works, and its design, with illustrations
   of the forum and a ticket post (fictional data).
 - `docs/ai-agent.md` describes how to connect an AI agent (triage bot).
 - A Deploy to Cloudflare button in the README, with the steps after deploying.
+- `/reply` and `/note` take optional `message` and `attachment` options that send at once,
+  without the editor; without options they open the editor as before.
+- A reply the channel could not deliver (Chatwoot marks it failed, e.g. outside WhatsApp's
+  24-hour window) gets one ⚠️ notice in its post; `/reply` refuses to send when the conversation's
+  channel does not accept a reply (`can_reply`).
+- Priority and Chatwoot labels become forum tags when a tag of that name exists (after account,
+  status, assignee, and topic; Discord applies at most 5).
+- The post title follows the contact's name (for posts created from this version on).
+- Chatwoot @mentions in messages show as `@name`; a linked agent mentioned in a private note is
+  pinged.
+- Shared contacts and locations are shown instead of being dropped.
+- `accounts[].inboxIds` limits an account to some of its inboxes.
+- A command dropped because it could not start in time tells the invoker.
+- README: installing on an existing Chatwoot (`relay.startAfterMessageId`), forum tag limits and
+  the "Require tags" setting.
 
 ### Changed
 
+- The triage mention and pings go on the last Discord message of a split message, so a bot sees
+  the whole message when it is called.
+- Messages created more than `reconcile.lookbackSeconds` ago (the history relayed when an older
+  conversation gets its post, or a catch-up after downtime) are posted without notifications and
+  do not use the triage budget.
+- Conversation events (`conversation_updated`, `conversation_status_changed`) sync after 10
+  seconds, so the activity message for the change is posted with it.
+- A job that fails 10 times is dropped instead of retrying forever; the sweep and the next event
+  pick its conversation up again.
+- A sweep that stops at its page limit continues from the oldest activity it read next time.
+- The link attribute is written whenever it does not point to the conversation's post, so a link
+  that could not be written is retried on a later sync.
+- A command that finds its conversation deleted closes its post.
+- `CONFIG` rejects unknown keys, a `relay.subrequestBudget` too small for `relay.maxChunks`, and
+  a `triage.name` over 100 characters.
 - `wrangler.jsonc` is committed with placeholder `CONFIG` (it replaces `wrangler.example.jsonc`);
   edit it in place, and `npm run deploy` deploys it. `package.json` describes each secret for the
   Cloudflare dashboard.
@@ -29,6 +68,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`npm run register-commands -- --application <app id> --guild <guild id>`).
 - TypeScript 7. `gen:chatwoot` runs openapi-typescript 7.13.0 with TypeScript 5.9.3 through `npx`,
   since openapi-typescript does not support TypeScript 7; it is no longer a dev dependency.
+
+### Removed
+
+- The `deleted-message` job type, queued only by unreleased builds between 0.1.0 and 0.2.0; such
+  a job, if one were still queued, is dropped with a warning like any unknown job.
+- The unused `deliveries` table.
 
 ## [0.2.0] - 2026-09-27
 

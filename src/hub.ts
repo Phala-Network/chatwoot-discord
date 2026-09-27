@@ -3,8 +3,8 @@
 // Requests (webhook events, deferred commands, sweeps) only write a job row and set an
 // alarm, so they return quickly. The alarm drains due jobs one at a time, which serializes work
 // per conversation (and globally), and yields to a fresh invocation before it would exceed the
-// per-invocation subrequest limit. Failed jobs back off and retry; nothing depends on a single
-// delivery succeeding.
+// per-invocation subrequest limit. Failed jobs back off and retry, and are dropped after
+// MAX_JOB_ATTEMPTS; nothing depends on a single delivery succeeding.
 
 import { DurableObject } from "cloudflare:workers";
 import {
@@ -13,17 +13,17 @@ import {
   Routes,
 } from "discord-api-types/v10";
 import { z } from "zod";
-import { Budget, BudgetExhaustedError } from "./budget.js";
-import { chatwootClient, toRelayConversation } from "./chatwoot/api.js";
-import { executeCommand } from "./commands/actions.js";
-import { type CommandJob, commandJobSchema } from "./commands/job.js";
-import { loadSettings, type Settings } from "./config.js";
-import { DiscordForum } from "./discord/forum.js";
-import { DiscordRest } from "./discord/rest.js";
-import { errorFields, log } from "./log.js";
-import { latestMessageId, processConversation, processMessageUpdate } from "./relay/processor.js";
-import { Relay } from "./relay/relay.js";
-import { type Job, Store } from "./store.js";
+import { Budget, BudgetExhaustedError } from "./budget.ts";
+import { chatwootClient, toRelayConversation } from "./chatwoot/api.ts";
+import { executeCommand } from "./commands/actions.ts";
+import { type CommandJob, commandJobSchema } from "./commands/job.ts";
+import { loadSettings, relaysInbox, type Settings } from "./config.ts";
+import { DiscordForum } from "./discord/forum.ts";
+import { DiscordRest } from "./discord/rest.ts";
+import { errorFields, log } from "./log.ts";
+import { latestMessageId, processConversation, processMessageUpdate, relayFor } from "./relay/processor.ts";
+import type { Relay } from "./relay/relay.ts";
+import { type Job, Store } from "./store.ts";
 
 export const HUB_NAME = "global";
 
@@ -33,26 +33,32 @@ const payloadSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("sweep"), accountId: id }),
   z.object({ type: z.literal("conversation"), accountId: id, conversationId: id }),
   z.object({ type: z.literal("message-updated"), accountId: id, conversationId: id, messageId: id }),
-  // Queued by earlier versions; runs as "message-updated".
-  z.object({ type: z.literal("deleted-message"), accountId: id, conversationId: id, messageId: id }),
 ]);
 type JobPayload = z.infer<typeof payloadSchema>;
 
-const PRIORITY = { command: 0, sweep: 1, conversation: 2, "message-updated": 3, "deleted-message": 3 } as const;
+const PRIORITY = { command: 0, sweep: 1, conversation: 2, "message-updated": 3 } as const;
 /** Requests a job may need before it can start without being cut short. */
 const COMMAND_BUDGET = 20;
 const MIN_BUDGET = 2;
 /** Pages of conversations (25 each by default) a sweep reads at most. */
 const SWEEP_PAGES = 10;
 const MAX_BACKOFF_MS = 30 * 60 * 1000;
+/**
+ * A job that fails this often is dropped (after about 70 minutes of backoff), so a persistent
+ * failure stops holding the queue. The sweep queues conversations that are still behind again,
+ * and the next webhook for one starts a new job without backoff.
+ */
+const MAX_JOB_ATTEMPTS = 10;
 /** Stop draining and continue in a new invocation after this long (alarms may run 15 minutes). */
 const RUN_WALL_MS = 5 * 60 * 1000;
 /**
  * Discord interaction tokens are valid for 15 minutes. A command that cannot start within this
- * time is dropped: it could not report its result, and the invoker may already have acted in
- * Chatwoot, so running it could, for example, send a reply twice.
+ * time is dropped, and the invoker is told while the token still works: running it later could
+ * not report its result, and the invoker may already have acted in Chatwoot, so running it
+ * could, for example, send a reply twice.
  */
 const COMMAND_START_DEADLINE_MS = 12 * 60 * 1000;
+const EXPIRED = "❌ This could not start in time, so nothing was done. Please try again.";
 
 export class Hub extends DurableObject<Env> {
   private readonly store: Store;
@@ -63,15 +69,15 @@ export class Hub extends DurableObject<Env> {
     ctx.blockConcurrencyWhile(async () => this.store.migrate());
   }
 
-  /** Queues a conversation for syncing. */
-  async enqueueConversation(accountId: number, conversationId: number): Promise<void> {
-    this.enqueue({ type: "conversation", accountId, conversationId });
+  /** Queues a conversation for syncing, at the earliest after `delayMs`. */
+  async enqueueConversation(accountId: number, conversationId: number, delayMs = 0): Promise<void> {
+    this.enqueue({ type: "conversation", accountId, conversationId }, Date.now() + delayMs);
     await this.schedule();
   }
 
   /**
-   * Queues a check of a message reported as deleted (its Discord messages are removed) or as
-   * answered by the customer (the response is posted).
+   * Queues a check of a message reported as deleted (its Discord messages are removed), as
+   * answered by the customer (the response is posted), or as not delivered (a notice is posted).
    */
   async enqueueMessageUpdate(accountId: number, conversationId: number, messageId: number): Promise<void> {
     this.enqueue({ type: "message-updated", accountId, conversationId, messageId });
@@ -139,6 +145,7 @@ export class Hub extends DurableObject<Env> {
               interactionId: payload.job.interactionId,
               action: payload.job.action.type,
             });
+            await respond(services.rest, payload.job, EXPIRED);
             return "done";
           }
           await this.runCommand(payload.job, services);
@@ -153,13 +160,17 @@ export class Hub extends DurableObject<Env> {
           return outcome;
         }
         case "message-updated":
-        case "deleted-message":
           await processMessageUpdate(services, payload.accountId, payload.conversationId, payload.messageId);
           this.store.completeJob(job);
           return "done";
       }
     } catch (error) {
       if (error instanceof BudgetExhaustedError) return "yield";
+      if (job.attempts + 1 >= MAX_JOB_ATTEMPTS) {
+        log.error("job failed too often; dropped", { job: job.key, attempts: job.attempts + 1, ...errorFields(error) });
+        this.store.deleteJob(job.key);
+        return "done";
+      }
       const delay = Math.min(5000 * 2 ** job.attempts, MAX_BACKOFF_MS);
       // Transient failures are warnings; a job that keeps failing is an error.
       const logAt = job.attempts + 1 >= 3 ? log.error : log.warn;
@@ -175,15 +186,11 @@ export class Hub extends DurableObject<Env> {
   }
 
   private async runCommand(job: CommandJob, services: Services): Promise<void> {
-    const content = await executeCommand(job, services.settings, services.budget.fetch);
-    try {
-      await services.rest.patch<RESTPatchAPIWebhookWithTokenMessageResult, RESTPatchAPIWebhookWithTokenMessageJSONBody>(
-        Routes.webhookMessage(job.applicationId, job.token, "@original"),
-        { body: { content, allowed_mentions: { parse: [] } }, auth: false },
-      );
-    } catch (error) {
-      log.error("command follow-up failed", { interactionId: job.interactionId, ...errorFields(error) });
-    }
+    const { content, conversationGone } = await executeCommand(job, services.settings, services.budget.fetch);
+    // Chatwoot sends no webhook when a conversation is deleted: let its job close the post.
+    if (conversationGone)
+      this.enqueue({ type: "conversation", accountId: job.accountId, conversationId: job.conversationId });
+    await respond(services.rest, job, content);
   }
 
   /**
@@ -202,19 +209,24 @@ export class Hub extends DurableObject<Env> {
     const window = Math.min(Math.max(sinceLast, lookbackSeconds), maxCatchUpSeconds);
     const cutoff = now / 1000 - window;
 
+    const account = settings.account(accountId);
     let seen = 0;
     let queued = 0;
     let reachedCutoff = false;
+    /** Unix seconds of the oldest activity read. */
+    let oldest = now / 1000;
     for (let page = 1; page <= SWEEP_PAGES && !reachedCutoff; page += 1) {
       const conversations = await chatwoot.listConversations(accountId, page);
       if (conversations.length === 0) reachedCutoff = true;
       for (const conversation of conversations) {
-        if ((conversation.last_activity_at ?? 0) < cutoff) {
+        const activity = conversation.last_activity_at ?? 0;
+        if (activity < cutoff) {
           reachedCutoff = true;
           break;
         }
+        oldest = Math.min(oldest, activity);
         const conversationId = conversation.id;
-        if (conversationId === undefined) continue;
+        if (conversationId === undefined || !account || !relaysInbox(account, conversation.inbox_id)) continue;
         seen += 1;
         const row = this.store.conversation(accountId, conversationId);
         const latest = latestMessageId(conversation);
@@ -230,8 +242,9 @@ export class Hub extends DurableObject<Env> {
         }
       }
     }
+    // Stopped at the page limit: the next sweep continues back from the oldest activity read.
     if (!reachedCutoff) log.warn("sweep stopped at its page limit", { accountId, pages: SWEEP_PAGES });
-    this.store.set(key, String(now));
+    this.store.set(key, String(reachedCutoff ? now : Math.floor(oldest * 1000)));
     log.info("sweep done", { accountId, windowSeconds: Math.round(window), seen, queued });
   }
 
@@ -242,37 +255,12 @@ export class Hub extends DurableObject<Env> {
       settings.secrets.CHATWOOT_RELAY_TOKEN,
       budget.fetch,
     );
-    const linkAttribute = settings.config.relay.linkAttribute;
-    const triageUserId = settings.config.triage.userId;
     const forum = new DiscordForum(rest, this.store);
-    const relay = new Relay({
-      forum,
-      store: this.store,
-      frontendUrl: settings.frontendUrl,
-      avatars: settings.avatars,
-      target: (accountId) => {
-        const account = settings.account(accountId);
-        if (!account) throw new Error(`Account ${accountId} is not configured`);
-        return { forumChannelId: account.forumChannelId, tag: account.tag ?? account.name };
-      },
-      topicAttribute: settings.config.relay.topicAttribute,
-      maxChunks: settings.config.relay.maxChunks,
-      ...(triageUserId ? { triage: { ...settings.config.triage, userId: triageUserId } } : {}),
-      discordUserFor: (assignee) => settings.discordUserForEmail(assignee.email),
-      ...(linkAttribute
-        ? {
-            linkPost: (accountId: number, conversationId: number, url: string) =>
-              chatwoot.setCustomAttribute(accountId, conversationId, linkAttribute, url),
-          }
-        : {}),
-      onIgnoredError: (error) => {
-        log.error("could not link post from conversation", errorFields(error));
-      },
-    });
+    const relay = relayFor(settings, forum, this.store);
     return { settings, store: this.store, relay, forum, chatwoot, budget, rest };
   }
 
-  private enqueue(payload: JobPayload): void {
+  private enqueue(payload: JobPayload, notBefore?: number): void {
     const key =
       payload.type === "command"
         ? `command:${payload.job.interactionId}`
@@ -281,7 +269,7 @@ export class Hub extends DurableObject<Env> {
           : payload.type === "conversation"
             ? `conversation:${payload.accountId}:${payload.conversationId}`
             : `${payload.type}:${payload.accountId}:${payload.conversationId}:${payload.messageId}`;
-    this.store.enqueue(key, PRIORITY[payload.type], JSON.stringify(payload));
+    this.store.enqueue(key, PRIORITY[payload.type], JSON.stringify(payload), notBefore);
   }
 
   /** Sets the alarm for the earliest due job (or `at`), unless an earlier alarm is already set. */
@@ -301,6 +289,18 @@ interface Services {
   chatwoot: ReturnType<typeof chatwootClient>;
   budget: Budget;
   rest: DiscordRest;
+}
+
+/** Replaces the invoker's "thinking…" with `content`. */
+async function respond(rest: DiscordRest, job: CommandJob, content: string): Promise<void> {
+  try {
+    await rest.patch<RESTPatchAPIWebhookWithTokenMessageResult, RESTPatchAPIWebhookWithTokenMessageJSONBody>(
+      Routes.webhookMessage(job.applicationId, job.token, "@original"),
+      { body: { content, allowed_mentions: { parse: [] } }, auth: false },
+    );
+  } catch (error) {
+    log.error("command follow-up failed", { interactionId: job.interactionId, ...errorFields(error) });
+  }
 }
 
 function minimumBudget(payload: JobPayload): number {

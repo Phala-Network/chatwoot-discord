@@ -1,13 +1,32 @@
 import { describe, expect, it } from "vitest";
-import { configSchema } from "../src/config.js";
+import { configSchema } from "../src/config.ts";
+
+const minimal = {
+  chatwoot: { baseUrl: "https://chatwoot.example.com" },
+  accounts: [{ id: 1, name: "Acme", forumChannelId: "100000000000000002" }],
+};
 
 describe("configuration", () => {
   it("still accepts the removed discord.applicationId key", () => {
-    const config = configSchema.parse({
-      chatwoot: { baseUrl: "https://chatwoot.example.com" },
-      discord: { applicationId: "100000000000000001" },
-      accounts: [{ id: 1, name: "Acme", forumChannelId: "100000000000000002" }],
-    });
+    const config = configSchema.parse({ ...minimal, discord: { applicationId: "100000000000000001" } });
     expect(config).not.toHaveProperty("discord");
+  });
+
+  it("rejects unknown keys, so a typo does not silently fall back to a default", () => {
+    expect(configSchema.safeParse({ ...minimal, relay: { maxChunk: 2 } }).success).toBe(false);
+    expect(configSchema.safeParse({ ...minimal, triages: {} }).success).toBe(false);
+    const account = { ...minimal.accounts[0], forumChannel: "100000000000000002" };
+    expect(configSchema.safeParse({ ...minimal, accounts: [account] }).success).toBe(false);
+  });
+
+  it("requires a subrequest budget that fits one message of relay.maxChunks parts", () => {
+    const result = configSchema.safeParse({ ...minimal, relay: { maxChunks: 10, subrequestBudget: 20 } });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues.map((issue) => issue.path.join("."))).toEqual(["relay.subrequestBudget"]);
+    expect(configSchema.safeParse({ ...minimal, relay: { maxChunks: 10, subrequestBudget: 30 } }).success).toBe(true);
+  });
+
+  it("bounds the triage bot's name, which its budget notes repeat", () => {
+    expect(configSchema.safeParse({ ...minimal, triage: { name: "x".repeat(101) } }).success).toBe(false);
   });
 });

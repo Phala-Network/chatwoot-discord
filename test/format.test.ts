@@ -2,22 +2,34 @@ import { describe, expect, it } from "vitest";
 import {
   body,
   CONTENT_LIMIT,
+  chatwootMentions,
   draftFromMessage,
   draftFromTriage,
   postHeader,
   senderName,
   split,
   TITLE_LIMIT,
+  tagNames,
   threadTitle,
-} from "../src/relay/format.js";
-import { message } from "./helpers.js";
+  titleSubject,
+} from "../src/relay/format.ts";
+import type { RelayMessage } from "../src/relay/types.ts";
+import { message } from "./helpers.ts";
+
+function title(relayMessage: RelayMessage): string {
+  return threadTitle(relayMessage.account.name, relayMessage.conversation, titleSubject(relayMessage));
+}
 
 describe("format", () => {
   it("titles name the account, conversation, and customer", () => {
-    expect(threadTitle(message())).toBe("[Acme #12] Jane Doe — My agent will not connect");
-    expect(threadTitle(message({ emailSubject: "Billing question" }))).toBe("[Acme #12] Jane Doe — Billing question");
-    expect(Array.from(threadTitle(message({ content: "x".repeat(500) }))).length).toBeLessThanOrEqual(TITLE_LIMIT);
-    expect(threadTitle(message({ content: "  " }))).toBe("[Acme #12] Jane Doe");
+    expect(title(message())).toBe("[Acme #12] Jane Doe — My agent will not connect");
+    expect(title(message({ emailSubject: "Billing question" }))).toBe("[Acme #12] Jane Doe — Billing question");
+    expect(Array.from(title(message({ content: "x".repeat(500) }))).length).toBeLessThanOrEqual(TITLE_LIMIT);
+    expect(title(message({ content: "  " }))).toBe("[Acme #12] Jane Doe");
+    // A contact without a name shows their email; "discord" stays readable in titles.
+    expect(title(message({ content: "Discord login", conversation: { contact: { email: "j@example.com" } } }))).toBe(
+      "[Acme #12] j@example.com — Discord login",
+    );
   });
 
   it("usernames distinguish customers, agents, and activity", () => {
@@ -36,9 +48,58 @@ describe("format", () => {
       "🔒 **Internal note**\nRefund approved",
     );
     expect(body(message({ messageType: "activity", content: "Resolved by Sam" }))).toBe("_Resolved by Sam_");
-    expect(body(message({ content: "", attachmentUrls: ["https://files.example.com/a.png"] }))).toBe(
-      "📎 https://files.example.com/a.png",
+    expect(
+      body(message({ content: "", attachments: [{ type: "file", url: "https://files.example.com/a.png" }] })),
+    ).toBe("📎 https://files.example.com/a.png");
+  });
+
+  it("describes shared contacts and locations, which have no file", () => {
+    const shared = message({
+      content: "",
+      attachments: [
+        { type: "contact", name: "Ana Lima", phone: "+5511999990000" },
+        { type: "contact", name: "", phone: "+15550100" },
+        { type: "location", title: "Main St 1", latitude: 52.52, longitude: 13.405, url: "" },
+        { type: "location", title: "", latitude: 1.5, longitude: -2, url: "https://maps.example.com/p" },
+      ],
+    });
+    expect(body(shared)).toBe(
+      [
+        "📇 Ana Lima: +5511999990000",
+        "📇 +15550100",
+        "📍 Main St 1 · 52.52, 13.405",
+        "📍 1.5, -2 https://maps.example.com/p",
+      ].join("\n"),
     );
+  });
+
+  it("turns Chatwoot mentions into names, or Discord mentions of linked agents", () => {
+    const note =
+      "[@Kim Lee](mention://user/7/Kim%20Lee) and [@Billing](mention://team/2/Billing), see [@Sam](mention://user/8/Sam)";
+    expect(chatwootMentions(note)).toBe("@Kim Lee and @Billing, see @Sam");
+    expect(chatwootMentions(note, new Map([[7, "592"]]))).toBe("<@592> and @Billing, see @Sam");
+    // A team id never matches a user's.
+    expect(chatwootMentions("[@Billing](mention://team/7/Billing)", new Map([[7, "592"]]))).toBe("@Billing");
+  });
+
+  it("orders tags account, status, assignee, topic, priority, then labels", () => {
+    const conversation = message({
+      conversation: {
+        assignee: { name: "Kim" },
+        priority: "urgent",
+        labels: ["vip", "refund"],
+        customAttributes: { topic: "Billing" },
+      },
+    }).conversation;
+    expect(tagNames("Acme", conversation, "topic")).toEqual([
+      "Acme",
+      "open",
+      "Kim",
+      "Billing",
+      "urgent",
+      "vip",
+      "refund",
+    ]);
   });
 
   it("header shows channel, inbox, and email", () => {
@@ -56,6 +117,9 @@ describe("format", () => {
     const emoji = split("😀".repeat(1500));
     expect(emoji.every((chunk) => chunk.length <= CONTENT_LIMIT && !chunk.includes("�"))).toBe(true);
     expect(emoji.join("")).toBe("😀".repeat(1500));
+    // A limit that cannot hold a character would never finish.
+    expect(() => split("text", 1)).toThrow(RangeError);
+    expect(() => split("text", 0)).toThrow(RangeError);
   });
 
   it("extracts the draft after a label from a triage message", () => {

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { CONTENT_LIMIT } from "../src/relay/format.js";
-import { Relay, type RelayOptions } from "../src/relay/relay.js";
-import { FakeForum, FORUM, MemoryStore, message, TAGS, TRIAGE } from "./helpers.js";
+import { CONTENT_LIMIT } from "../src/relay/format.ts";
+import { Relay, type RelayOptions } from "../src/relay/relay.ts";
+import { FakeForum, FORUM, MemoryStore, message, TAGS, TRIAGE } from "./helpers.ts";
 
 function relayWith(options: Partial<RelayOptions> = {}) {
   const forum = options.forum instanceof FakeForum ? options.forum : new FakeForum();
@@ -11,13 +11,22 @@ function relayWith(options: Partial<RelayOptions> = {}) {
     store,
     frontendUrl: "https://chatwoot.example.com/",
     avatars: AVATARS,
-    target: (accountId) => ({ forumChannelId: FORUM, tag: accountId === 3 ? "Acme" : "Globex" }),
+    target: (accountId) => ({
+      forumChannelId: FORUM,
+      name: accountId === 3 ? "Acme" : "Globex",
+      tag: accountId === 3 ? "Acme" : "Globex",
+    }),
     topicAttribute: "topic",
     maxChunks: 4,
+    liveSeconds: 3600,
+    now: () => NOW,
     ...options,
   });
   return { relay, forum, store };
 }
+
+const NOW = new Date("2026-09-27T20:00:00Z");
+const NOW_SECONDS = NOW.getTime() / 1000;
 
 const AVATARS = {
   chatwoot: "https://chatwoot.example.com/favicon-512x512.png",
@@ -60,27 +69,6 @@ describe("Relay", () => {
       allowed_mentions: { parse: [] },
     });
     expect(forum.patches).toEqual([]);
-  });
-
-  it("links a new post from its conversation once", async () => {
-    const links: unknown[] = [];
-    ({ relay, forum } = relayWith({ linkPost: async (...args) => void links.push(args) }));
-    await relay.relay(message());
-    await relay.relay(message({ id: 102, content: "Still broken" }));
-    expect(links).toEqual([[3, 12, "https://discord.com/channels/100000000000000044/thread-1"]]);
-  });
-
-  it("keeps relaying when the link cannot be recorded", async () => {
-    const ignored: unknown[] = [];
-    ({ relay, forum } = relayWith({
-      linkPost: async () => {
-        throw new Error("Chatwoot unavailable");
-      },
-      onIgnoredError: (error) => ignored.push(error),
-    }));
-    await relay.relay(message());
-    expect(forum.calls).toHaveLength(2);
-    expect(ignored).toHaveLength(1);
   });
 
   it("gives customers their own avatar or the contact default, and Chatwoot's messages the Chatwoot avatar", async () => {
@@ -259,8 +247,10 @@ describe("Relay", () => {
     const contents = forum.contents();
     expect(contents[0]).not.toContain(`<@${TRIAGE}>`); // ticket card
     expect(contents[1]).toBe(`My agent will not connect\n-# <@${TRIAGE}>`);
-    expect(contents[2]?.endsWith(`\n-# <@${TRIAGE}>`)).toBe(true);
-    expect(contents[2]?.length).toBeLessThanOrEqual(CONTENT_LIMIT);
+    // A split message carries the mention on its last part, so the bot sees all of it.
+    expect(contents[2]).not.toContain(`<@${TRIAGE}>`);
+    expect(contents[3]?.endsWith(`\n-# <@${TRIAGE}>`)).toBe(true);
+    expect(contents.slice(2, 4).every((content) => content.length <= CONTENT_LIMIT)).toBe(true);
     expect(contents.filter((content) => content.includes(`<@${TRIAGE}>`))).toHaveLength(2);
     // Mentions never ping: the webhook message allows none.
     expect(forum.calls.every(([, payload]) => payload.allowed_mentions?.parse?.length === 0)).toBe(true);
@@ -420,11 +410,20 @@ describe("Relay", () => {
     expect(forum.contents().some((content) => content.includes("<@"))).toBe(false);
   });
 
-  it("posts a failure notice into the existing post", async () => {
-    await relay.relay(message());
-    await relay.notifyFailure(3, 12, 555);
-    expect(forum.calls.at(-1)?.[0]).toBe("thread-1");
-    expect(forum.contents().at(-1)).toContain("message 555 could not be relayed");
+  it("posts a notice into the existing post, and archives a resolved post again afterwards", async () => {
+    expect(await relay.notify(3, message().conversation, "⚠️ Notice")).toBe(false); // no post yet
+    await relay.relay(message({ conversation: resolved }));
+    await relay.sync(3, message({ conversation: resolved }).conversation, "thread-1");
+    expect(forum.archived.has("thread-1")).toBe(true);
+
+    expect(await relay.notify(3, message({ conversation: resolved }).conversation, "⚠️ Notice")).toBe(true);
+    expect(forum.calls.at(-1)).toEqual([
+      "thread-1",
+      { content: "⚠️ Notice", username: "Chatwoot", avatar_url: AVATARS.chatwoot, allowed_mentions: { parse: [] } },
+    ]);
+    expect(forum.archived.has("thread-1")).toBe(false); // posting unarchived it
+    await relay.sync(3, message({ conversation: resolved }).conversation, "thread-1");
+    expect(forum.archived.has("thread-1")).toBe(true);
   });
 
   it("posts a response under the contact's name and avatar, capped with a link to the full text", async () => {
@@ -457,5 +456,93 @@ describe("Relay", () => {
     forum.failThreadWith = "gone";
     expect(await relay.postResponse(3, message().conversation, "thread-1", "**Email:** a@example.com")).toBe(false);
     expect(store.thread(3, 12)).toBeUndefined();
+  });
+
+  it("relays history without notifications, and announces the assignee on the first live message", async () => {
+    ({ relay, forum, store } = relayWith({ triage, discordUserFor: () => "592" }));
+    const assigned = { assignee: { id: 7, name: "Kim" } };
+    const hourAgo = NOW_SECONDS - 3601;
+    await relay.relay(message({ createdAt: hourAgo - 86400, content: "old question", conversation: assigned }));
+    await relay.relay(message({ id: 102, createdAt: hourAgo, content: "old follow-up", conversation: assigned }));
+    await relay.relay(
+      message({ id: 103, createdAt: NOW_SECONDS - 60, content: "still there?", conversation: assigned }),
+    );
+    const replies = forum.calls.slice(1).map(([, payload]) => [payload.content, payload.allowed_mentions]);
+    expect(replies).toEqual([
+      ["old question", { parse: [] }],
+      ["old follow-up", { parse: [] }],
+      [`still there?\n-# <@${TRIAGE}>\n-# Assigned to <@592>`, { parse: [], users: ["592"] }],
+    ]);
+    // History used none of the triage budget.
+    expect([...store.counters.values()]).toEqual([1, 1]);
+  });
+
+  it("pings on the last part of a split message only", async () => {
+    ({ relay, forum } = relayWith({ triage, discordUserFor: () => "592" }));
+    const assigned = { assignee: { id: 7, name: "Kim" } };
+    await relay.relay(message({ conversation: assigned }));
+    const text = `${"a".repeat(1500)}\n${"b".repeat(1500)}`;
+    await relay.relay(message({ id: 102, content: text, conversation: assigned }));
+    const [first, last] = forum.calls.slice(2).map(([, payload]) => payload);
+    expect(first).toMatchObject({ content: "a".repeat(1500), allowed_mentions: { parse: [] } });
+    expect(last).toMatchObject({
+      content: `${"b".repeat(1500)}\n-# <@${TRIAGE}> <@592>`,
+      allowed_mentions: { parse: [], users: ["592"] },
+    });
+  });
+
+  it("keeps the notification lines before the truncation note of a very long message", async () => {
+    ({ relay, forum } = relayWith({ triage, maxChunks: 2 }));
+    const text = `${"x".repeat(1900)}\n`.repeat(4);
+    await relay.relay(message({ content: text }));
+    const replies = forum.contents().slice(1);
+    expect(replies).toHaveLength(3);
+    expect(replies[1]?.endsWith(`\n-# <@${TRIAGE}>`)).toBe(true);
+    expect(replies[2]).toMatch(/^-# Message truncated/);
+  });
+
+  it("pings linked agents mentioned in a private note, where they are mentioned", async () => {
+    const note = message({
+      messageType: "outgoing",
+      private: true,
+      content: "[@Kim](mention://user/7/Kim) please check, cc [@Lee](mention://user/9/Lee)",
+      sender: { name: "Sam", type: "user" },
+      mentionedAgents: new Map([[7, "592"]]),
+    });
+    await relay.relay(note);
+    expect(forum.calls.at(-1)?.[1]).toMatchObject({
+      content: "🔒 **Internal note**\n<@592> please check, cc @Lee",
+      allowed_mentions: { parse: [], users: ["592"] },
+    });
+  });
+
+  it("tags priority and labels after the other tags, and syncs when they change", async () => {
+    const tagged = new FakeForum({ ...TAGS, urgent: "t-urgent", vip: "t-vip", refund: "t-refund" });
+    ({ relay, forum } = relayWith({ forum: tagged }));
+    await relay.relay(message({ conversation: { priority: "urgent", labels: ["vip"] } }));
+    expect(forum.calls[0]?.[1].applied_tags).toEqual(["t-acme", "t-open", "t-urgent", "t-vip"]);
+    await relay.sync(3, message({ conversation: { priority: "urgent", labels: ["vip"] } }).conversation, "thread-1");
+    expect(forum.patches).toEqual([]);
+    await relay.sync(3, message({ conversation: { labels: ["refund", "vip"] } }).conversation, "thread-1");
+    expect(forum.patches).toEqual([
+      ["thread-1", { archived: false, applied_tags: ["t-acme", "t-open", "t-refund", "t-vip"] }],
+    ]);
+  });
+
+  it("renames the post when the contact's name changes, keeping the subject", async () => {
+    await relay.relay(message());
+    const renamed = message({ conversation: { contact: { name: "Jane Roe", email: "jane@example.com" } } });
+    await relay.sync(3, renamed.conversation, "thread-1");
+    await relay.sync(3, { ...renamed.conversation, status: "pending" }, "thread-1");
+    expect(forum.patches).toEqual([
+      ["thread-1", { ...tagsFor("open"), name: "[Acme #12] Jane Roe — My agent will not connect" }],
+      ["thread-1", tagsFor("pending")], // the name is only sent when it changes
+    ]);
+
+    // A post this service did not title (adopted) keeps its title.
+    const adopted = relayWith();
+    adopted.store.saveThread(3, 12, "adopted-thread");
+    await adopted.relay.sync(3, renamed.conversation, "adopted-thread");
+    expect(adopted.forum.patches).toEqual([["adopted-thread", tagsFor("open")]]);
   });
 });

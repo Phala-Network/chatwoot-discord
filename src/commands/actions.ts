@@ -1,18 +1,25 @@
 // Runs a deferred command against Chatwoot as the invoking agent, using that agent's own access
 // token, so Chatwoot applies its normal permissions and records who did it.
 
-import { ChatwootError, chatwootClient, type Fetch, type StatusChange } from "../chatwoot/api.js";
-import type { Settings } from "../config.js";
-import { errorFields, log } from "../log.js";
-import { downloadAttachment } from "./attachments.js";
-import { PRIORITY_NAMES } from "./definitions.js";
-import { FAILED, NOT_LINKED, UserError } from "./handler.js";
-import type { CommandJob } from "./job.js";
+import { ChatwootError, chatwootClient, type Fetch, type StatusChange } from "../chatwoot/api.ts";
+import type { Settings } from "../config.ts";
+import { errorFields, log } from "../log.ts";
+import { downloadAttachment } from "./attachments.ts";
+import { FAILED, filesTooLarge, NOT_LINKED, UserError } from "./common.ts";
+import { PRIORITY_NAMES } from "./definitions.ts";
+import type { CommandJob } from "./job.ts";
 
-/** The confirmation shown to the invoker (only they see it). Never throws. */
-export async function executeCommand(job: CommandJob, settings: Settings, fetch: Fetch): Promise<string> {
+interface CommandResult {
+  /** The confirmation shown to the invoker (only they see it). */
+  content: string;
+  /** Chatwoot could not find the conversation: it may have been deleted. */
+  conversationGone: boolean;
+}
+
+/** Never throws. */
+export async function executeCommand(job: CommandJob, settings: Settings, fetch: Fetch): Promise<CommandResult> {
   const token = settings.agentToken(job.discordUserId);
-  if (!token) return `❌ ${NOT_LINKED}`;
+  if (!token) return { content: `❌ ${NOT_LINKED}`, conversationGone: false };
   const chatwoot = chatwootClient(settings.config.chatwoot.baseUrl, token, fetch);
   const { accountId, conversationId, action } = job;
 
@@ -66,23 +73,22 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
         break;
       }
       case "message": {
+        if (!action.private) {
+          const conversation = await existing(chatwoot.getConversation(accountId, conversationId));
+          // Chatwoot accepts the message but the channel would fail it, e.g. after WhatsApp's
+          // 24-hour window (Conversations::MessageWindowService at v4.18.0).
+          if (conversation.can_reply === false) throw new UserError(CANNOT_REPLY);
+          // A public reply to an unassigned conversation assigns it to the replying agent.
+          if (!conversation.meta?.assignee) await chatwoot.assign(accountId, conversationId, profile.id);
+        }
         const limits = settings.config.attachments;
         const files = [];
         let total = 0;
         for (const file of action.files) {
           const downloaded = await downloadAttachment(file, limits.maxFileBytes, fetch);
           total += downloaded.blob.size;
-          if (total > limits.maxTotalBytes) {
-            throw new UserError(
-              `Attachments must add up to ${Math.floor(limits.maxTotalBytes / (1024 * 1024))} MB or less.`,
-            );
-          }
+          if (total > limits.maxTotalBytes) throw filesTooLarge(limits.maxTotalBytes);
           files.push(downloaded);
-        }
-        if (!action.private) {
-          // A public reply to an unassigned conversation assigns it to the replying agent.
-          const conversation = await existing(chatwoot.getConversation(accountId, conversationId));
-          if (!conversation.meta?.assignee) await chatwoot.assign(accountId, conversationId, profile.id);
         }
         await chatwoot.createMessage(accountId, conversationId, {
           content: action.content,
@@ -95,18 +101,23 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
       }
     }
     log.info("command done", { action: action.type, discordUserId: job.discordUserId, accountId, conversationId });
-    return `✅ ${message}`;
+    return { content: `✅ ${message}`, conversationGone: false };
   } catch (error) {
-    if (error instanceof UserError) return `❌ ${error.message}`;
-    if (error instanceof ChatwootError && error.status === 401) {
-      return "❌ Chatwoot rejected your access token. Ask an admin to update it.";
-    }
-    if (error instanceof ChatwootError && (error.status === 403 || error.status === 404)) {
-      return "❌ You do not have access to this conversation.";
-    }
-    log.error("command failed", { action: action.type, accountId, conversationId, ...errorFields(error) });
-    return FAILED;
+    const gone = error instanceof ConversationGoneError || (error instanceof ChatwootError && error.status === 404);
+    return { content: failure(error, job), conversationGone: gone };
   }
+}
+
+function failure(error: unknown, { action, accountId, conversationId }: CommandJob): string {
+  if (error instanceof UserError) return `❌ ${error.message}`;
+  if (error instanceof ChatwootError && error.status === 401) {
+    return "❌ Chatwoot rejected your access token. Ask an admin to update it.";
+  }
+  if (error instanceof ChatwootError && (error.status === 403 || error.status === 404)) {
+    return "❌ You do not have access to this conversation.";
+  }
+  log.error("command failed", { action: action.type, accountId, conversationId, ...errorFields(error) });
+  return FAILED;
 }
 
 function statusMessage(status: StatusChange["status"], snoozedUntil: number | undefined): string {
@@ -123,8 +134,17 @@ function statusMessage(status: StatusChange["status"], snoozedUntil: number | un
   }
 }
 
+const CANNOT_REPLY =
+  "This conversation's channel does not accept a reply right now (for example, its reply window has closed). Reply in Chatwoot, for example with a template.";
+
+class ConversationGoneError extends UserError {
+  constructor() {
+    super("This conversation no longer exists in Chatwoot.");
+  }
+}
+
 async function existing<T>(conversation: Promise<T | undefined>): Promise<T> {
   const found = await conversation;
-  if (found === undefined) throw new UserError("This conversation no longer exists in Chatwoot.");
+  if (found === undefined) throw new ConversationGoneError();
   return found;
 }

@@ -13,7 +13,9 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
-    "noEmit": true
+    "noEmit": true,
+    // Relative imports name the .ts file: bundlers accept it, and scripts run with Node's type stripping.
+    "allowImportingTsExtensions": true
   },
   "include": ["src", "test"]
 }
