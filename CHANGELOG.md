@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The first message in a post adopted from a previous relay no longer pings the assignee again:
+  without a recorded state, an unchanged assignee cannot be told apart from a new one.
+
 ## [0.1.0] - 2026-09-27
 
 ### Added

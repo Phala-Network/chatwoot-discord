@@ -266,6 +266,19 @@ describe("Relay", () => {
     expect(first?.allowed_mentions).toEqual({ parse: [], users: ["592"] });
   });
 
+  it("does not ping the assignee of an adopted post without a recorded state", async () => {
+    const adopted = relayWith({ discordUserFor: () => "592" });
+    adopted.store.saveThread(3, 12, "adopted-thread");
+    await adopted.relay.relay(message({ conversation: { assignee: { id: 7, name: "Kim" } } }));
+    expect(adopted.forum.calls).toEqual([
+      [
+        "adopted-thread",
+        { content: "My agent will not connect", username: "Jane Doe", allowed_mentions: { parse: [] } },
+      ],
+    ]);
+    expect(adopted.forum.patches.map(([threadId]) => threadId)).toEqual(["adopted-thread"]);
+  });
+
   it("does not mention anyone without a configured triage bot", async () => {
     await relay.relay(message());
     expect(forum.contents().some((content) => content.includes("<@"))).toBe(false);
