@@ -5,7 +5,7 @@
 
 import createClient from "openapi-fetch";
 import { z } from "zod";
-import type { MessageType, RelayAttachment, RelayConversation, RelayMessage } from "../relay/types.ts";
+import type { MessageType, RelayAttachment, RelayConversation, RelayItem, RelayMessage } from "../relay/types.ts";
 import type { components, operations, paths } from "./schema.ts";
 
 export type Fetch = (input: Request) => Promise<Response>;
@@ -30,9 +30,13 @@ export type ChatwootConversation = components["schemas"]["conversation_show"];
 const text = z.string().nullish();
 
 /**
- * An attachment as Attachment#push_event_data returns it (app/models/attachment.rb): files have
- * a `data_url`; a shared location has coordinates, a `fallback_title` (the place), and maybe a
- * `data_url`; a shared contact has its phone number as `fallback_title` and its name in `meta`.
+ * An attachment as Attachment#push_event_data returns it (app/models/attachment.rb at v4.18.0):
+ * files have a `data_url`; a shared location has coordinates, a `fallback_title` (the place),
+ * and maybe a `data_url`; a `fallback` (content a channel could not deliver as a file) has a
+ * `fallback_title` and maybe a `data_url`; a shared contact has its phone number as
+ * `fallback_title` and its name in `meta`, as `firstName`/`lastName` from WhatsApp
+ * (Whatsapp::IncomingContactMessageHandler) or `first_name`/`last_name` from Telegram
+ * (Telegram::IncomingMessageService#attach_contact).
  */
 const attachmentSchema = z.object({
   file_type: text,
@@ -40,18 +44,52 @@ const attachmentSchema = z.object({
   fallback_title: text,
   coordinates_lat: z.number().nullish(),
   coordinates_long: z.number().nullish(),
-  meta: z.object({ firstName: text, lastName: text }).nullish().catch(null),
+  meta: z.object({ firstName: text, lastName: text, first_name: text, last_name: text }).nullish().catch(null),
 });
+
+/**
+ * An item of a bot's `input_select`, `cards`, or `article` message (`content_attributes.items`,
+ * with the keys ContentAttributeValidator allows at v4.18.0).
+ */
+const itemText = text.catch(null);
+const itemSchema = z.object({
+  title: itemText,
+  value: itemText,
+  description: itemText,
+  media_url: itemText,
+  link: itemText,
+  actions: z
+    .array(z.object({ text: itemText, uri: itemText }))
+    .nullish()
+    .catch(null),
+});
+const ITEM_CONTENT_TYPES: ReadonlySet<string> = new Set(["input_select", "cards", "article"]);
+
+/** Attachments shown as a link with a label: Instagram story mentions and reels. */
+const LINK_LABELS: Partial<Record<string, string>> = { story_mention: "Story mention", ig_reel: "Reel" };
 
 /**
  * The spec's `message` schema describes a single `attachment` object and leaves `sender` and
  * `content_attributes` untyped, while the API returns `attachments[]` (app/views/api/v1/models/
  * _message.json.jbuilder), a sender with `id`/`name`/`email`/`type`/`thumbnail`, and content
- * attributes such as `email.subject`, `deleted`, `external_error` (why a failed message was not
- * delivered), and the response to an interactive message (`submitted_values`,
+ * attributes such as `email` (see emailSchema), `deleted`, `external_error` (why a failed message
+ * was not delivered), and the response to an interactive message (`submitted_values`,
  * `submitted_email`, `items`; app/models/message.rb). Only those fields are read; the shape of a
  * response is checked where it is formatted (relay/response.ts).
  */
+/**
+ * An email message's `content_attributes.email`, MailPresenter#serialized_data at v4.18.0: the
+ * subject, whether it is an automatic reply (`auto_reply`), and the text and HTML bodies. Each
+ * body's `quoted` is the reply without the quoted history (EmailReplyTrimmer; the HTML one
+ * already converted to text by HtmlParser), while the message's `content` is the whole text.
+ */
+const emailSchema = z.object({
+  subject: text,
+  auto_reply: z.boolean().nullish(),
+  text_content: z.object({ quoted: text }).nullish().catch(null),
+  html_content: z.object({ quoted: text }).nullish().catch(null),
+});
+
 const messageSchema = z.object({
   id: z.number(),
   content: text,
@@ -64,7 +102,7 @@ const messageSchema = z.object({
   private: z.boolean().nullish(),
   content_attributes: z
     .object({
-      email: z.object({ subject: text }).nullish(),
+      email: emailSchema.nullish(),
       deleted: z.boolean().nullish(),
       external_error: text,
       submitted_values: z.unknown().optional(),
@@ -237,6 +275,52 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
       );
     },
 
+    /**
+     * Removes the conversation's assignee the way Chatwoot's dashboard does (ConversationAction.vue
+     * posts `assignee_id: null`, which AssignmentsController#create applies, at v4.18.0). The
+     * spec types `assignee_id` as a number only, so this body is serialized here.
+     */
+    unassign(accountId: number, conversationId: number): Promise<void> {
+      return ensureOk(
+        "unassign conversation",
+        client.POST("/api/v1/accounts/{account_id}/conversations/{conversation_id}/assignments", {
+          params: { path: { account_id: accountId, conversation_id: conversationId } },
+          body: {},
+          bodySerializer: () => JSON.stringify({ assignee_id: null }),
+        }),
+      );
+    },
+
+    /** The account's label names (Chatwoot saves them in lower case). */
+    async listLabels(accountId: number): Promise<string[]> {
+      const list = await data(
+        "list labels",
+        client.GET("/api/v1/accounts/{account_id}/labels", { params: { path: { account_id: accountId } } }),
+      );
+      return (list.payload ?? []).flatMap((label) => (label.title ? [label.title] : []));
+    },
+
+    async conversationLabels(accountId: number, conversationId: number): Promise<string[]> {
+      const list = await data(
+        "list conversation labels",
+        client.GET("/api/v1/accounts/{account_id}/conversations/{conversation_id}/labels", {
+          params: { path: { account_id: accountId, conversation_id: conversationId } },
+        }),
+      );
+      return list.payload ?? [];
+    },
+
+    /** Replaces the conversation's labels (the spec's "Add Labels" overwrites the list). */
+    setLabels(accountId: number, conversationId: number, labels: string[]): Promise<void> {
+      return ensureOk(
+        "set labels",
+        client.POST("/api/v1/accounts/{account_id}/conversations/{conversation_id}/labels", {
+          params: { path: { account_id: accountId, conversation_id: conversationId } },
+          body: { labels },
+        }),
+      );
+    },
+
     /** Sets one conversation custom attribute, keeping the others (`merge`). */
     setCustomAttribute(accountId: number, conversationId: number, key: string, value: string): Promise<void> {
       return ensureOk(
@@ -298,6 +382,7 @@ export function toRelayConversation(conversationId: number, conversation: Chatwo
     contact: {
       name: meta?.sender?.name ?? null,
       email: meta?.sender?.email ?? null,
+      phone: meta?.sender?.phone_number ?? null,
       blocked: meta?.sender?.blocked ?? false,
       avatarUrl: meta?.sender?.thumbnail ?? null,
     },
@@ -322,9 +407,11 @@ export function toRelayMessage(
     messageType: MESSAGE_TYPES[message.message_type] ?? "template",
     private: message.private ?? false,
     deleted: message.content_attributes?.deleted === true,
-    content: message.content ?? "",
+    content: messageContent(message),
     emailSubject: message.content_attributes?.email?.subject ?? null,
+    autoReply: message.content_attributes?.email?.auto_reply === true,
     attachments: (message.attachments ?? []).flatMap(toRelayAttachment),
+    items: ITEM_CONTENT_TYPES.has(message.content_type ?? "") ? toRelayItems(message.content_attributes?.items) : [],
     sender: message.sender
       ? {
           name: message.sender.name,
@@ -341,12 +428,24 @@ export function toRelayMessage(
   };
 }
 
+/**
+ * What Chatwoot itself shows and forwards (Message#ensure_processed_message_content, used by its
+ * Slack integration at v4.18.0): for an email, the reply without its quoted history.
+ */
+function messageContent(message: ChatwootMessage): string {
+  const email = message.content_attributes?.email;
+  return email?.text_content?.quoted ?? email?.html_content?.quoted ?? message.content ?? "";
+}
+
 function toRelayAttachment(attachment: z.infer<typeof attachmentSchema>): RelayAttachment[] {
   switch (attachment.file_type) {
     case "contact": {
-      const name = [attachment.meta?.firstName, attachment.meta?.lastName].filter(Boolean).join(" ");
+      const meta = attachment.meta;
+      const name = [meta?.firstName ?? meta?.first_name, meta?.lastName ?? meta?.last_name].filter(Boolean).join(" ");
       return [{ type: "contact", name, phone: attachment.fallback_title ?? "" }];
     }
+    case "fallback":
+      return [{ type: "file", url: attachment.data_url ?? "", label: attachment.fallback_title ?? "" }];
     case "location":
       return [
         {
@@ -357,7 +456,21 @@ function toRelayAttachment(attachment: z.infer<typeof attachmentSchema>): RelayA
           url: attachment.data_url ?? "",
         },
       ];
-    default:
-      return attachment.data_url ? [{ type: "file", url: attachment.data_url }] : [];
+    default: {
+      const label = LINK_LABELS[attachment.file_type ?? ""];
+      if (!attachment.data_url) return [];
+      return [{ type: "file", url: attachment.data_url, ...(label ? { label } : {}) }];
+    }
   }
+}
+
+function toRelayItems(items: unknown): RelayItem[] {
+  const parsed = z.array(itemSchema).safeParse(items);
+  if (!parsed.success) return [];
+  return parsed.data.map((item) => ({
+    title: item.title ?? item.value ?? "",
+    description: item.description ?? "",
+    url: item.link ?? item.media_url ?? "",
+    links: (item.actions ?? []).flatMap((action) => (action.uri ? [{ text: action.text ?? "", url: action.uri }] : [])),
+  }));
 }

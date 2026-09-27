@@ -1,8 +1,6 @@
 // Brings one conversation's forum post up to date from Chatwoot's API: relays every message
 // after the stored cursor, in order, then links the post from the conversation and corrects its
-// tags, title, and archived flag. Also acts on updated messages: removes the Discord messages of
-// a message deleted in Chatwoot, posts customers' responses to interactive messages, and says
-// when an agent's reply could not be delivered.
+// tags, title, and archived flag.
 
 import { z } from "zod";
 import { type Budget, BudgetExhaustedError } from "../budget.ts";
@@ -15,14 +13,14 @@ import {
   toRelayMessage,
 } from "../chatwoot/api.ts";
 import { relaysInbox, type Settings } from "../config.ts";
-import type { DiscordRest } from "../discord/rest.ts";
+import { type DiscordRest, isInvalidRequest } from "../discord/rest.ts";
 import { fetchAvatarUrl } from "../discord/users.ts";
 import { parseJson } from "../json.ts";
 import { errorFields, log } from "../log.ts";
 import type { Store } from "../store.ts";
-import { clip, mentionedUserIds } from "./format.ts";
+import { mentionedUserIds } from "./format.ts";
+import { FINISH_REQUESTS, PAGE_REQUESTS, requestsPerMessage } from "./limits.ts";
 import { type ForumClient, Relay, type RelayStore } from "./relay.ts";
-import { interactiveMessage, responseText } from "./response.ts";
 import type { RelayConversation } from "./types.ts";
 
 const INBOX_CACHE_MS = 24 * 60 * 60 * 1000;
@@ -31,26 +29,6 @@ const AGENTS_CACHE_MS = 60 * 60 * 1000;
 const AVATAR_CACHE_MS = 24 * 60 * 60 * 1000;
 /** After a failed avatar lookup, the agent's Chatwoot avatar is used this long before trying again. */
 const AVATAR_RETRY_MS = 60 * 60 * 1000;
-/**
- * Worst case for relaying one message besides its parts: the inbox name and the forum's tags
- * for a new post, webhook lookup and creation, the ticket card, the account's agents (for
- * mentions and the sender), the linked sender's Discord avatar, the truncation note, and a
- * failure notice.
- */
-const MESSAGE_REQUESTS = 9;
-/** Linking a new post from its conversation: the forum's guild and the attribute update. */
-const LINK_REQUESTS = 2;
-/** Bringing a post's tags and archived flag up to date: the forum's tags and two updates. */
-const SYNC_REQUESTS = 3;
-
-/**
- * Requests one message may need in the worst case, with room left for linking and syncing the
- * post afterwards. A message only starts when this much budget remains.
- */
-export function requestsPerMessage(maxChunks: number): number {
-  return maxChunks + MESSAGE_REQUESTS + LINK_REQUESTS + SYNC_REQUESTS;
-}
-
 /** The relay as configured by `settings`. */
 export function relayFor(settings: Settings, forum: ForumClient, store: RelayStore): Relay {
   const triageUserId = settings.config.triage.userId;
@@ -74,7 +52,7 @@ export function relayFor(settings: Settings, forum: ForumClient, store: RelaySto
   });
 }
 
-interface ProcessorContext {
+export interface ProcessorContext {
   settings: Settings;
   store: Store;
   relay: Relay;
@@ -106,11 +84,13 @@ export async function processConversation(
   }
   if (!relaysInbox(account, raw.inbox_id)) return "done";
   const conversation = toRelayConversation(conversationId, raw);
-  if (!store.thread(accountId, conversationId))
+  if (!store.conversation(accountId, conversationId)?.threadId) {
     await recoverThread(context, accountId, account.forumChannelId, conversation);
+  }
 
-  let cursor = store.conversation(accountId, conversationId)?.cursor;
-  if (cursor === undefined && store.thread(accountId, conversationId)) {
+  const recorded = store.conversation(accountId, conversationId);
+  let cursor = recorded?.cursor;
+  if (cursor === undefined && recorded?.threadId) {
     // An adopted post (from the link attribute) already holds the history. With a cutover
     // watermark, continue after it; otherwise start after the latest message.
     if (limits.startAfterMessageId > 0) {
@@ -129,13 +109,14 @@ export async function processConversation(
   }
 
   let inboxName: string | null | undefined;
+  let notified = false;
   for (;;) {
-    if (budget.remaining < perMessage + 1) return "yield";
+    if (budget.remaining < perMessage + PAGE_REQUESTS) return "yield";
     const page = await chatwoot.listMessages(accountId, conversationId, cursor);
     for (const message of page) {
       if (message.id <= cursor) continue;
       if (budget.remaining < perMessage) return "yield";
-      if (inboxName === undefined && !store.thread(accountId, conversationId)) {
+      if (inboxName === undefined && !store.conversation(accountId, conversationId)?.threadId) {
         inboxName = await cachedInboxName(context, accountId, raw);
       }
       const relayMessage = toRelayMessage(message, {
@@ -145,9 +126,13 @@ export async function processConversation(
         ...(await linkedAgents(context, accountId, message)),
       });
       try {
-        await relay.relay(relayMessage);
+        notified = (await relay.relay(relayMessage)) || notified;
       } catch (error) {
         if (error instanceof BudgetExhaustedError) return "yield";
+        // Only a request Discord refuses as invalid counts towards skipping the message. Anything
+        // else (a rate limit, a server error, a timeout, a missing permission) waits for the
+        // job's retry, however long it takes, so the message is never skipped for it.
+        if (!isInvalidRequest(error)) throw error;
         const attempts = store.recordFailure(accountId, conversationId, message.id);
         if (attempts < limits.maxAttempts) throw error;
         log.error("relay gave up on message", {
@@ -170,103 +155,14 @@ export async function processConversation(
     if (page.length < MESSAGE_PAGE_SIZE) break;
   }
 
-  const threadId = store.thread(accountId, conversationId);
+  const threadId = store.conversation(accountId, conversationId)?.threadId;
   if (threadId) {
-    if (budget.remaining < LINK_REQUESTS + SYNC_REQUESTS) return "yield";
+    if (budget.remaining < FINISH_REQUESTS) return "yield";
+    if (notified) await relay.announceAssignee(accountId, conversation);
     await linkPost(context, accountId, account.forumChannelId, conversation, threadId);
     await relay.sync(accountId, conversation, threadId);
   }
   return "done";
-}
-
-/**
- * Acts on a message reported as updated once Chatwoot's API confirms the change: a deleted
- * message's Discord messages are deleted, a customer's response to an interactive message is
- * posted, and a notice says when an agent's message could not be delivered. Nothing is done for
- * a conversation without a post.
- */
-export async function processMessageUpdate(
-  context: ProcessorContext,
-  accountId: number,
-  conversationId: number,
-  messageId: number,
-): Promise<void> {
-  const { settings, store, chatwoot } = context;
-  const threadId = store.thread(accountId, conversationId);
-  if (!settings.account(accountId) || !threadId) return;
-  const message = await chatwoot.getMessage(accountId, conversationId, messageId);
-  if (!message) return;
-  if (message.content_attributes?.deleted === true) {
-    await deleteRelayedMessage(context, accountId, conversationId, messageId, threadId);
-    return;
-  }
-  if (message.status === "failed" && message.message_type === 1) {
-    const reason = message.content_attributes?.external_error?.trim();
-    const why = reason ? `: ${clip(reason, 300)}` : ".";
-    const notice = `⚠️ A reply could not be delivered to the customer${why}`;
-    await postOnce(context, { accountId, conversationId, messageId, threadId }, notice, "notice");
-    return;
-  }
-  const text = responseText(interactiveMessage(message.content_type, message.content, message.content_attributes));
-  if (text) await postOnce(context, { accountId, conversationId, messageId, threadId }, text, "response");
-}
-
-async function deleteRelayedMessage(
-  { settings, store, forum }: ProcessorContext,
-  accountId: number,
-  conversationId: number,
-  messageId: number,
-  threadId: string,
-): Promise<void> {
-  const account = settings.account(accountId);
-  const parts = store.postedParts(accountId, conversationId, messageId);
-  if (!account || parts.length === 0) return;
-  for (const discordId of parts) {
-    await forum.deleteMessage(account.forumChannelId, threadId, discordId);
-    store.deletePostedPart(accountId, conversationId, messageId, discordId);
-  }
-  log.info("deleted message removed from post", { accountId, conversationId, messageId, parts: parts.length });
-}
-
-/**
- * Posts text about a message once: a customer's response to it (under the customer's name) or
- * a notice. Chatwoot lets a customer submit again (a CSAT rating can be changed for 14 days),
- * and only changed text is posted again. Webhook payloads do not say what changed, so other
- * updates of the message (such as its read status) end here and post nothing. A blocked
- * contact's response is not posted, like their messages.
- */
-async function postOnce(
-  { store, relay, chatwoot }: ProcessorContext,
-  { accountId, conversationId, messageId, threadId }: MessageRef,
-  text: string,
-  kind: "response" | "notice",
-): Promise<void> {
-  const digest = await sha256(text);
-  if (store.postedResponse(accountId, conversationId, messageId) === digest) return;
-  const raw = await chatwoot.getConversation(accountId, conversationId);
-  if (!raw) return; // Deleted: the conversation's own job closes the post.
-  const conversation = toRelayConversation(conversationId, raw);
-  if (kind === "response" && conversation.contact.blocked) return;
-  const posted =
-    kind === "response"
-      ? await relay.postResponse(accountId, conversation, threadId, text)
-      : await relay.notify(accountId, conversation, text);
-  if (!posted) return;
-  store.savePostedResponse(accountId, conversationId, messageId, digest);
-  log.info(kind === "response" ? "response posted" : "delivery failure posted", {
-    accountId,
-    conversationId,
-    messageId,
-  });
-  const current = store.thread(accountId, conversationId);
-  if (current) await relay.sync(accountId, conversation, current);
-}
-
-interface MessageRef {
-  accountId: number;
-  conversationId: number;
-  messageId: number;
-  threadId: string;
 }
 
 /** A notice that must not fail the job: the failure is already logged by the caller. */
@@ -281,11 +177,6 @@ async function notifyQuietly(
   } catch (error) {
     if (error instanceof BudgetExhaustedError) throw error;
   }
-}
-
-async function sha256(text: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 /**

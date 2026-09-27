@@ -2,7 +2,7 @@
 
 import { vi } from "vitest";
 import { buildSettings, configSchema, type Settings, secretsSchema } from "../src/config.ts";
-import type { ForumClient, RelayStore, WebhookMessage } from "../src/relay/relay.ts";
+import type { ForumClient, PostFields, RelayStore, WebhookMessage } from "../src/relay/relay.ts";
 import { UnknownThreadError } from "../src/relay/relay.ts";
 import type { RelayMessage } from "../src/relay/types.ts";
 
@@ -39,37 +39,22 @@ export function message(overrides: Overrides = {}): RelayMessage {
 }
 
 export class MemoryStore implements RelayStore {
-  threads = new Map<string, string>();
-  states = new Map<string, string>();
-  announced = new Map<string, string>();
-  titles = new Map<string, { subject: string; applied: string }>();
+  rows = new Map<string, Partial<PostFields>>();
   parts = new Map<string, string[]>();
   counters = new Map<string, number>();
   seen = new Set<string>();
 
+  conversation(a: number, c: number) {
+    const row = this.rows.get(`${a}:${c}`);
+    if (!row) return undefined;
+    const { threadId, state, announcedAssignee, titleSubject, title } = row;
+    return { threadId, state, announcedAssignee, titleSubject, title };
+  }
+  updateConversation(a: number, c: number, patch: Partial<PostFields>) {
+    this.rows.set(`${a}:${c}`, { ...this.rows.get(`${a}:${c}`), ...patch });
+  }
   thread(a: number, c: number) {
-    return this.threads.get(`${a}:${c}`);
-  }
-  saveThread(a: number, c: number, threadId: string) {
-    this.threads.set(`${a}:${c}`, threadId);
-  }
-  title(a: number, c: number) {
-    return this.titles.get(`${a}:${c}`);
-  }
-  saveTitle(a: number, c: number, subject: string, applied: string) {
-    this.titles.set(`${a}:${c}`, { subject, applied });
-  }
-  state(a: number, c: number) {
-    return this.states.get(`${a}:${c}`);
-  }
-  saveState(a: number, c: number, state: string) {
-    this.states.set(`${a}:${c}`, state);
-  }
-  announcedAssignee(a: number, c: number) {
-    return this.announced.get(`${a}:${c}`);
-  }
-  saveAnnouncedAssignee(a: number, c: number, assignee: string) {
-    this.announced.set(`${a}:${c}`, assignee);
+    return this.rows.get(`${a}:${c}`)?.threadId;
   }
   postedParts(a: number, c: number, messageId: number) {
     return this.parts.get(`${a}:${c}:${messageId}`) ?? [];
@@ -80,10 +65,7 @@ export class MemoryStore implements RelayStore {
     this.parts.set(`${a}:${c}:${messageId}`, parts);
   }
   forgetThread(a: number, c: number) {
-    this.threads.delete(`${a}:${c}`);
-    this.states.delete(`${a}:${c}`);
-    this.announced.delete(`${a}:${c}`);
-    this.titles.delete(`${a}:${c}`);
+    this.rows.delete(`${a}:${c}`);
     for (const key of this.parts.keys()) if (key.startsWith(`${a}:${c}:`)) this.parts.delete(key);
   }
   firstAttempt(name: string) {
@@ -145,7 +127,7 @@ export class FakeForum implements ForumClient {
     return { channelId: threadId ?? `thread-${this.calls.length}`, messageId: `message-${this.calls.length}` };
   }
 
-  async updateThread(threadId: string, patch: ThreadPatch) {
+  async updateThread(_forum: string, threadId: string, patch: ThreadPatch) {
     if (this.failThreadWith === "gone") {
       this.failThreadWith = undefined;
       throw new UnknownThreadError(threadId);

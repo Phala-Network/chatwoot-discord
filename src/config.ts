@@ -3,7 +3,7 @@
 
 import { z } from "zod";
 import { parseJson } from "./json.ts";
-import { requestsPerMessage } from "./relay/processor.ts";
+import { minimumBudget } from "./relay/limits.ts";
 
 /** Gravatar's built-in "mp" default image, forced (it does not depend on any email). */
 const DEFAULT_CONTACT_AVATAR = "https://gravatar.com/avatar/?d=mp&f=y&s=256";
@@ -113,9 +113,9 @@ export const configSchema = z
       })
       .prefault({}),
   })
-  .refine((config) => config.relay.subrequestBudget > requestsPerMessage(config.relay.maxChunks), {
+  .refine((config) => config.relay.subrequestBudget >= minimumBudget(config.relay.maxChunks), {
     path: ["relay", "subrequestBudget"],
-    message: "must leave room for one message of relay.maxChunks parts (see requestsPerMessage)",
+    message: "must fit a run's setup and one message of relay.maxChunks parts (see src/relay/limits.ts)",
   })
   .transform(({ discord: _removed, ...config }) => config);
 

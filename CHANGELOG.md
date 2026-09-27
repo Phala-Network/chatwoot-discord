@@ -8,13 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 Upgrading: re-register the commands after deploying (`npm run register-commands`), for the new
-`/reply` and `/note` options. `CONFIG` is now validated strictly: remove any key the
+`/reply` and `/note` options and the new `/unassign` and `/label` commands. `CONFIG` is now validated strictly: remove any key the
 [configuration reference](README.md#configuration-reference) does not list (the old
 `discord.applicationId` is still accepted). On deploy, the database migrates once: posts gain
 two title columns (empty for existing posts, which keep their titles), and the unused
 `deliveries` table is dropped, so versions before 0.2.0 can no longer run on it. Each existing
 post's stored state no longer matches its new format, so the next sync of each conversation
 (its next event, or the sweep for recent ones) updates its tags once. Queued jobs keep working.
+`relay.subrequestBudget` must now be at least `relay.maxChunks` + 24 (the default 45 fits
+`maxChunks` up to 10).
 
 ### Added
 
@@ -39,6 +41,11 @@ post's stored state no longer matches its new format, so the next sync of each c
   else the agent's Chatwoot avatar. Agent bots, activity lines, cards, and notices keep
   `avatars.chatwoot`.
 - A command dropped because it could not start in time tells the invoker.
+- `/unassign` removes the assignee, and `/label add|remove <label>` changes one label.
+- The ticket card names every Chatwoot channel type and shows the contact's phone number on SMS,
+  Twilio, and WhatsApp.
+- Instagram story mentions and reels, `fallback` attachments, LINE stickers, Telegram shared
+  contacts' names, and bots' options, cards, and articles are shown instead of dropped.
 - README: installing on an existing Chatwoot (`relay.startAfterMessageId`), forum tag limits and
   the "Require tags" setting.
 
@@ -52,14 +59,31 @@ post's stored state no longer matches its new format, so the next sync of each c
 - Conversation events (`conversation_updated`, `conversation_status_changed`) sync after 10
   seconds, so the activity message for the change is posted with it.
 - A job that fails 10 times is dropped instead of retrying forever; the sweep and the next event
-  pick its conversation up again.
+  pick its conversation up again. A rate limited job waits as long as Discord asks, without
+  counting an attempt.
+- Only a request Discord refuses as invalid (a 4xx other than 401, 403, 404, 408, 429) counts
+  towards skipping a message after `relay.maxAttempts`; rate limits, server errors, timeouts, and
+  missing permissions retry until they succeed.
+- Every outbound request times out after 60 seconds.
+- An email is relayed without the earlier emails it quotes, as Chatwoot forwards it; an
+  automatic reply notifies nobody.
+- A newly assigned agent is pinged in a notice of its own after the assignment's activity line,
+  so two quick reassignments ping the latest assignee after the latest line.
+- Customer text cannot call the triage bot or look like a relay notification: mention tokens,
+  `@everyone`, `@here`, and a leading `-#` get a zero-width space.
+- Drafts are read with CommonMark's code fence rules (three or more backticks or tildes, closed
+  by a matching fence), so a draft may contain a code block.
+- A linked agent whose Chatwoot user left the account is told so instead of "not linked".
+- A forum tag deleted in Discord since it was cached no longer fails posts: the request is sent
+  once more with the tags read again.
 - A sweep that stops at its page limit continues from the oldest activity it read next time.
 - The link attribute is written whenever it does not point to the conversation's post, so a link
   that could not be written is retried on a later sync.
 - A command that finds its conversation deleted closes its post.
 - `CONFIG` rejects unknown keys, a `relay.subrequestBudget` too small for `relay.maxChunks`, and
-  a `triage.name` over 100 characters. One message's worst case counts one more request (the
-  sender's Discord avatar), so the budget must exceed `relay.maxChunks` + 14.
+  a `triage.name` over 100 characters. The budget must fit a run's setup and one message's worst
+  case, at least `relay.maxChunks` + 24 (`src/relay/limits.ts`); budgets that were accepted before
+  but could never relay a message are now rejected.
 - `wrangler.jsonc` is committed with placeholder `CONFIG` (it replaces `wrangler.example.jsonc`);
   edit it in place, and `npm run deploy` deploys it. `package.json` describes each secret for the
   Cloudflare dashboard.

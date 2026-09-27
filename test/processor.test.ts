@@ -9,13 +9,9 @@ import { chatwootClient } from "../src/chatwoot/api.ts";
 import type { Settings } from "../src/config.ts";
 import { DiscordForum } from "../src/discord/forum.ts";
 import { DiscordRest } from "../src/discord/rest.ts";
-import {
-  type ProcessOutcome,
-  processConversation,
-  processMessageUpdate,
-  relayFor,
-  requestsPerMessage,
-} from "../src/relay/processor.ts";
+import { minimumBudget, requestsPerMessage } from "../src/relay/limits.ts";
+import { type ProcessOutcome, processConversation, relayFor } from "../src/relay/processor.ts";
+import { processMessageUpdate } from "../src/relay/updates.ts";
 import { Store } from "../src/store.ts";
 import { ALICE, BOB, FORUM, json, mockFetch, on, type Recorded, TRIAGE, testSettings } from "./helpers.ts";
 
@@ -24,13 +20,15 @@ const now = () => Math.floor(Date.now() / 1000);
 
 interface FakeMessage {
   id: number;
-  content: string;
+  content: string | null;
   message_type: number;
   private?: boolean;
   created_at?: number;
   status?: string;
+  content_type?: string;
   content_attributes?: Record<string, unknown>;
   sender?: { id: number; type: string; name?: string; thumbnail?: string };
+  attachments?: Array<Record<string, unknown>>;
 }
 
 /** One Chatwoot conversation (#12 in account 3) and its messages, and the Discord forum. */
@@ -44,6 +42,10 @@ class World {
   };
   messages: FakeMessage[] = [];
   failLinks = 0;
+  /** Posts deleted in Discord. */
+  goneThreads = new Set<string>();
+  /** Discord's answer to posting into a thread, while it fails. */
+  threadFailure: (() => Response) | undefined;
   /** Discord users by id; others are unknown to Discord. */
   discordUsers: Record<string, { avatar: string | null; discriminator: string }> = {};
   private threads = 0;
@@ -85,9 +87,12 @@ class World {
       on("GET", `discord.com/api/v10/channels/${FORUM}`, () =>
         json({ id: FORUM, guild_id: GUILD, available_tags: [] }),
       ),
-      on("GET", /^discord\.com\/api\/v10\/channels\/\d+$/, (request) =>
-        json({ id: request.url.pathname.split("/").at(-1), parent_id: FORUM }),
-      ),
+      on("GET", /^discord\.com\/api\/v10\/channels\/\d+$/, (request) => {
+        const id = request.url.pathname.split("/").at(-1) ?? "";
+        return this.goneThreads.has(id)
+          ? json({ message: "Unknown Channel", code: 10003 }, { status: 404 })
+          : json({ id, parent_id: FORUM });
+      }),
       on("PATCH", /^discord\.com\/api\/v10\/channels\/\d+$/, () => json({})),
       on("GET", /^discord\.com\/api\/v10\/users\/\d+$/, (request) => {
         const id = request.url.pathname.split("/").at(-1) ?? "";
@@ -98,6 +103,7 @@ class World {
       }),
       on("POST", "discord.com/api/v10/webhooks/1/tok", (request) => {
         const thread = request.url.searchParams.get("thread_id");
+        if (thread && this.threadFailure) return this.threadFailure();
         if (thread) return json({ id: `m-${this.requests.length}`, channel_id: thread });
         this.threads += 1;
         return json({ id: "card", channel_id: `20000000000000000${this.threads}` });
@@ -227,6 +233,82 @@ describe("processConversation", () => {
     });
   });
 
+  it("relays a message in its worst case within the smallest budget the configuration accepts", async () => {
+    const settings = testSettings({ relay: { maxChunks: 10, subrequestBudget: minimumBudget(10) } });
+    const world = new World();
+    // The link attribute names a post deleted in Discord: checked, then a new post is opened.
+    world.goneThreads.add("300000000000000009");
+    world.conversation.custom_attributes = {
+      discord_thread: `https://discord.com/channels/${GUILD}/300000000000000009`,
+    };
+    world.discordUsers = { [BOB]: { avatar: "a_bob", discriminator: "0" } };
+    world.messages = [
+      { id: 1, content: "x\n".repeat(15_000), message_type: 1, sender: { id: 43, type: "user", name: "Bob" } },
+    ];
+    await withStore(async (store) => {
+      expect(await sync(store, settings)).toEqual(["done"]);
+      const replies = world.replies();
+      expect(replies).toHaveLength(11);
+      expect(replies.at(-1)).toMatch(/^-# Message truncated/);
+    });
+  });
+
+  it.each([
+    [
+      "a rate limit",
+      () => json({ message: "You are being rate limited.", retry_after: 64.5, global: false }, { status: 429 }),
+    ],
+    ["a server error", () => json({ message: "Internal Server Error" }, { status: 500 })],
+    ["missing permissions", () => json({ message: "Missing Permissions", code: 50013 }, { status: 403 })],
+  ])("never skips a message because of %s, however often it fails", async (_name, failure) => {
+    const settings = testSettings();
+    const world = new World();
+    world.messages = [
+      { id: 1, content: "first", message_type: 1 },
+      { id: 2, content: "second", message_type: 1 },
+    ];
+    world.threadFailure = failure;
+    await withStore(async (store) => {
+      // Every job attempt fails, far more often than relay.maxAttempts.
+      for (let attempt = 0; attempt < settings.config.relay.maxAttempts * 2; attempt += 1) {
+        await expect(processConversation(context(store, settings), 3, 12)).rejects.toThrow(/Discord HTTP/);
+      }
+      expect(store.conversation(3, 12)?.cursor).toBe(0);
+      world.threadFailure = undefined;
+      await sync(store, settings);
+      // Each failed attempt was at the first message; "second" never went ahead of it.
+      const attempts = settings.config.relay.maxAttempts * 2;
+      expect(world.replies()).toEqual([...Array<string>(attempts + 1).fill("first"), "second"]);
+    });
+  });
+
+  it("skips a message Discord keeps refusing as invalid, with a notice, after relay.maxAttempts", async () => {
+    const settings = testSettings();
+    const { maxAttempts } = settings.config.relay;
+    const world = new World();
+    world.messages = [{ id: 1, content: "first", message_type: 1 }];
+    await withStore(async (store) => {
+      await sync(store, settings);
+      world.messages.push({ id: 2, content: "refused", message_type: 1 });
+      // Refused on every attempt; the notice afterwards is accepted.
+      let refusals = maxAttempts;
+      world.threadFailure = () => {
+        refusals -= 1;
+        return refusals >= 0
+          ? json({ message: "Invalid Form Body", code: 50035 }, { status: 400 })
+          : json({ id: "notice", channel_id: "x" });
+      };
+      for (let attempt = 1; attempt < maxAttempts; attempt += 1) {
+        await expect(processConversation(context(store, settings), 3, 12)).rejects.toThrow(/Discord HTTP 400/);
+      }
+      expect(await processConversation(context(store, settings), 3, 12)).toBe("done");
+      expect(store.conversation(3, 12)?.cursor).toBe(2);
+      expect(world.posts().at(-1)?.body.content).toBe(
+        "⚠️ Chatwoot message 2 could not be relayed. Check it in Chatwoot.",
+      );
+    });
+  });
+
   it("links the post from its conversation, and tries again on a later sync when that fails", async () => {
     const world = new World();
     world.messages = [{ id: 1, content: "hello", message_type: 0 }];
@@ -236,7 +318,7 @@ describe("processConversation", () => {
       await sync(store, settings);
       expect(world.conversation.custom_attributes).toEqual({});
       await sync(store, settings);
-      const link = `https://discord.com/channels/${GUILD}/${store.thread(3, 12)}`;
+      const link = `https://discord.com/channels/${GUILD}/${store.conversation(3, 12)?.threadId}`;
       expect(world.conversation.custom_attributes).toEqual({ discord_thread: link });
       // Linked: later syncs do not write it again.
       await sync(store, settings);
@@ -255,6 +337,164 @@ describe("processConversation", () => {
       expect(world.posts()).toEqual([]);
       await sync(store, accounts([2, 9]));
       expect(world.replies()).toEqual([`hello\n-# <@${TRIAGE}>`]);
+    });
+  });
+
+  it("after two reassignments in one run, pings the latest assignee once, after both activity lines", async () => {
+    const world = new World();
+    world.messages = [{ id: 1, content: "hello", message_type: 0, created_at: now() - 60 }];
+    await withStore(async (store) => {
+      const settings = testSettings();
+      await sync(store, settings);
+      world.conversation.meta = {
+        ...Object(world.conversation.meta),
+        assignee: { id: 43, name: "Bob", email: "bob@example.com" },
+      };
+      world.messages.push(
+        { id: 2, content: "Assigned to Alice by Sam", message_type: 2, created_at: now() - 8 },
+        { id: 3, content: "Assigned to Bob by Sam", message_type: 2, created_at: now() - 4 },
+      );
+      await sync(store, settings);
+      const posted = world
+        .posts()
+        .slice(-3)
+        .map((post) => [post.body.content, post.body.allowed_mentions]);
+      expect(posted).toEqual([
+        ["_Assigned to Alice by Sam_", { parse: [] }],
+        ["_Assigned to Bob by Sam_", { parse: [] }],
+        [`-# Assigned to <@${BOB}>`, { parse: [], users: [BOB] }],
+      ]);
+    });
+  });
+
+  it("relays an email reply without its quoted history, like Chatwoot does, and auto-replies without notifications", async () => {
+    // As MailPresenter#serialized_data stores them at v4.18.0: `content` is the whole text.
+    const history =
+      "On Mon, Sep 21, 2026 at 10:02 AM Acme Support <support@acme.example> wrote:\n> Please restart the agent.\n> Kind regards";
+    const email = (reply: string, extra: Record<string, unknown> = {}) => ({
+      subject: "Re: Agent will not connect",
+      from: ["jane@example.com"],
+      multipart: true,
+      auto_reply: false,
+      text_content: { full: `${reply}\n\n${history}`, reply: `${reply}\n\n${history}`, quoted: reply },
+      html_content: {
+        full: `<div>${reply}</div><blockquote>Please restart the agent.</blockquote>`,
+        reply: `${reply}\n\n> Please restart the agent.`,
+        quoted: reply,
+      },
+      ...extra,
+    });
+    const world = new World();
+    world.messages = [
+      {
+        id: 1,
+        content: `Thanks, that worked!\n\n${history}`,
+        message_type: 0,
+        content_attributes: { email: email("Thanks, that worked!") },
+      },
+      // An HTML-only email has no text body: the HTML one, as text.
+      {
+        id: 2,
+        content: "<div>Also this</div>",
+        message_type: 0,
+        content_attributes: { email: email("Also this", { text_content: {} }) },
+      },
+      {
+        id: 3,
+        content: `I am out of office until Monday.\n\n${history}`,
+        message_type: 0,
+        content_attributes: { email: email("I am out of office until Monday.", { auto_reply: true }) },
+      },
+    ];
+    await withStore(async (store) => {
+      await sync(store, testSettings());
+      expect(world.replies()).toEqual([
+        `Thanks, that worked!\n-# <@${TRIAGE}>`,
+        `Also this\n-# <@${TRIAGE}>`,
+        "I am out of office until Monday.",
+      ]);
+    });
+  });
+
+  it("shows what channels and bots send that is not plain text", async () => {
+    const sticker = "https://stickershop.line-scdn.net/stickershop/v1/sticker/52002734/android/sticker.png";
+    const world = new World();
+    world.messages = [
+      // LINE stickers are stored as a markdown image.
+      { id: 1, content: `![sticker-52002734](${sticker})`, content_type: "sticker", message_type: 0 },
+      // A contact shared on Telegram.
+      {
+        id: 2,
+        content: null,
+        message_type: 0,
+        attachments: [
+          { file_type: "contact", fallback_title: "+15550100", meta: { first_name: "Ana", last_name: "Lima" } },
+        ],
+      },
+      {
+        id: 3,
+        content: null,
+        message_type: 0,
+        attachments: [
+          { file_type: "story_mention", data_url: "https://lookaside.example.com/story" },
+          { file_type: "ig_reel", data_url: "https://lookaside.example.com/reel" },
+          { file_type: "fallback", fallback_title: "Shared post", data_url: "https://example.com/p" },
+        ],
+      },
+      {
+        id: 4,
+        content: "Pick a topic",
+        content_type: "input_select",
+        message_type: 1,
+        content_attributes: {
+          // An option without a title shows its value; a malformed field does not hide the rest.
+          items: [
+            { title: "Billing", value: "billing" },
+            { title: "Technical", value: "tech" },
+            { value: "other" },
+            { title: 5, value: "five" },
+          ],
+        },
+      },
+      {
+        id: 5,
+        content: null,
+        content_type: "cards",
+        message_type: 1,
+        content_attributes: {
+          items: [
+            {
+              title: "Pro plan",
+              description: "$10 a month",
+              media_url: "https://example.com/pro.png",
+              actions: [
+                { type: "link", text: "Buy", uri: "https://example.com/buy" },
+                { type: "postback", text: "More", payload: "more" },
+              ],
+            },
+          ],
+        },
+      },
+      {
+        id: 6,
+        content: null,
+        content_type: "article",
+        message_type: 1,
+        content_attributes: {
+          items: [{ title: "Reset your password", description: "Steps", link: "https://help.example.com/reset" }],
+        },
+      },
+    ];
+    await withStore(async (store) => {
+      await sync(store, testSettings());
+      expect(world.replies()).toEqual([
+        `${sticker}\n-# <@${TRIAGE}>`,
+        `📇 Ana Lima: +15550100\n-# <@${TRIAGE}>`,
+        `📎 Story mention https://lookaside.example.com/story\n📎 Reel https://lookaside.example.com/reel\n📎 Shared post https://example.com/p\n-# <@${TRIAGE}>`,
+        "Pick a topic\n• Billing\n• Technical\n• other\n• five",
+        "• [Pro plan](<https://example.com/pro.png>) — $10 a month · [Buy](<https://example.com/buy>)",
+        "• [Reset your password](<https://help.example.com/reset>) — Steps",
+      ]);
     });
   });
 

@@ -26,6 +26,7 @@ const MAX_TAGS = 5;
 const TAG_CACHE_MS = 10 * 60 * 1000;
 const UNKNOWN_WEBHOOK = 10015;
 const UNKNOWN_MESSAGE = 10008;
+const UNKNOWN_TAG = 10087;
 
 export interface Cache {
   get(key: string): string | undefined;
@@ -50,15 +51,17 @@ export class DiscordForum implements ForumClient {
   ): Promise<{ channelId: string; messageId: string }> {
     const webhook = await this.webhook(forumChannelId);
     try {
-      const sent = await this.rest.post<
-        RESTPostAPIWebhookWithTokenWaitResult,
-        RESTPostAPIWebhookWithTokenJSONBody,
-        RESTPostAPIWebhookWithTokenQuery
-      >(Routes.webhook(webhook.id, webhook.token), {
-        body: message,
-        query: { wait: true, ...(threadId ? { thread_id: threadId } : {}) },
-        auth: false,
-      });
+      const sent = await this.withTags(forumChannelId, message.applied_tags, (tags) =>
+        this.rest.post<
+          RESTPostAPIWebhookWithTokenWaitResult,
+          RESTPostAPIWebhookWithTokenJSONBody,
+          RESTPostAPIWebhookWithTokenQuery
+        >(Routes.webhook(webhook.id, webhook.token), {
+          body: tags ? { ...message, applied_tags: tags } : message,
+          query: { wait: true, ...(threadId ? { thread_id: threadId } : {}) },
+          auth: false,
+        }),
+      );
       return { channelId: sent.channel_id, messageId: sent.id };
     } catch (error) {
       if (error instanceof DiscordHttpError && error.status === 404) {
@@ -74,15 +77,20 @@ export class DiscordForum implements ForumClient {
   }
 
   async updateThread(
+    forumChannelId: string,
     threadId: string,
     patch: { archived: boolean; applied_tags?: string[]; name?: string },
   ): Promise<void> {
     try {
-      await this.rest.patch<RESTPatchAPIChannelResult, RESTPatchAPIChannelJSONBody>(Routes.channel(threadId), {
-        body: patch,
-      });
+      await this.withTags(forumChannelId, patch.applied_tags, (tags) =>
+        this.rest.patch<RESTPatchAPIChannelResult, RESTPatchAPIChannelJSONBody>(Routes.channel(threadId), {
+          body: tags ? { ...patch, applied_tags: tags } : patch,
+        }),
+      );
     } catch (error) {
-      if (error instanceof DiscordHttpError && error.status === 404) throw new UnknownThreadError(threadId);
+      if (error instanceof DiscordHttpError && error.status === 404 && error.code !== UNKNOWN_TAG) {
+        throw new UnknownThreadError(threadId);
+      }
       throw error;
     }
   }
@@ -148,11 +156,34 @@ export class DiscordForum implements ForumClient {
   }
 
   /**
+   * Sends a request that applies forum tags. Tag ids are cached for a while, and a tag deleted
+   * since makes Discord refuse the request: Discord documents JSON code 10087 (Unknown Tag) but
+   * not its HTTP status, and refuses an invalid form body with 400. On either, the request is sent
+   * once more with the tags looked up again by name.
+   */
+  private async withTags<T>(
+    forumChannelId: string,
+    tags: string[] | undefined,
+    send: (tags: string[] | undefined) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await send(tags);
+    } catch (error) {
+      const refused = error instanceof DiscordHttpError && (error.status === 400 || error.code === UNKNOWN_TAG);
+      if (!refused || !tags?.length) throw error;
+      const known = (await this.channel(forumChannelId)).tags;
+      const names = Object.keys(known).filter((name) => tags.includes(known[name] ?? ""));
+      this.cache.delete(channelKey(forumChannelId));
+      return send(await this.tagIds(forumChannelId, names));
+    }
+  }
+
+  /**
    * The forum's guild and its tags by lower-cased name, cached briefly so new tags are picked up
    * without a deploy.
    */
   private async channel(forumChannelId: string): Promise<ForumInfo> {
-    const key = `forum:${forumChannelId}:channel`;
+    const key = channelKey(forumChannelId);
     const cached = forumInfoSchema.safeParse(parseJson(this.cache.get(key)));
     if (cached.success) return cached.data;
     const channel = await this.rest.get<RESTGetAPIChannelResult>(Routes.channel(forumChannelId));
@@ -167,4 +198,8 @@ export class DiscordForum implements ForumClient {
 
 function webhookKey(forumChannelId: string): string {
   return `forum:${forumChannelId}:webhook`;
+}
+
+function channelKey(forumChannelId: string): string {
+  return `forum:${forumChannelId}:channel`;
 }

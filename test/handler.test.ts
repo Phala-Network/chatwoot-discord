@@ -193,6 +193,8 @@ describe("interaction handler", () => {
       "snooze",
       "priority",
       "assign",
+      "unassign",
+      "label",
       "block",
       "unblock",
     ]);
@@ -333,6 +335,28 @@ describe("interaction handler", () => {
     expect(privateText(await handleInteraction(stranger, deps))).toBe(
       "❌ That Discord user is not linked to a Chatwoot agent.",
     );
+  });
+
+  it("/unassign and /label are deferred jobs; a label is named in lower case", async () => {
+    expect((await handleInteraction(interaction({ name: "unassign" }), deps)).job?.action).toEqual({
+      type: "unassign",
+    });
+    const label = (change: string, value: string) =>
+      interaction({
+        name: "label",
+        options: [{ type: 1, name: change, options: [{ type: 3, name: "label", value }] }],
+      });
+    expect((await handleInteraction(label("add", " VIP "), deps)).job?.action).toEqual({
+      type: "label",
+      change: "add",
+      label: "vip",
+    });
+    expect((await handleInteraction(label("remove", "refund"), deps)).job?.action).toEqual({
+      type: "label",
+      change: "remove",
+      label: "refund",
+    });
+    expect(privateText(await handleInteraction(label("add", "  "), deps))).toBe("❌ Name a label.");
   });
 
   it("refuses unlinked users and channels that are not mapped tickets", async () => {

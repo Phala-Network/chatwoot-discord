@@ -80,6 +80,75 @@ describe("DiscordForum", () => {
     expect(await client.postUrl("55", "123")).toBe("https://discord.com/channels/44/123");
   });
 
+  it.each([
+    ["an invalid form body", 400, 50035],
+    ["an unknown tag", 404, 10087],
+  ])("looks the tags up again once when Discord refuses a tag deleted since (%s)", async (_name, status, code) => {
+    let deleted = false;
+    const { requests } = mockFetch(
+      on("GET", `${api}/channels/55`, () =>
+        json({
+          id: "55",
+          guild_id: "44",
+          // "Open" was deleted and created again, with a new id.
+          available_tags: deleted
+            ? [
+                { id: "t-acme", name: "Acme" },
+                { id: "t-open-2", name: "Open" },
+              ]
+            : [
+                { id: "t-acme", name: "Acme" },
+                { id: "t-open", name: "Open" },
+              ],
+        }),
+      ),
+      on("PATCH", `${api}/channels/111`, (request) =>
+        JSON.parse(request.body).applied_tags.includes("t-open")
+          ? json({ message: "refused", code }, { status })
+          : json({}),
+      ),
+      on("PATCH", `${api}/channels/222`, () => json({ message: "Invalid Form Body", code: 50035 }, { status: 400 })),
+    );
+    const client = forum();
+    const tags = await client.tagIds("55", ["acme", "open"]);
+    deleted = true;
+    await client.updateThread("55", "111", { archived: false, applied_tags: tags });
+    const patches = requests.filter((request) => request.method === "PATCH").map((request) => JSON.parse(request.body));
+    expect(patches).toEqual([
+      { archived: false, applied_tags: ["t-acme", "t-open"] },
+      { archived: false, applied_tags: ["t-acme", "t-open-2"] },
+    ]);
+    // A refused request without tags is not sent again.
+    await expect(client.updateThread("55", "222", { archived: false, name: "x" })).rejects.toMatchObject({
+      status: 400,
+    });
+    expect(requests.filter((request) => request.url.pathname.endsWith("/222"))).toHaveLength(1);
+  });
+
+  it("opens a post with the tags looked up again when Discord refuses a deleted one", async () => {
+    let deleted = false;
+    const { requests } = mockFetch(
+      on("GET", `${api}/channels/55/webhooks`, () => json([{ id: "1", token: "abc", type: 1, name: "Chatwoot" }])),
+      on("GET", `${api}/channels/55`, () =>
+        json({ id: "55", guild_id: "44", available_tags: deleted ? [] : [{ id: "t-gone", name: "Gone" }] }),
+      ),
+      on("POST", `${api}/webhooks/1/abc`, (request) =>
+        JSON.parse(request.body).applied_tags?.length
+          ? json({ message: "Invalid Form Body", code: 50035 }, { status: 400 })
+          : json({ id: "m1", channel_id: "thread-9" }),
+      ),
+    );
+    const client = forum();
+    const tags = await client.tagIds("55", ["gone"]);
+    deleted = true;
+    expect(await client.execute("55", { content: "card", thread_name: "Ticket", applied_tags: tags })).toEqual({
+      channelId: "thread-9",
+      messageId: "m1",
+    });
+    const posts = requests.filter((request) => request.method === "POST").map((request) => JSON.parse(request.body));
+    expect(posts.map((post) => post.applied_tags)).toEqual([["t-gone"], []]);
+  });
+
   it("reports a deleted thread as UnknownThreadError", async () => {
     mockFetch(
       on("GET", `${api}/channels/55/webhooks`, () => json([{ id: "1", token: "abc", type: 1, name: "Chatwoot" }])),
@@ -220,7 +289,16 @@ describe("DiscordRest", () => {
       (request) => fetch(request),
       async () => {},
     );
-    await expect(rest.get("/channels/1")).rejects.toMatchObject({ status: 429 });
+    // The error says how long Discord asked to wait, so the job can wait that long.
+    await expect(rest.get("/channels/1")).rejects.toMatchObject({
+      status: 429,
+      retryAfterMs: expect.closeTo(60_000, -3),
+    });
+    // The route stays limited: the next call fails at once, with the time left.
+    await expect(rest.get("/channels/1")).rejects.toMatchObject({
+      status: 429,
+      retryAfterMs: expect.closeTo(60_000, -3),
+    });
     const error = await rest.get("/channels/2").catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(DiscordHttpError);
     expect(error).toMatchObject({ status: 403, code: 50001 });

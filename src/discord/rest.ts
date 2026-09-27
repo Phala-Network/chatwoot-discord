@@ -4,7 +4,7 @@
 // their X-RateLimit-Bucket (plus the route's top-level resource), a bucket whose
 // X-RateLimit-Remaining reached 0 is waited out, and a 429 is retried after `retry_after`,
 // pausing every route when it is the global limit. Waits are capped so an invocation never
-// sleeps for long; longer limits fail the job, which then retries with backoff.
+// sleeps for long; a longer limit fails the job, which then waits as long as Discord asks.
 
 import type { Fetch } from "../chatwoot/api.ts";
 import { isRecord, parseJson } from "../json.ts";
@@ -14,17 +14,38 @@ const USER_AGENT = "DiscordBot (chatwoot-discord, 1)";
 const MAX_WAIT_MS = 10_000;
 const MAX_ATTEMPTS = 3;
 
-/** A non-2xx answer from Discord. `code` is Discord's JSON error code when present. */
+/**
+ * A non-2xx answer from Discord. `code` is Discord's JSON error code when present; a rate limit
+ * (429) carries how long to wait before trying again.
+ */
 export class DiscordHttpError extends Error {
   readonly status: number;
   readonly code: number | undefined;
+  readonly retryAfterMs: number | undefined;
 
-  constructor(status: number, code: number | undefined, discordMessage: string) {
+  constructor(status: number, code: number | undefined, discordMessage: string, retryAfterMs?: number) {
     super(`Discord HTTP ${status}${code === undefined ? "" : ` (code ${code})`}: ${discordMessage}`);
     this.name = "DiscordHttpError";
     this.status = status;
     this.code = code;
+    this.retryAfterMs = retryAfterMs;
   }
+}
+
+/**
+ * A request Discord refused as invalid, which fails the same way however often it is sent: a 4xx
+ * other than 401 (token), 403 (permissions), 404 (a missing resource, which the relay recreates
+ * or forgets), 408 (timeout), and 429 (rate limit), per
+ * https://discord.com/developers/docs/topics/opcodes-and-status-codes#http. Anything else may
+ * succeed later.
+ */
+export function isInvalidRequest(error: unknown): boolean {
+  return (
+    error instanceof DiscordHttpError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    ![401, 403, 404, 408, 429].includes(error.status)
+  );
 }
 
 interface DiscordRequest<Body = never, Query extends object = never> {
@@ -97,7 +118,7 @@ export class DiscordRest {
 
     for (let attempt = 1; ; attempt += 1) {
       const wait = Math.max(this.globalReset, this.resets.get(this.bucketKey(route, path)) ?? 0) - Date.now();
-      if (wait > MAX_WAIT_MS) throw new DiscordHttpError(429, undefined, "rate limited");
+      if (wait > MAX_WAIT_MS) throw new DiscordHttpError(429, undefined, "rate limited", wait);
       if (wait > 0) await this.sleep(wait);
 
       const response = await this.fetch(
@@ -125,7 +146,9 @@ export class DiscordRest {
         } else {
           this.resets.set(key, retryAt);
         }
-        if (attempt < MAX_ATTEMPTS && retryAt - Date.now() <= MAX_WAIT_MS) continue;
+        const wait = Math.max(0, retryAt - Date.now());
+        if (attempt < MAX_ATTEMPTS && wait <= MAX_WAIT_MS) continue;
+        throw new DiscordHttpError(429, errorCode(data), errorMessage(data, response.statusText), wait);
       }
       throw new DiscordHttpError(response.status, errorCode(data), errorMessage(data, response.statusText));
     }

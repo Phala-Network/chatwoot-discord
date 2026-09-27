@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { Budget } from "../src/budget.ts";
 import { executeCommand } from "../src/commands/actions.ts";
 import { type CommandAction, type CommandJob, commandJobSchema } from "../src/commands/job.ts";
 import { ALICE, json, mockFetch, on, type Route, testSettings } from "./helpers.ts";
@@ -207,13 +208,70 @@ describe("executeCommand", () => {
     expect(requests.some((request) => request.url.pathname.endsWith("/messages"))).toBe(false);
   });
 
-  it("refuses agents who are not members of the account", async () => {
+  it("says when the agent is no longer in the account, rather than not linked", async () => {
     mockFetch(
       on("GET", `${cw}/profile`, () => json({ id: 42, name: "A", email: "a@example.com", accounts: [{ id: 99 }] })),
     );
     expect((await executeCommand(job({ type: "block" }), settings, (request) => fetch(request))).content).toBe(
-      "❌ Your Discord account is not linked to a Chatwoot agent.",
+      "❌ Your Chatwoot user is no longer an agent in this Chatwoot account. Ask an admin to add you back, or to unlink your Discord account.",
     );
+  });
+
+  it("unassigns the way Chatwoot's dashboard does", async () => {
+    const { result, requests } = run({ type: "unassign" }, ok("POST", `${conversation}/assignments`));
+    expect(await result).toBe("✅ Unassigned.");
+    const request = requests.at(-1);
+    expect(request?.headers.get("content-type")).toBe("application/json");
+    expect(JSON.parse(request?.body ?? "")).toEqual({ assignee_id: null });
+  });
+
+  describe("/label", () => {
+    const accountLabels = on("GET", `${cw}/accounts/3/labels`, () =>
+      json({
+        payload: [
+          { id: 1, title: "vip" },
+          { id: 2, title: "refund" },
+        ],
+      }),
+    );
+    const conversationLabels = on("GET", `${conversation}/labels`, () => json({ payload: ["refund"] }));
+    const setLabels = ok("POST", `${conversation}/labels`);
+    const sent = (requests: Array<{ method: string; body: string }>) =>
+      requests.filter((request) => request.method === "POST").map((request) => JSON.parse(request.body));
+
+    it("adds one of the account's labels, keeping the others", async () => {
+      const { result, requests } = run(
+        { type: "label", change: "add", label: "vip" },
+        accountLabels,
+        conversationLabels,
+        setLabels,
+      );
+      expect(await result).toBe("✅ Label vip added.");
+      expect(sent(requests)).toEqual([{ labels: ["refund", "vip"] }]);
+    });
+
+    it("refuses a label the account does not have", async () => {
+      const { result, requests } = run(
+        { type: "label", change: "add", label: "urgentt" },
+        accountLabels,
+        conversationLabels,
+        setLabels,
+      );
+      expect(await result).toBe('❌ There is no label "urgentt" in this Chatwoot account.');
+      expect(sent(requests)).toEqual([]);
+    });
+
+    it("removes a label the conversation has, keeping the others", async () => {
+      const { result, requests } = run(
+        { type: "label", change: "remove", label: "refund" },
+        conversationLabels,
+        setLabels,
+      );
+      expect(await result).toBe("✅ Label refund removed.");
+      expect(sent(requests)).toEqual([{ labels: [] }]);
+      const missing = run({ type: "label", change: "remove", label: "vip" }, conversationLabels, setLabels);
+      expect(await missing.result).toBe('❌ This conversation has no label "vip".');
+    });
   });
 
   it("maps Chatwoot permission errors to a clear message", async () => {
@@ -255,5 +313,21 @@ describe("executeCommand", () => {
       ),
     );
     expect(await result).toBe("❌ That did not work. Please do it in Chatwoot.");
+  });
+
+  it("gives up on a request that does not answer in time, saying it may have been done", async () => {
+    // Answers the profile, then never answers until the request is aborted.
+    const hanging = (request: Request) =>
+      request.url.endsWith("/profile")
+        ? Promise.resolve(json({ id: 42, accounts: [{ id: 3 }] }))
+        : new Promise<Response>((_resolve, reject) => {
+            request.signal.addEventListener("abort", () => reject(request.signal.reason));
+          });
+    const { content } = await executeCommand(
+      job({ type: "status", status: "resolved" }),
+      settings,
+      new Budget(20, hanging, 20).fetch,
+    );
+    expect(content).toMatch(/^❌ Chatwoot or Discord did not answer in time\. Check in Chatwoot whether it was done/);
   });
 });

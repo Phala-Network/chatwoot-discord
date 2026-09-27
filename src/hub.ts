@@ -4,7 +4,7 @@
 // alarm, so they return quickly. The alarm drains due jobs one at a time, which serializes work
 // per conversation (and globally), and yields to a fresh invocation before it would exceed the
 // per-invocation subrequest limit. Failed jobs back off and retry, and are dropped after
-// MAX_JOB_ATTEMPTS; nothing depends on a single delivery succeeding.
+// MAX_JOB_ATTEMPTS (rate limits do not count); nothing depends on a single delivery succeeding.
 
 import { DurableObject } from "cloudflare:workers";
 import {
@@ -19,10 +19,11 @@ import { executeCommand } from "./commands/actions.ts";
 import { type CommandJob, commandJobSchema } from "./commands/job.ts";
 import { loadSettings, relaysInbox, type Settings } from "./config.ts";
 import { DiscordForum } from "./discord/forum.ts";
-import { DiscordRest } from "./discord/rest.ts";
+import { DiscordHttpError, DiscordRest } from "./discord/rest.ts";
 import { errorFields, log } from "./log.ts";
-import { latestMessageId, processConversation, processMessageUpdate, relayFor } from "./relay/processor.ts";
+import { latestMessageId, processConversation, relayFor } from "./relay/processor.ts";
 import type { Relay } from "./relay/relay.ts";
+import { processMessageUpdate } from "./relay/updates.ts";
 import { type Job, Store } from "./store.ts";
 
 export const HUB_NAME = "global";
@@ -166,21 +167,29 @@ export class Hub extends DurableObject<Env> {
       }
     } catch (error) {
       if (error instanceof BudgetExhaustedError) return "yield";
+      const backoff = Math.min(5000 * 2 ** job.attempts, MAX_BACKOFF_MS);
+      if (error instanceof DiscordHttpError && error.retryAfterMs !== undefined) {
+        // Rate limited: wait as long as Discord asks without counting an attempt, so no rate
+        // limit, however long, drops the job.
+        const delay = Math.max(backoff, error.retryAfterMs);
+        log.warn("job rate limited by Discord; will retry", { job: job.key, delayMs: delay });
+        this.store.deferJob(job, delay);
+        return "done";
+      }
       if (job.attempts + 1 >= MAX_JOB_ATTEMPTS) {
         log.error("job failed too often; dropped", { job: job.key, attempts: job.attempts + 1, ...errorFields(error) });
         this.store.deleteJob(job.key);
         return "done";
       }
-      const delay = Math.min(5000 * 2 ** job.attempts, MAX_BACKOFF_MS);
       // Transient failures are warnings; a job that keeps failing is an error.
       const logAt = job.attempts + 1 >= 3 ? log.error : log.warn;
       logAt("job failed; will retry", {
         job: job.key,
         attempts: job.attempts + 1,
-        delayMs: delay,
+        delayMs: backoff,
         ...errorFields(error),
       });
-      this.store.retryJob(job, delay);
+      this.store.retryJob(job, backoff);
       return "done";
     }
   }

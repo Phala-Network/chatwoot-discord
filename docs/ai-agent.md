@@ -39,9 +39,9 @@ The mention is a literal token in the message content; Discord sends no notifica
 (the relay's `allowed_mentions` leaves it out), so nobody is pinged by it. Only customer
 messages carry it. Agent replies, private notes, activity lines, the ticket card that opens a
 post, and customers' responses to interactive messages (option picks, forms, CSAT ratings) do
-not. Neither do customer messages created more than `reconcile.lookbackSeconds` (an hour by
-default) before they are relayed: the history posted when an older conversation gets its post,
-or messages caught up after downtime.
+not. Neither do automatic email replies (out of office, for example), nor customer messages
+created more than `reconcile.lookbackSeconds` (an hour by default) before they are relayed: the
+history posted when an older conversation gets its post, or messages caught up after downtime.
 
 When a conversation has had more than `perConversationPerHour` customer messages in the current
 hour, or all conversations together more than `perHour`, the mention is replaced by a note such
@@ -72,6 +72,9 @@ I have issued a corrected copy; you will find it under Billing → Invoices.
 
 - Only the first code block after a draft label counts, so the agent may post other code
   blocks (logs, progress) in the same or other messages.
+- Code blocks follow CommonMark: a fence of three or more backticks or tildes, closed by the same
+  character, at least as many, on a line of its own. When the draft itself contains a code block,
+  fence it with more backticks (`` ```` ``) or with tildes (`~~~`).
 - The label may be decorated (`**Draft**:`, `Draft (English):`); any configured label in
   `triage.draftLabels` works.
 - Keep the draft under 4,000 characters, the reply editor's limit.
@@ -86,8 +89,9 @@ permissions apply, and an unassigned conversation is assigned to them.
 - Never send anything to the customer itself. Text posted in a Discord post never reaches the
   customer; only the commands do, and they run as the linked human who uses them. Do not let the
   agent send messages through Chatwoot's API either.
-- Do not change the post's tags or archived state; the relay sets them from Chatwoot and replaces
-  them the next time the conversation's status, assignee, or topic changes.
+- Do not change the post's tags, title, or archived state; the relay sets them from Chatwoot and
+  replaces them the next time the conversation's status, assignee, topic, priority, labels, or
+  contact name changes.
 
 ## Optional: read-only context from Chatwoot
 

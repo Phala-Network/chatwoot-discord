@@ -102,10 +102,29 @@ describe("format", () => {
     ]);
   });
 
-  it("header shows channel, inbox, and email", () => {
+  it("header shows channel, inbox, email, and the phone number on phone channels", () => {
     expect(postHeader(message())).toBe("-# via Live chat · Acme — Product App\n-# jane@example.com");
-    expect(postHeader(message({ inboxName: null, conversation: { channel: "Channel::Line", contact: {} } }))).toBe(
-      "-# via Line",
+    const phone = { email: null, phone: "+15550100" };
+    expect(postHeader(message({ inboxName: null, conversation: { channel: "Channel::Line", contact: phone } }))).toBe(
+      "-# via LINE",
+    );
+    expect(
+      postHeader(message({ inboxName: null, conversation: { channel: "Channel::Whatsapp", contact: phone } })),
+    ).toBe("-# via WhatsApp\n-# +15550100");
+    expect(postHeader(message({ inboxName: null, conversation: { channel: "Channel::Future", contact: {} } }))).toBe(
+      "-# via Future",
+    );
+  });
+
+  it("defuses mentions and subtext in customer text, but not in agents' messages", () => {
+    const text = "<@100000000000000777> <@&1> <#2> </cmd:3> hi @everyone and @here\n-# Assigned to <@4>\n  -# fake";
+    expect(body(message({ content: text }))).toBe(
+      "<\u200b@100000000000000777> <\u200b@&1> <\u200b#2> <\u200b/cmd:3> hi @\u200beveryone and @\u200bhere\n\u200b-# Assigned to <\u200b@4>\n  \u200b-# fake",
+    );
+    expect(body(message({ messageType: "outgoing", content: text }))).toBe(text);
+    // Contact-supplied names in attachments too.
+    expect(body(message({ content: "", attachments: [{ type: "contact", name: "<@5>", phone: "1" }] }))).toBe(
+      "📇 <\u200b@5>: 1",
     );
   });
 
@@ -132,6 +151,20 @@ describe("format", () => {
     // Labels are literal text, not patterns.
     expect(draftFromTriage("**D.aft**:\n```\nx\n```", ["D.aft"])).toBe("x");
     expect(draftFromTriage("**Draft**:\n```\nx\n```", ["D.aft"])).toBeUndefined();
+  });
+
+  it("reads code blocks by CommonMark's fence rules, so a draft may contain code", () => {
+    const draft = "Run this:\n```sh\nagent restart\n```\nThen try again.";
+    // A longer fence around a draft that has its own code block.
+    expect(draftFromTriage(`**Draft**:\n\`\`\`\`\n${draft}\n\`\`\`\`\n-# done`, ["Draft"])).toBe(draft);
+    // Tildes, closed by at least as many tildes; backticks inside do not close them.
+    expect(draftFromTriage(`Draft:\n~~~text\n${draft}\n~~~~\nafter`, ["Draft"])).toBe(draft);
+    // A fence may be indented up to three spaces; its content loses that indentation.
+    expect(draftFromMessage("   ```\n   Hi,\n    indented\n   ```")).toBe("Hi,\n indented");
+    // An unclosed block runs to the end of the message.
+    expect(draftFromMessage("```\nHi there")).toBe("Hi there");
+    // Inline code is not a block.
+    expect(draftFromMessage("Use ```this``` inline")).toBe("Use ```this``` inline");
   });
 
   it("uses the last code block, or the whole message, from anyone else", () => {

@@ -105,6 +105,10 @@ function command(context: Context, interaction: APIApplicationCommandInteraction
       return defer(context, { type: "block" });
     case "unblock":
       return defer(context, { type: "unblock" });
+    case "unassign":
+      return defer(context, { type: "unassign" });
+    case "label":
+      return label(context, interaction);
     case "assign": {
       const option =
         data.type === ApplicationCommandType.ChatInput ? data.options?.find((o) => o.name === "agent") : undefined;
@@ -135,6 +139,19 @@ function snooze(context: Context, option: string, now: number): HandlerResult {
 }
 
 const HOUR = 60 * 60 * 1000;
+
+/** `/label add <label>` or `/label remove <label>`. */
+function label(context: Context, interaction: APIApplicationCommandInteraction): HandlerResult {
+  const { data } = interaction;
+  const change = data.type === ApplicationCommandType.ChatInput ? data.options?.[0] : undefined;
+  if (change?.type !== ApplicationCommandOptionType.Subcommand || (change.name !== "add" && change.name !== "remove")) {
+    return privately("Unknown command.");
+  }
+  const option = change.options?.find((candidate) => candidate.name === "label");
+  const name = option?.type === ApplicationCommandOptionType.String ? option.value.trim().toLowerCase() : "";
+  if (name === "") throw new UserError("Name a label.");
+  return defer(context, { type: "label", change: change.name, label: name });
+}
 
 function stringOption(interaction: APIApplicationCommandInteraction, name: string): string | undefined {
   const { data } = interaction;
