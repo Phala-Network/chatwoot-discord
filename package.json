@@ -21,7 +21,7 @@
   "license": "MIT",
   "private": true,
   "type": "module",
-  "packageManager": "bun@1.4.2",
+  "packageManager": "npm@12.1.0",
   "engines": {
     "node": ">=24"
   },
@@ -35,7 +35,7 @@
     "build": "wrangler deploy --dry-run --outdir dist",
     "deploy": "wrangler deploy",
     "gen:chatwoot": "openapi-typescript https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/swagger/swagger.json --empty-objects-unknown -o src/chatwoot/schema.d.ts",
-    "register-commands": "bun scripts/register-commands.ts"
+    "register-commands": "node scripts/register-commands.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.14",
@@ -53,10 +53,6 @@
     "openapi-fetch": "^0.17.0",
     "zod": "^4.6.5"
   },
-  "trustedDependencies": [
-    "esbuild",
-    "workerd"
-  ],
   "cloudflare": {
     "bindings": {
       "CONFIG": {
@@ -78,5 +74,9 @@
         "description": "JSON object of each linked agent's own Chatwoot access token by Discord user id, e.g. `{\"<Discord user id>\":\"<token>\"}`. Use `{}` until agents are linked."
       }
     }
+  },
+  "allowScripts": {
+    "esbuild": true,
+    "workerd": true
   }
 }
