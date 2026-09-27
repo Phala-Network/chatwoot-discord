@@ -39,9 +39,9 @@ The mention is a literal token in the message content; Discord sends no notifica
 (the relay's `allowed_mentions` leaves it out), so nobody is pinged by it. Only customer
 messages carry it. Agent replies, private notes, activity lines, the ticket card that opens a
 post, and customers' responses to interactive messages (option picks, forms, CSAT ratings) do
-not. Neither do customer messages created more than `reconcile.lookbackSeconds` (an hour by
-default) before they are relayed: the history posted when an older conversation gets its post,
-or messages caught up after downtime.
+not. Neither do automatic email replies (out of office, for example), nor customer messages
+created more than `reconcile.lookbackSeconds` (an hour by default) before they are relayed: the
+history posted when an older conversation gets its post, or messages caught up after downtime.
 
 When a conversation has had more than `perConversationPerHour` customer messages in the current
 hour, or all conversations together more than `perHour`, the mention is replaced by a note such

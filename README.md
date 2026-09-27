@@ -237,6 +237,10 @@ while the conversation is resolved.
   catch-up after downtime) are posted without them.
 - Messages longer than Discord's 2000 characters are split at line breaks, at most
   `relay.maxChunks` (4) Discord messages, then a "Message truncated … Full text: <link>" note.
+- An email is posted without the earlier emails it quotes, as Chatwoot itself forwards it (its
+  processed content: the reply part of the text body, else of the HTML body). An automatic
+  reply (Chatwoot's `auto_reply` flag, from the `Auto-Submitted` or `X-Autoreply` header) is
+  posted without notifications.
 - Shared contacts and locations, which have no file, are shown as a 📇 or 📍 line.
 - A message deleted in Chatwoot is deleted from the post once Chatwoot's API confirms it. This
   uses the forum webhook that posted it; if that webhook was deleted in Discord (the relay then

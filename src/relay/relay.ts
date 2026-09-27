@@ -141,7 +141,7 @@ export class Relay {
    * Posts a message into its conversation's post, creating the post if needed. Each Discord
    * message is recorded as soon as it is sent, so a retry resumes after the last one. Templates,
    * deleted and empty messages, and messages from a blocked contact are not relayed. Returns
-   * whether it posted a live message (see `announceAssignee`).
+   * whether it posted a message that notifies (see `announceAssignee`).
    */
   async relay(message: RelayMessage): Promise<boolean> {
     if (!RELAYED_TYPES.has(message.messageType) || message.deleted) return false;
@@ -169,11 +169,11 @@ export class Relay {
       await this.post(message, parts, threadId);
     }
     this.unarchived(accountId, conversation);
-    return this.notifier.live(message);
+    return this.notifier.notifies(message);
   }
 
   /**
-   * After a run's live messages: pings a newly assigned, linked agent in a notice of its own, so
+   * After a run's messages that notify: pings a newly assigned, linked agent in a notice of its own, so
    * the ping follows the latest assignment line and names the current assignee however often the
    * conversation was reassigned in between. The assignee counts as announced either way.
    */

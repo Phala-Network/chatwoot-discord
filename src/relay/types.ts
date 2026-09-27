@@ -39,6 +39,8 @@ export interface RelayMessage {
   deleted?: boolean;
   content: string;
   emailSubject?: string | null;
+  /** An automatic email reply (out of office, for example): relayed without notifications. */
+  autoReply?: boolean;
   attachments: RelayAttachment[];
   /** Chatwoot user id -> Discord user id of the linked agents a private note mentions. */
   mentionedAgents?: ReadonlyMap<number, string>;

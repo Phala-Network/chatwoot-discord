@@ -47,11 +47,24 @@ const attachmentSchema = z.object({
  * The spec's `message` schema describes a single `attachment` object and leaves `sender` and
  * `content_attributes` untyped, while the API returns `attachments[]` (app/views/api/v1/models/
  * _message.json.jbuilder), a sender with `id`/`name`/`email`/`type`/`thumbnail`, and content
- * attributes such as `email.subject`, `deleted`, `external_error` (why a failed message was not
- * delivered), and the response to an interactive message (`submitted_values`,
+ * attributes such as `email` (see emailSchema), `deleted`, `external_error` (why a failed message
+ * was not delivered), and the response to an interactive message (`submitted_values`,
  * `submitted_email`, `items`; app/models/message.rb). Only those fields are read; the shape of a
  * response is checked where it is formatted (relay/response.ts).
  */
+/**
+ * An email message's `content_attributes.email`, MailPresenter#serialized_data at v4.18.0: the
+ * subject, whether it is an automatic reply (`auto_reply`), and the text and HTML bodies. Each
+ * body's `quoted` is the reply without the quoted history (EmailReplyTrimmer; the HTML one
+ * already converted to text by HtmlParser), while the message's `content` is the whole text.
+ */
+const emailSchema = z.object({
+  subject: text,
+  auto_reply: z.boolean().nullish(),
+  text_content: z.object({ quoted: text }).nullish().catch(null),
+  html_content: z.object({ quoted: text }).nullish().catch(null),
+});
+
 const messageSchema = z.object({
   id: z.number(),
   content: text,
@@ -64,7 +77,7 @@ const messageSchema = z.object({
   private: z.boolean().nullish(),
   content_attributes: z
     .object({
-      email: z.object({ subject: text }).nullish(),
+      email: emailSchema.nullish(),
       deleted: z.boolean().nullish(),
       external_error: text,
       submitted_values: z.unknown().optional(),
@@ -322,8 +335,9 @@ export function toRelayMessage(
     messageType: MESSAGE_TYPES[message.message_type] ?? "template",
     private: message.private ?? false,
     deleted: message.content_attributes?.deleted === true,
-    content: message.content ?? "",
+    content: messageContent(message),
     emailSubject: message.content_attributes?.email?.subject ?? null,
+    autoReply: message.content_attributes?.email?.auto_reply === true,
     attachments: (message.attachments ?? []).flatMap(toRelayAttachment),
     sender: message.sender
       ? {
@@ -339,6 +353,15 @@ export function toRelayMessage(
     ...(context.mentionedAgents ? { mentionedAgents: context.mentionedAgents } : {}),
     ...(context.discordAvatarUrl ? { discordAvatarUrl: context.discordAvatarUrl } : {}),
   };
+}
+
+/**
+ * What Chatwoot itself shows and forwards (Message#ensure_processed_message_content, used by its
+ * Slack integration at v4.18.0): for an email, the reply without its quoted history.
+ */
+function messageContent(message: ChatwootMessage): string {
+  const email = message.content_attributes?.email;
+  return email?.text_content?.quoted ?? email?.html_content?.quoted ?? message.content ?? "";
 }
 
 function toRelayAttachment(attachment: z.infer<typeof attachmentSchema>): RelayAttachment[] {

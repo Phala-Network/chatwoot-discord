@@ -2,7 +2,7 @@
 // (within its hourly budgets) and the linked assignee's ping on customer messages. Also who a
 // post announces as newly assigned, which Relay posts after the live messages of a run. Only
 // live messages notify; history relayed later (the first sync of an older conversation, a
-// catch-up after downtime) is posted without them.
+// catch-up after downtime) and automatic email replies are posted without them.
 
 import { assigneeTag, fromCustomer } from "./format.ts";
 import type { RelayStore } from "./relay.ts";
@@ -49,7 +49,7 @@ export class Notifier {
 
   /** The notification lines for a message; the same on every attempt at posting it. */
   notification(message: RelayMessage): Notification {
-    if (!this.live(message)) return { lines: [], users: [] };
+    if (!this.notifies(message)) return { lines: [], users: [] };
     // While a new assignee waits for their announcement, which pings them, do not ping twice.
     const ping = fromCustomer(message) && !this.newAssignee(message.account.id, message.conversation);
     const assignee = ping ? this.linkedAssignee(message.conversation) : undefined;
@@ -62,8 +62,12 @@ export class Notifier {
     return { lines, users: assignee ? [assignee] : [] };
   }
 
-  /** Whether a message is live: created within `liveSeconds`, so it notifies. */
-  live(message: RelayMessage): boolean {
+  /**
+   * Whether a message notifies: it is live (created within `liveSeconds`) and not an automatic
+   * email reply.
+   */
+  notifies(message: RelayMessage): boolean {
+    if (message.autoReply) return false;
     if (message.createdAt === undefined || message.createdAt === null) return true;
     return this.options.now().getTime() - message.createdAt * 1000 <= this.options.liveSeconds * 1000;
   }

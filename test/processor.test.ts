@@ -365,6 +365,55 @@ describe("processConversation", () => {
     });
   });
 
+  it("relays an email reply without its quoted history, like Chatwoot does, and auto-replies without notifications", async () => {
+    // As MailPresenter#serialized_data stores them at v4.18.0: `content` is the whole text.
+    const history =
+      "On Mon, Sep 21, 2026 at 10:02 AM Acme Support <support@acme.example> wrote:\n> Please restart the agent.\n> Kind regards";
+    const email = (reply: string, extra: Record<string, unknown> = {}) => ({
+      subject: "Re: Agent will not connect",
+      from: ["jane@example.com"],
+      multipart: true,
+      auto_reply: false,
+      text_content: { full: `${reply}\n\n${history}`, reply: `${reply}\n\n${history}`, quoted: reply },
+      html_content: {
+        full: `<div>${reply}</div><blockquote>Please restart the agent.</blockquote>`,
+        reply: `${reply}\n\n> Please restart the agent.`,
+        quoted: reply,
+      },
+      ...extra,
+    });
+    const world = new World();
+    world.messages = [
+      {
+        id: 1,
+        content: `Thanks, that worked!\n\n${history}`,
+        message_type: 0,
+        content_attributes: { email: email("Thanks, that worked!") },
+      },
+      // An HTML-only email has no text body: the HTML one, as text.
+      {
+        id: 2,
+        content: "<div>Also this</div>",
+        message_type: 0,
+        content_attributes: { email: email("Also this", { text_content: {} }) },
+      },
+      {
+        id: 3,
+        content: `I am out of office until Monday.\n\n${history}`,
+        message_type: 0,
+        content_attributes: { email: email("I am out of office until Monday.", { auto_reply: true }) },
+      },
+    ];
+    await withStore(async (store) => {
+      await sync(store, testSettings());
+      expect(world.replies()).toEqual([
+        `Thanks, that worked!\n-# <@${TRIAGE}>`,
+        `Also this\n-# <@${TRIAGE}>`,
+        "I am out of office until Monday.",
+      ]);
+    });
+  });
+
   it("pings linked agents mentioned in private notes, reading the account's agents once", async () => {
     const world = new World();
     world.messages = [
