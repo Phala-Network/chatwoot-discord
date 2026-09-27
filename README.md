@@ -63,8 +63,16 @@ record.
 | Apps → **Reply with this** (message menu) | Same editor, prefilled: from the triage bot, the code block after a draft label (`Draft` by default); from anyone else, the last code block or the whole message. |
 | `/note` | Same editor, for a private note. |
 | `/resolve`, `/reopen` | Change the status. |
+| `/pending` | Like Chatwoot's "Mark as pending". |
+| `/snooze [until]` | Snooze until the next reply (default) or for an hour. A reply from the contact always reopens it. |
+| `/priority <level>` | Set the priority (`Urgent`, `High`, `Medium`, `Low`), or clear it with `None`. |
 | `/assign [agent]` | Assign to yourself or another linked Discord user. |
 | `/block` | Like Chatwoot's "Block contact": resolves the conversation and blocks the contact, so their future messages are muted. |
+
+Chatwoot's other snooze options (tomorrow, next week, next month, custom) reopen at a time of day
+in the agent's browser time zone, which Discord does not share with the service; use Chatwoot for
+those. Chatwoot posts status and priority changes as activity messages, which are relayed into the
+post like any other activity.
 
 Discord does not let anyone use application commands in an archived post. In a resolved
 (archived) post, first send any message in the post, which unarchives it, then use the command.

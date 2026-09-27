@@ -5,7 +5,7 @@ import {
   InteractionResponseType,
   MessageFlags,
 } from "discord-api-types/v10";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { COMMANDS, REPLY_WITH_THIS } from "../src/commands/definitions.js";
 import { FAILED, type HandlerResult, handleInteraction } from "../src/commands/handler.js";
 import { ALICE, BOB, CAROL, TRIAGE, testSettings } from "./helpers.js";
@@ -84,6 +84,8 @@ function menu(content: string, author = TRIAGE) {
   );
 }
 
+afterEach(() => vi.useRealTimers());
+
 describe("interaction handler", () => {
   it("answers Discord's ping", async () => {
     expect((await handleInteraction(JSON.parse('{"type":1}'), deps)).response).toEqual({ type: 1 });
@@ -138,6 +140,9 @@ describe("interaction handler", () => {
       "note",
       "resolve",
       "reopen",
+      "pending",
+      "snooze",
+      "priority",
       "assign",
       "block",
     ]);
@@ -218,7 +223,40 @@ describe("interaction handler", () => {
       status: "open",
     });
     expect((await handleInteraction(interaction({ name: "block" }), deps)).job?.action).toEqual({ type: "block" });
-    expect(privateText(await handleInteraction(interaction({ name: "snooze" }), deps))).toBe("Unknown command.");
+    expect((await handleInteraction(interaction({ name: "pending" }), deps)).job?.action).toEqual({
+      type: "status",
+      status: "pending",
+    });
+    expect(privateText(await handleInteraction(interaction({ name: "labels" }), deps))).toBe("Unknown command.");
+  });
+
+  it("/snooze defaults to the next reply and computes 'an hour from now' when it is used", async () => {
+    expect((await handleInteraction(interaction({ name: "snooze" }), deps)).job?.action).toEqual({
+      type: "status",
+      status: "snoozed",
+    });
+    const until = (value: string) =>
+      handleInteraction(interaction({ name: "snooze", options: [{ name: "until", type: 3, value }] }), deps);
+    expect((await until("until_next_reply")).job?.action).toEqual({ type: "status", status: "snoozed" });
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-27T16:30:45.900Z"));
+    expect((await until("an_hour_from_now")).job?.action).toEqual({
+      type: "status",
+      status: "snoozed",
+      snoozedUntil: Date.parse("2026-09-27T17:30:45Z") / 1000,
+    });
+    expect(privateText(await until("until_tomorrow"))).toBe("❌ Choose a snooze option from the list.");
+  });
+
+  it("/priority maps each choice, and 'none' clears the priority", async () => {
+    const level = (value: string) =>
+      handleInteraction(interaction({ name: "priority", options: [{ name: "level", type: 3, value }] }), deps);
+    for (const priority of ["urgent", "high", "medium", "low"]) {
+      expect((await level(priority)).job?.action).toEqual({ type: "priority", priority });
+    }
+    expect((await level("none")).job?.action).toEqual({ type: "priority", priority: null });
+    expect(privateText(await level("critical"))).toBe("❌ Choose a priority from the list.");
   });
 
   it("/assign defaults to the invoker and maps other Discord users", async () => {

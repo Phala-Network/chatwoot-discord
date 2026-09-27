@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { executeCommand } from "../src/commands/actions.js";
-import type { CommandAction, CommandJob } from "../src/commands/job.js";
+import { type CommandAction, type CommandJob, commandJobSchema } from "../src/commands/job.js";
 import { ALICE, json, mockFetch, on, type Route, testSettings } from "./helpers.js";
 
 const settings = testSettings();
@@ -45,6 +45,43 @@ describe("executeCommand", () => {
   it("reopens", async () => {
     const { result } = run({ type: "status", status: "open" }, ok("POST", `${conversation}/toggle_status`));
     expect(await result).toBe("✅ Reopened.");
+  });
+
+  it("marks as pending", async () => {
+    const { result, requests } = run(
+      { type: "status", status: "pending" },
+      ok("POST", `${conversation}/toggle_status`),
+    );
+    expect(await result).toBe("✅ Marked as pending.");
+    expect(JSON.parse(requests.at(-1)?.body ?? "")).toEqual({ status: "pending" });
+  });
+
+  it("snoozes until the next reply without a time, or until the given time", async () => {
+    const untilReply = run({ type: "status", status: "snoozed" }, ok("POST", `${conversation}/toggle_status`));
+    expect(await untilReply.result).toBe("✅ Snoozed until the next reply.");
+    expect(JSON.parse(untilReply.requests.at(-1)?.body ?? "")).toEqual({ status: "snoozed" });
+
+    const timed = run(
+      { type: "status", status: "snoozed", snoozedUntil: 1790530245 },
+      ok("POST", `${conversation}/toggle_status`),
+    );
+    expect(await timed.result).toBe("✅ Snoozed until <t:1790530245:f>.");
+    expect(JSON.parse(timed.requests.at(-1)?.body ?? "")).toEqual({ status: "snoozed", snoozed_until: 1790530245 });
+  });
+
+  it("still reads status jobs queued before snoozing existed", () => {
+    const queued = JSON.parse(JSON.stringify(job({ type: "status", status: "resolved" })));
+    expect(commandJobSchema.parse(queued).action).toEqual({ type: "status", status: "resolved" });
+  });
+
+  it("sets and clears the priority", async () => {
+    const set = run({ type: "priority", priority: "urgent" }, ok("POST", `${conversation}/toggle_priority`));
+    expect(await set.result).toBe("✅ Priority set to Urgent.");
+    expect(JSON.parse(set.requests.at(-1)?.body ?? "")).toEqual({ priority: "urgent" });
+
+    const clear = run({ type: "priority", priority: null }, ok("POST", `${conversation}/toggle_priority`));
+    expect(await clear.result).toBe("✅ Priority removed.");
+    expect(JSON.parse(clear.requests.at(-1)?.body ?? "")).toEqual({ priority: null });
   });
 
   it("blocks by resolving the conversation and blocking its contact", async () => {

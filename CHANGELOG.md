@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `/pending` marks the conversation pending, `/snooze [until]` snoozes it until the next reply or
+  for an hour (the dashboard's options that do not depend on the agent's time zone), and
+  `/priority <level>` sets or clears its priority. Re-register the commands after deploying.
 - Customer messages ping the conversation's linked assignee (on the same line as the triage
   mention); agent replies, notes, activity lines, and unassigned conversations ping nobody.
 - A message deleted in Chatwoot is deleted from its post once Chatwoot's API confirms it.
