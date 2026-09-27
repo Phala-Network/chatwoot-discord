@@ -5,7 +5,7 @@
 
 import createClient from "openapi-fetch";
 import { z } from "zod";
-import type { MessageType, RelayAttachment, RelayConversation, RelayMessage } from "../relay/types.ts";
+import type { MessageType, RelayAttachment, RelayConversation, RelayItem, RelayMessage } from "../relay/types.ts";
 import type { components, operations, paths } from "./schema.ts";
 
 export type Fetch = (input: Request) => Promise<Response>;
@@ -30,9 +30,13 @@ export type ChatwootConversation = components["schemas"]["conversation_show"];
 const text = z.string().nullish();
 
 /**
- * An attachment as Attachment#push_event_data returns it (app/models/attachment.rb): files have
- * a `data_url`; a shared location has coordinates, a `fallback_title` (the place), and maybe a
- * `data_url`; a shared contact has its phone number as `fallback_title` and its name in `meta`.
+ * An attachment as Attachment#push_event_data returns it (app/models/attachment.rb at v4.18.0):
+ * files have a `data_url`; a shared location has coordinates, a `fallback_title` (the place),
+ * and maybe a `data_url`; a `fallback` (content a channel could not deliver as a file) has a
+ * `fallback_title` and maybe a `data_url`; a shared contact has its phone number as
+ * `fallback_title` and its name in `meta`, as `firstName`/`lastName` from WhatsApp
+ * (Whatsapp::IncomingContactMessageHandler) or `first_name`/`last_name` from Telegram
+ * (Telegram::IncomingMessageService#attach_contact).
  */
 const attachmentSchema = z.object({
   file_type: text,
@@ -40,8 +44,27 @@ const attachmentSchema = z.object({
   fallback_title: text,
   coordinates_lat: z.number().nullish(),
   coordinates_long: z.number().nullish(),
-  meta: z.object({ firstName: text, lastName: text }).nullish().catch(null),
+  meta: z.object({ firstName: text, lastName: text, first_name: text, last_name: text }).nullish().catch(null),
 });
+
+/**
+ * An item of a bot's `input_select`, `cards`, or `article` message (`content_attributes.items`,
+ * with the keys ContentAttributeValidator allows at v4.18.0).
+ */
+const itemSchema = z.object({
+  title: text,
+  description: text,
+  media_url: text,
+  link: text,
+  actions: z
+    .array(z.object({ text: text, uri: text }))
+    .nullish()
+    .catch(null),
+});
+const ITEM_CONTENT_TYPES: ReadonlySet<string> = new Set(["input_select", "cards", "article"]);
+
+/** Attachments shown as a link with a label: Instagram story mentions and reels. */
+const LINK_LABELS: Partial<Record<string, string>> = { story_mention: "Story mention", ig_reel: "Reel" };
 
 /**
  * The spec's `message` schema describes a single `attachment` object and leaves `sender` and
@@ -311,6 +334,7 @@ export function toRelayConversation(conversationId: number, conversation: Chatwo
     contact: {
       name: meta?.sender?.name ?? null,
       email: meta?.sender?.email ?? null,
+      phone: meta?.sender?.phone_number ?? null,
       blocked: meta?.sender?.blocked ?? false,
       avatarUrl: meta?.sender?.thumbnail ?? null,
     },
@@ -339,6 +363,7 @@ export function toRelayMessage(
     emailSubject: message.content_attributes?.email?.subject ?? null,
     autoReply: message.content_attributes?.email?.auto_reply === true,
     attachments: (message.attachments ?? []).flatMap(toRelayAttachment),
+    items: ITEM_CONTENT_TYPES.has(message.content_type ?? "") ? toRelayItems(message.content_attributes?.items) : [],
     sender: message.sender
       ? {
           name: message.sender.name,
@@ -367,9 +392,12 @@ function messageContent(message: ChatwootMessage): string {
 function toRelayAttachment(attachment: z.infer<typeof attachmentSchema>): RelayAttachment[] {
   switch (attachment.file_type) {
     case "contact": {
-      const name = [attachment.meta?.firstName, attachment.meta?.lastName].filter(Boolean).join(" ");
+      const meta = attachment.meta;
+      const name = [meta?.firstName ?? meta?.first_name, meta?.lastName ?? meta?.last_name].filter(Boolean).join(" ");
       return [{ type: "contact", name, phone: attachment.fallback_title ?? "" }];
     }
+    case "fallback":
+      return [{ type: "file", url: attachment.data_url ?? "", label: attachment.fallback_title ?? "" }];
     case "location":
       return [
         {
@@ -380,7 +408,21 @@ function toRelayAttachment(attachment: z.infer<typeof attachmentSchema>): RelayA
           url: attachment.data_url ?? "",
         },
       ];
-    default:
-      return attachment.data_url ? [{ type: "file", url: attachment.data_url }] : [];
+    default: {
+      const label = LINK_LABELS[attachment.file_type ?? ""];
+      if (!attachment.data_url) return [];
+      return [{ type: "file", url: attachment.data_url, ...(label ? { label } : {}) }];
+    }
   }
+}
+
+function toRelayItems(items: unknown): RelayItem[] {
+  const parsed = z.array(itemSchema).safeParse(items);
+  if (!parsed.success) return [];
+  return parsed.data.map((item) => ({
+    title: item.title ?? "",
+    description: item.description ?? "",
+    url: item.link ?? item.media_url ?? "",
+    links: (item.actions ?? []).flatMap((action) => (action.uri ? [{ text: action.text ?? "", url: action.uri }] : [])),
+  }));
 }

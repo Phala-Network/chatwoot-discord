@@ -13,6 +13,7 @@ import {
   conversationUrl,
   customerAvatar,
   customerName,
+  defused,
   postHeader,
   SYSTEM_USERNAME,
   senderAvatar,
@@ -229,11 +230,11 @@ export class Relay {
    */
   postResponse(accountId: number, conversation: RelayConversation, text: string): Promise<boolean> {
     const { frontendUrl, avatars } = this.options;
-    let content = text;
+    let content = defused(text);
     if (content.length > CONTENT_LIMIT) {
       const link = conversationUrl(frontendUrl, accountId, conversation.id);
       const note = `-# Response truncated (${charLength(text)} characters). Full text: <${link}>`;
-      content = `${split(text, CONTENT_LIMIT - note.length - 1)[0] ?? ""}\n${note}`;
+      content = `${split(content, CONTENT_LIMIT - note.length - 1)[0] ?? ""}\n${note}`;
     }
     return this.postMessage(accountId, conversation, {
       content,

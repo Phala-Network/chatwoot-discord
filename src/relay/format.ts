@@ -1,21 +1,31 @@
 // Pure formatting for the Discord side of the relay: titles, sender names, message bodies,
 // chunking, and tag names. Nothing here performs I/O.
 
-import type { RelayAttachment, RelayConversation, RelayMessage } from "./types.ts";
+import type { RelayAttachment, RelayConversation, RelayItem, RelayMessage } from "./types.ts";
 
 export const CONTENT_LIMIT = 2000;
 export const TITLE_LIMIT = 100;
 const USERNAME_LIMIT = 80;
 export const SYSTEM_USERNAME = "Chatwoot";
 
+/** Chatwoot's channel classes (app/models/channel/ at v4.18.0). */
 const CHANNEL_LABELS: Record<string, string> = {
-  "Channel::WebWidget": "Live chat",
-  "Channel::Email": "Email",
   "Channel::Api": "API",
-  "Channel::Whatsapp": "WhatsApp",
-  "Channel::Telegram": "Telegram",
+  "Channel::Email": "Email",
+  "Channel::FacebookPage": "Facebook",
+  "Channel::Instagram": "Instagram",
+  "Channel::Line": "LINE",
   "Channel::Sms": "SMS",
+  "Channel::Telegram": "Telegram",
+  "Channel::Tiktok": "TikTok",
+  "Channel::TwilioSms": "Twilio",
+  "Channel::TwitterProfile": "Twitter",
+  "Channel::WebWidget": "Live chat",
+  "Channel::Whatsapp": "WhatsApp",
 };
+
+/** Channels that reach the contact by phone number, which the ticket card then shows. */
+const PHONE_CHANNELS: ReadonlySet<string> = new Set(["Channel::Sms", "Channel::TwilioSms", "Channel::Whatsapp"]);
 
 /** The value when it has visible content, otherwise undefined. */
 function filled(value: unknown): string | undefined {
@@ -111,20 +121,23 @@ export function threadTitle(accountName: string, conversation: RelayConversation
   return clip(subject.trim() === "" ? title : `${title} — ${subject}`, TITLE_LIMIT);
 }
 
-/** Context shown once, at the top of a new post: channel, inbox, and customer email. */
+/**
+ * Context shown once, at the top of a new post: channel, inbox, and the customer's email, and
+ * their phone number on channels that reach them by phone.
+ */
 export function postHeader(message: RelayMessage): string {
-  const channelType = message.conversation.channel ?? "";
-  const channel = filled(CHANNEL_LABELS[channelType] ?? channelType.replace(/^Channel::/, ""));
+  const { channel: channelType, contact } = message.conversation;
+  const channel = filled(CHANNEL_LABELS[channelType ?? ""] ?? channelType?.replace(/^Channel::/, ""));
   const inbox = filled(message.inboxName);
-  const email = filled(message.conversation.contact.email);
+  const phone = PHONE_CHANNELS.has(channelType ?? "") ? filled(contact.phone) : undefined;
   const lines: string[] = [];
   if (channel || inbox) lines.push(`-# via ${[channel, inbox].filter(Boolean).join(" · ")}`);
-  if (email) lines.push(`-# ${email}`);
+  for (const detail of [filled(contact.email), phone]) if (detail) lines.push(`-# ${detail}`);
   return lines.join("\n");
 }
 
 export function body(message: RelayMessage): string {
-  const content = chatwootMentions(message.content, message.mentionedAgents).trim();
+  const content = markdownImages(chatwootMentions(message.content, message.mentionedAgents)).trim();
   const parts: string[] = [];
   if (message.messageType === "activity") {
     if (content) parts.push(`_${content}_`);
@@ -132,14 +145,49 @@ export function body(message: RelayMessage): string {
     if (message.private) parts.push("🔒 **Internal note**");
     if (content) parts.push(content);
   }
+  parts.push(...(message.items ?? []).map(itemLine));
   parts.push(...message.attachments.flatMap(attachmentLine));
-  return parts.join("\n").trim();
+  const text = parts.join("\n").trim();
+  return message.messageType === "incoming" ? defused(text) : text;
+}
+
+/**
+ * Customer text that cannot call anyone or pass for the relay's own lines: a zero-width space
+ * after the `<` of a user, role, channel, or command mention (`<@…>`, `<@&…>`, `<#…>`, `</…>`),
+ * after the `@` of `@everyone` and `@here`, and before a `-#` (Discord's subtext) that starts a
+ * line. `allowed_mentions` already keeps them from pinging anyone; this also keeps bots that read
+ * the text, such as the triage bot, from acting on them.
+ */
+export function defused(text: string): string {
+  return text
+    .replace(/<(?=[@#/])/g, "<\u200b")
+    .replace(/@(?=everyone|here)/g, "@\u200b")
+    .replace(/^([ \t]*)-#/gm, "$1\u200b-#");
+}
+
+/**
+ * Markdown images, which Discord does not show, as their URL, which it previews: e.g. a LINE
+ * sticker, which Chatwoot stores as `![sticker-<id>](<url>)` (Line::IncomingMessageService at v4.18.0).
+ */
+function markdownImages(content: string): string {
+  return content.replace(/!\[[^\]\n]*\]\((https?:\/\/[^)\s]+)\)/g, "$1");
+}
+
+/** A bot's option, card, or article: its title (linked when it has a URL), description, and buttons. */
+function itemLine(item: RelayItem): string {
+  const title = filled(item.title) ?? item.url;
+  const heading = filled(item.url) && title !== item.url ? `[${title}](<${item.url}>)` : title;
+  const description = filled(item.description) ? ` — ${item.description}` : "";
+  const links = item.links.map((link) => ` · [${filled(link.text) ?? link.url}](<${link.url}>)`).join("");
+  return `• ${heading}${description}${links}`;
 }
 
 function attachmentLine(attachment: RelayAttachment): string[] {
   switch (attachment.type) {
-    case "file":
-      return filled(attachment.url) ? [`📎 ${attachment.url}`] : [];
+    case "file": {
+      const line = [filled(attachment.label), filled(attachment.url)].filter(Boolean).join(" ");
+      return line ? [`📎 ${line}`] : [];
+    }
     case "contact": {
       const contact = [filled(attachment.name), filled(attachment.phone)].filter(Boolean).join(": ");
       return contact ? [`📇 ${contact}`] : [];

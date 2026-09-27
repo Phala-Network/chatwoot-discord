@@ -9,11 +9,19 @@ export interface RelayAssignee {
   email?: string | null | undefined;
 }
 
-/** A file (its URL), or a shared contact or location, which has no file. */
+/** A file (its URL, and what it is when Chatwoot says), or a shared contact or location, which has no file. */
 export type RelayAttachment =
-  | { type: "file"; url: string }
+  | { type: "file"; url: string; label?: string }
   | { type: "contact"; name: string; phone: string }
   | { type: "location"; title: string; latitude: number; longitude: number; url: string };
+
+export interface RelayItem {
+  title: string;
+  description: string;
+  url: string;
+  /** A card's link buttons. */
+  links: Array<{ text: string; url: string }>;
+}
 
 export interface RelayConversation {
   /** The conversation's display id (the number shown in Chatwoot). */
@@ -24,7 +32,13 @@ export interface RelayConversation {
   /** urgent, high, medium, low, or null. */
   priority?: string | null;
   labels: string[];
-  contact: { name?: string | null; email?: string | null; blocked?: boolean; avatarUrl?: string | null };
+  contact: {
+    name?: string | null;
+    email?: string | null;
+    phone?: string | null;
+    blocked?: boolean;
+    avatarUrl?: string | null;
+  };
   assignee?: RelayAssignee | null;
   customAttributes: Record<string, unknown>;
 }
@@ -42,6 +56,8 @@ export interface RelayMessage {
   /** An automatic email reply (out of office, for example): relayed without notifications. */
   autoReply?: boolean;
   attachments: RelayAttachment[];
+  /** A bot's options to pick, cards, or articles, with a link each when they have one. */
+  items?: RelayItem[];
   /** Chatwoot user id -> Discord user id of the linked agents a private note mentions. */
   mentionedAgents?: ReadonlyMap<number, string>;
   /** The Discord avatar of the linked agent who sent the message, if any. */

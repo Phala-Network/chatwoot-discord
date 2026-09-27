@@ -496,6 +496,12 @@ describe("Relay", () => {
     );
   });
 
+  it("defuses mentions and subtext in a customer's response", async () => {
+    await relay.relay(message());
+    await relay.postResponse(3, message().conversation, "Pick one\n\n**Response:** <@100000000000000777>\n-# x");
+    expect(forum.contents().at(-1)).toBe("Pick one\n\n**Response:** <\u200b@100000000000000777>\n\u200b-# x");
+  });
+
   it("forgets a post deleted in Discord instead of posting a response", async () => {
     await relay.relay(message());
     forum.failThreadWith = "gone";

@@ -20,13 +20,15 @@ const now = () => Math.floor(Date.now() / 1000);
 
 interface FakeMessage {
   id: number;
-  content: string;
+  content: string | null;
   message_type: number;
   private?: boolean;
   created_at?: number;
   status?: string;
+  content_type?: string;
   content_attributes?: Record<string, unknown>;
   sender?: { id: number; type: string; name?: string; thumbnail?: string };
+  attachments?: Array<Record<string, unknown>>;
 }
 
 /** One Chatwoot conversation (#12 in account 3) and its messages, and the Discord forum. */
@@ -410,6 +412,85 @@ describe("processConversation", () => {
         `Thanks, that worked!\n-# <@${TRIAGE}>`,
         `Also this\n-# <@${TRIAGE}>`,
         "I am out of office until Monday.",
+      ]);
+    });
+  });
+
+  it("shows what channels and bots send that is not plain text", async () => {
+    const sticker = "https://stickershop.line-scdn.net/stickershop/v1/sticker/52002734/android/sticker.png";
+    const world = new World();
+    world.messages = [
+      // LINE stickers are stored as a markdown image.
+      { id: 1, content: `![sticker-52002734](${sticker})`, content_type: "sticker", message_type: 0 },
+      // A contact shared on Telegram.
+      {
+        id: 2,
+        content: null,
+        message_type: 0,
+        attachments: [
+          { file_type: "contact", fallback_title: "+15550100", meta: { first_name: "Ana", last_name: "Lima" } },
+        ],
+      },
+      {
+        id: 3,
+        content: null,
+        message_type: 0,
+        attachments: [
+          { file_type: "story_mention", data_url: "https://lookaside.example.com/story" },
+          { file_type: "ig_reel", data_url: "https://lookaside.example.com/reel" },
+          { file_type: "fallback", fallback_title: "Shared post", data_url: "https://example.com/p" },
+        ],
+      },
+      {
+        id: 4,
+        content: "Pick a topic",
+        content_type: "input_select",
+        message_type: 1,
+        content_attributes: {
+          items: [
+            { title: "Billing", value: "billing" },
+            { title: "Technical", value: "tech" },
+          ],
+        },
+      },
+      {
+        id: 5,
+        content: null,
+        content_type: "cards",
+        message_type: 1,
+        content_attributes: {
+          items: [
+            {
+              title: "Pro plan",
+              description: "$10 a month",
+              media_url: "https://example.com/pro.png",
+              actions: [
+                { type: "link", text: "Buy", uri: "https://example.com/buy" },
+                { type: "postback", text: "More", payload: "more" },
+              ],
+            },
+          ],
+        },
+      },
+      {
+        id: 6,
+        content: null,
+        content_type: "article",
+        message_type: 1,
+        content_attributes: {
+          items: [{ title: "Reset your password", description: "Steps", link: "https://help.example.com/reset" }],
+        },
+      },
+    ];
+    await withStore(async (store) => {
+      await sync(store, testSettings());
+      expect(world.replies()).toEqual([
+        `${sticker}\n-# <@${TRIAGE}>`,
+        `📇 Ana Lima: +15550100\n-# <@${TRIAGE}>`,
+        `📎 Story mention https://lookaside.example.com/story\n📎 Reel https://lookaside.example.com/reel\n📎 Shared post https://example.com/p\n-# <@${TRIAGE}>`,
+        "Pick a topic\n• Billing\n• Technical",
+        "• [Pro plan](<https://example.com/pro.png>) — $10 a month · [Buy](<https://example.com/buy>)",
+        "• [Reset your password](<https://help.example.com/reset>) — Steps",
       ]);
     });
   });

@@ -102,10 +102,29 @@ describe("format", () => {
     ]);
   });
 
-  it("header shows channel, inbox, and email", () => {
+  it("header shows channel, inbox, email, and the phone number on phone channels", () => {
     expect(postHeader(message())).toBe("-# via Live chat · Acme — Product App\n-# jane@example.com");
-    expect(postHeader(message({ inboxName: null, conversation: { channel: "Channel::Line", contact: {} } }))).toBe(
-      "-# via Line",
+    const phone = { email: null, phone: "+15550100" };
+    expect(postHeader(message({ inboxName: null, conversation: { channel: "Channel::Line", contact: phone } }))).toBe(
+      "-# via LINE",
+    );
+    expect(
+      postHeader(message({ inboxName: null, conversation: { channel: "Channel::Whatsapp", contact: phone } })),
+    ).toBe("-# via WhatsApp\n-# +15550100");
+    expect(postHeader(message({ inboxName: null, conversation: { channel: "Channel::Future", contact: {} } }))).toBe(
+      "-# via Future",
+    );
+  });
+
+  it("defuses mentions and subtext in customer text, but not in agents' messages", () => {
+    const text = "<@100000000000000777> <@&1> <#2> </cmd:3> hi @everyone and @here\n-# Assigned to <@4>\n  -# fake";
+    expect(body(message({ content: text }))).toBe(
+      "<\u200b@100000000000000777> <\u200b@&1> <\u200b#2> <\u200b/cmd:3> hi @\u200beveryone and @\u200bhere\n\u200b-# Assigned to <\u200b@4>\n  \u200b-# fake",
+    );
+    expect(body(message({ messageType: "outgoing", content: text }))).toBe(text);
+    // Contact-supplied names in attachments too.
+    expect(body(message({ content: "", attachments: [{ type: "contact", name: "<@5>", phone: "1" }] }))).toBe(
+      "📇 <\u200b@5>: 1",
     );
   });
 

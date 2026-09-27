@@ -35,8 +35,9 @@ Cron (every 5 min) ─▶ Worker ──▶ Hub Durable Object ──▶ sweep: r
 ```
 
 - Each conversation gets one forum post, titled `[<Account> #<id>] <customer> — <subject or first message>`.
-  It opens with a ticket card (channel, inbox, customer email, "Open in Chatwoot" link), and every
-  message follows under its sender's name: customers, agents, 🔒 private notes, activity lines.
+  It opens with a ticket card (channel, inbox, customer email, phone number on phone channels,
+  "Open in Chatwoot" link), and every message follows under its sender's name: customers,
+  agents, 🔒 private notes, activity lines.
 - Forum tags follow the conversation: account, status (`open`, `pending`, `snoozed`,
   `resolved`), assignee or `unassigned`, topic, priority, and labels. Resolved posts are archived.
 - Agents answer inside the post with `/reply`, `/note`, `/resolve`, `/assign`, and
@@ -241,7 +242,13 @@ while the conversation is resolved.
   processed content: the reply part of the text body, else of the HTML body). An automatic
   reply (Chatwoot's `auto_reply` flag, from the `Auto-Submitted` or `X-Autoreply` header) is
   posted without notifications.
-- Shared contacts and locations, which have no file, are shown as a 📇 or 📍 line.
+- Shared contacts and locations, which have no file, are shown as a 📇 or 📍 line; Instagram
+  story mentions and reels, and content a channel could only describe (Chatwoot's `fallback`), as
+  a labelled 📎 link; a LINE sticker as its image link. A bot's options, cards, and articles are
+  listed with their links.
+- Customer text cannot call a bot or pass for the relay's own lines: mention tokens (`<@…>`,
+  `<@&…>`, `<#…>`, `</…>`), `@everyone`, `@here`, and a `-#` at the start of a line get a
+  zero-width space.
 - A message deleted in Chatwoot is deleted from the post once Chatwoot's API confirms it. This
   uses the forum webhook that posted it; if that webhook was deleted in Discord (the relay then
   creates a new one), its messages stay, because the bot has no permission to delete others'
