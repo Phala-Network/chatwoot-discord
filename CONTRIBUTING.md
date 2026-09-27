@@ -6,15 +6,15 @@ in [SECURITY.md](SECURITY.md), not in a public issue.
 
 ## Development
 
-Requirements: Node 24 and pnpm (the version is pinned in `package.json`; `corepack` or
-`pnpm/action-setup` will pick it up).
+Requirements: Bun (the version is pinned in `packageManager` in `package.json`, which
+`oven-sh/setup-bun` reads in CI) and Node 24 (`bun run` starts Vitest and wrangler with Node).
 
 ```sh
-pnpm install --frozen-lockfile
-pnpm lint        # Biome (formatting + lint); `pnpm format` applies fixes
-pnpm typecheck   # TypeScript strict, Worker and Node (scripts) projects
-pnpm test        # Vitest inside workerd via @cloudflare/vitest-pool-workers
-pnpm build       # wrangler dry-run bundle (no deploy)
+bun install --frozen-lockfile
+bun run lint        # Biome (formatting + lint); `bun run format` applies fixes
+bun run typecheck   # TypeScript strict, Worker and Node (scripts) projects
+bun run test        # Vitest inside workerd via @cloudflare/vitest-pool-workers
+bun run build       # wrangler dry-run bundle (no deploy)
 ```
 
 ## Guidelines
@@ -22,7 +22,7 @@ pnpm build       # wrangler dry-run bundle (no deploy)
 - Keep the Worker request path fast (the Free plan allows 10 ms CPU); do slow work in the Hub
   Durable Object and keep each alarm run under the subrequest budget.
 - Treat Chatwoot's REST API as the source of truth; webhooks only trigger work.
-- Use the generated Chatwoot types (`pnpm gen:chatwoot`) and `discord-api-types`. If Chatwoot's
+- Use the generated Chatwoot types (`bun run gen:chatwoot`) and `discord-api-types`. If Chatwoot's
   published spec lacks a route, verify it in Chatwoot's source for the pinned version and add a
   small documented wrapper in `src/chatwoot/api.ts`.
 - No `any`, `as unknown as`, non-null assertions, or `@ts-ignore`.

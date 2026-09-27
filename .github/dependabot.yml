@@ -1,17 +1,17 @@
 version: 2
 updates:
-  # pnpm projects use the "npm" ecosystem; Dependabot updates pnpm-lock.yaml.
-  - package-ecosystem: npm
+  # Dependabot updates bun.lock (text lockfile). The bun ecosystem gets version updates only, not
+  # security updates (https://docs.github.com/en/code-security/dependabot/ecosystems-supported-by-dependabot/supported-ecosystems-and-repositories).
+  - package-ecosystem: bun
     directory: /
     schedule:
       interval: weekly
-    # Only propose versions pnpm will install: pnpm's minimumReleaseAge defaults to 1 day since
-    # pnpm 11 (https://pnpm.io/settings#minimumreleaseage). Cooldown applies to version updates,
-    # not security updates (https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#cooldown-).
+    # Wait before proposing a newly published version. Cooldown applies to version updates
+    # (https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#cooldown-).
     cooldown:
       default-days: 3
     groups:
-      npm-minor-and-patch:
+      bun-minor-and-patch:
         update-types: [minor, patch]
   - package-ecosystem: github-actions
     directory: /

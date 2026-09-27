@@ -140,7 +140,8 @@ not fit per-invocation subrequest accounting on Workers.
 
 ## Requirements
 
-- Node 24 and pnpm (version pinned in `package.json`)
+- Bun (version pinned in `packageManager` in `package.json`) and Node 24 (Vitest and wrangler
+  run on Node)
 - A Cloudflare account (the Free plan is enough)
 - A Chatwoot instance (v4.18 or later) reachable from the internet
 - A Discord server where you can add an application and a forum channel
@@ -160,7 +161,7 @@ not fit per-invocation subrequest accounting on Workers.
    `resolved`), `unassigned`, one per agent (their Chatwoot `name`), and one per topic value.
 5. Register the commands (run manually, whenever `src/commands/definitions.ts` changes):
    ```sh
-   DISCORD_BOT_TOKEN=... pnpm register-commands --application <app id> --guild <guild id>
+   DISCORD_BOT_TOKEN=... bun run register-commands --application <app id> --guild <guild id>
    ```
 6. After deploying, set **Interactions Endpoint URL** to `https://<worker>/discord/interactions`
    (Discord verifies it with a signed ping, so the Worker must be running).
@@ -184,18 +185,18 @@ The account must have the API/webhooks feature enabled (it is by default on self
 ### 3. Cloudflare
 
 ```sh
-pnpm install
+bun install
 cp wrangler.example.jsonc wrangler.jsonc   # fill in ids and CONFIG
-pnpm wrangler secret put DISCORD_BOT_TOKEN
-pnpm wrangler secret put DISCORD_PUBLIC_KEY
-pnpm wrangler secret put CHATWOOT_RELAY_TOKEN
-pnpm wrangler secret put CHATWOOT_WEBHOOK_SECRETS   # {"1":"...","2":"..."}
-pnpm wrangler secret put CHATWOOT_AGENT_TOKENS      # {"<discord user id>":"<chatwoot token>"}
-pnpm wrangler deploy
-curl https://<worker>/healthz                        # {"ok":true}
+bun run wrangler secret put DISCORD_BOT_TOKEN
+bun run wrangler secret put DISCORD_PUBLIC_KEY
+bun run wrangler secret put CHATWOOT_RELAY_TOKEN
+bun run wrangler secret put CHATWOOT_WEBHOOK_SECRETS   # {"1":"...","2":"..."}
+bun run wrangler secret put CHATWOOT_AGENT_TOKENS      # {"<discord user id>":"<chatwoot token>"}
+bun run wrangler deploy
+curl https://<worker>/healthz                           # {"ok":true}
 ```
 
-For local development copy `.dev.vars.example` to `.dev.vars` and run `pnpm dev`.
+For local development copy `.dev.vars.example` to `.dev.vars` and run `bun run dev`.
 
 Self-hosting without Cloudflare is possible with the open-source
 [workerd](https://github.com/cloudflare/workerd) runtime (Durable Objects with SQLite and alarms
@@ -287,10 +288,10 @@ post for those conversations.
 ## Development
 
 ```sh
-pnpm install
-pnpm lint && pnpm typecheck && pnpm test   # tests run inside workerd (@cloudflare/vitest-pool-workers)
-pnpm build                                  # wrangler dry run into dist/
-pnpm gen:chatwoot                           # regenerate src/chatwoot/schema.d.ts (Chatwoot v4.18.0 OpenAPI)
+bun install
+bun run lint && bun run typecheck && bun run test   # tests run inside workerd (@cloudflare/vitest-pool-workers)
+bun run build                                        # wrangler dry run into dist/
+bun run gen:chatwoot                                 # regenerate src/chatwoot/schema.d.ts (Chatwoot v4.18.0 OpenAPI)
 ```
 
 Every Chatwoot route the service calls is listed in Chatwoot's published OpenAPI spec, and
