@@ -65,6 +65,8 @@ export const MIGRATIONS: string[] = [
   // every record is cleared: such a post records its assignee without pinging them
   // (see Notifier#newAssignee).
   `UPDATE conversations SET announced_assignee = NULL;`,
+  // announce_pending keeps an owed assignee announcement across failed attempts.
+  `ALTER TABLE conversations ADD COLUMN announce_pending INTEGER;`,
 ];
 
 const COUNTER_TTL_MS = 2 * 60 * 60 * 1000;
@@ -82,6 +84,7 @@ const COLUMNS: ReadonlyArray<readonly [keyof ConversationFields, string]> = [
   ["state", "state"],
   ["cursor", "cursor"],
   ["announcedAssignee", "announced_assignee"],
+  ["announcePending", "announce_pending"],
   ["titleSubject", "title_subject"],
   ["title", "title"],
 ];
@@ -121,6 +124,7 @@ export class Store implements RelayStore, Cache {
         state: string | null;
         cursor: number | null;
         announced_assignee: string | null;
+        announce_pending: number | null;
         title_subject: string | null;
         title: string | null;
       }>(
@@ -136,6 +140,7 @@ export class Store implements RelayStore, Cache {
       state: row.state ?? undefined,
       cursor: row.cursor ?? undefined,
       announcedAssignee: row.announced_assignee ?? undefined,
+      announcePending: row.announce_pending ?? undefined,
       titleSubject: row.title_subject ?? undefined,
       title: row.title ?? undefined,
     };
@@ -196,7 +201,7 @@ export class Store implements RelayStore, Cache {
     this.sql.exec(
       `INSERT INTO conversations (account_id, conversation_id, thread_id) VALUES (?, ?, ?)
        ON CONFLICT (account_id, conversation_id) DO UPDATE SET thread_id = excluded.thread_id, state = NULL,
-         announced_assignee = NULL, title_subject = NULL, title = NULL`,
+         announced_assignee = NULL, announce_pending = NULL, title_subject = NULL, title = NULL`,
       accountId,
       conversationId,
       threadId,
@@ -264,7 +269,8 @@ export class Store implements RelayStore, Cache {
 
   forgetThread(accountId: number, conversationId: number): void {
     this.sql.exec(
-      `UPDATE conversations SET thread_id = NULL, state = NULL, announced_assignee = NULL, title_subject = NULL, title = NULL
+      `UPDATE conversations SET thread_id = NULL, state = NULL, announced_assignee = NULL, announce_pending = NULL,
+         title_subject = NULL, title = NULL
        WHERE account_id = ? AND conversation_id = ?`,
       accountId,
       conversationId,

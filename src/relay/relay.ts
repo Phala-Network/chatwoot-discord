@@ -73,6 +73,8 @@ export interface PostFields {
   state: string;
   /** The Chatwoot user id of the assignee the post last announced ("" for none; see assigneeKey). */
   announcedAssignee: string;
+  /** 1 while a live message is posted and the assignee is not announced after it yet (see announceAssignee). */
+  announcePending: number;
   /**
    * The subject the post's title ends with and the title last applied; unset for a post whose
    * title was not recorded (adopted, or created before titles were recorded).
@@ -144,15 +146,15 @@ export class Relay {
   /**
    * Posts a message into its conversation's post, creating the post if needed. Each Discord
    * message is recorded as soon as it is sent, so a retry resumes after the last one. Templates,
-   * deleted and empty messages, and messages from a blocked contact are not relayed. Returns
-   * whether it posted a message that notifies (see `announceAssignee`).
+   * deleted and empty messages, and messages from a blocked contact are not relayed. A message
+   * that notifies leaves an announcement pending (see `announceAssignee`).
    */
-  async relay(message: RelayMessage): Promise<boolean> {
-    if (!RELAYED_TYPES.has(message.messageType) || message.deleted) return false;
+  async relay(message: RelayMessage): Promise<void> {
+    if (!RELAYED_TYPES.has(message.messageType) || message.deleted) return;
     // A blocked contact's messages are muted in Chatwoot (no notifications); keep them out of Discord too.
-    if (message.messageType === "incoming" && message.conversation.contact.blocked) return false;
+    if (message.messageType === "incoming" && message.conversation.contact.blocked) return;
     const text = body(message);
-    if (text === "") return false;
+    if (text === "") return;
 
     const { store } = this.options;
     const accountId = message.account.id;
@@ -173,14 +175,15 @@ export class Relay {
       await this.post(message, parts, threadId);
     }
     this.unarchived(accountId, conversation);
-    return this.notifier.notifies(message);
+    if (this.notifier.notifies(message)) store.updateConversation(accountId, conversation.id, { announcePending: 1 });
   }
 
   /**
-   * After a run's messages that notify: pings a newly assigned, linked agent in a notice of its
-   * own, so the ping follows the latest assignment line and names the current assignee however
-   * often the conversation was reassigned in between, and adds them to the post. The assignee
-   * counts as announced either way.
+   * After a run's messages, while an announcement is pending: pings a newly assigned, linked
+   * agent in a notice of its own, so the ping follows the latest assignment line and names the
+   * current assignee however often the conversation was reassigned in between, and adds them to
+   * the post. The assignee counts as announced either way. A failed notice stays pending, so the
+   * job's retry posts it even when there are no new messages.
    */
   async announceAssignee(accountId: number, conversation: RelayConversation): Promise<void> {
     const discordId = this.notifier.newAssignee(accountId, conversation);
@@ -195,6 +198,7 @@ export class Relay {
     }
     this.options.store.updateConversation(accountId, conversation.id, {
       announcedAssignee: assigneeKey(conversation),
+      announcePending: 0,
     });
   }
 

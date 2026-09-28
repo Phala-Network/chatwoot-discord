@@ -106,7 +106,6 @@ export async function processConversation(
   }
 
   let inboxName: string | null | undefined;
-  let notified = false;
   for (;;) {
     if (budget.remaining < perMessage + PAGE_REQUESTS) return "yield";
     const page = await chatwoot.listMessages(accountId, conversationId, cursor);
@@ -123,7 +122,7 @@ export async function processConversation(
         ...(await linkedAgents(context, message)),
       });
       try {
-        notified = (await relay.relay(relayMessage)) || notified;
+        await relay.relay(relayMessage);
       } catch (error) {
         if (error instanceof BudgetExhaustedError) return "yield";
         // Only a request Discord refuses as invalid counts towards skipping the message. Anything
@@ -152,10 +151,11 @@ export async function processConversation(
     if (page.length < MESSAGE_PAGE_SIZE) break;
   }
 
-  const threadId = store.conversation(accountId, conversationId)?.threadId;
+  const post = store.conversation(accountId, conversationId);
+  const threadId = post?.threadId;
   if (threadId) {
     if (budget.remaining < FINISH_REQUESTS) return "yield";
-    if (notified) await relay.announceAssignee(accountId, conversation);
+    if (post?.announcePending) await relay.announceAssignee(accountId, conversation);
     await linkPost(context, accountId, account.forumChannelId, conversation, threadId);
     await relay.sync(accountId, conversation, threadId);
   }

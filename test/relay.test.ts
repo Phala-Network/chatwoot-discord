@@ -363,10 +363,13 @@ describe("Relay", () => {
   });
 
   it("pings a newly assigned, linked agent once, in a notice after the run's live messages", async () => {
-    ({ relay, forum } = relayWith({ linkedAgent: (id) => (id === 7 ? { discordUserId: "592" } : undefined) }));
-    // What the processor does in each run: relay the messages, then announce after live ones.
+    ({ relay, forum, store } = relayWith({ linkedAgent: (id) => (id === 7 ? { discordUserId: "592" } : undefined) }));
+    // What the processor does in each run: relay the messages, then announce while one is pending.
     const run = async (relayed: RelayMessage) => {
-      if (await relay.relay(relayed)) await relay.announceAssignee(3, relayed.conversation);
+      await relay.relay(relayed);
+      if (store.conversation(3, relayed.conversation.id)?.announcePending) {
+        await relay.announceAssignee(3, relayed.conversation);
+      }
     };
     await run(message());
     expect(forum.calls.some(([, payload]) => payload.allowed_mentions?.users)).toBe(false);
@@ -396,10 +399,12 @@ describe("Relay", () => {
   });
 
   it("announces the assignee after the first message when a conversation is assigned at creation", async () => {
-    ({ relay, forum } = relayWith({ triage, linkedAgent: () => ({ discordUserId: "592" }) }));
+    ({ relay, forum, store } = relayWith({ triage, linkedAgent: () => ({ discordUserId: "592" }) }));
     const first = message({ conversation: { assignee: { id: 7, name: "Kim" } } });
-    expect(await relay.relay(first)).toBe(true);
+    await relay.relay(first);
+    expect(store.conversation(3, 12)?.announcePending).toBe(1);
     await relay.announceAssignee(3, first.conversation);
+    expect(store.conversation(3, 12)?.announcePending).toBe(0);
     const [card, reply, notice] = forum.calls.map(([, payload]) => payload);
     expect(card?.allowed_mentions).toEqual({ parse: [] });
     // The announcement pings the assignee, so the customer message does not as well.
@@ -432,9 +437,12 @@ describe("Relay", () => {
 
   it("tells assignees apart by Chatwoot user id: a rename does not ping, a reassignment does", async () => {
     const agents: Record<number, LinkedAgent> = { 7: { discordUserId: "592" }, 8: { discordUserId: "593" } };
-    ({ relay, forum } = relayWith({ linkedAgent: (id) => agents[id] }));
+    ({ relay, forum, store } = relayWith({ linkedAgent: (id) => agents[id] }));
     const run = async (relayed: RelayMessage) => {
-      if (await relay.relay(relayed)) await relay.announceAssignee(3, relayed.conversation);
+      await relay.relay(relayed);
+      if (store.conversation(3, relayed.conversation.id)?.announcePending) {
+        await relay.announceAssignee(3, relayed.conversation);
+      }
     };
     const kim = { assignee: { id: 7, name: "Kim" } };
     await run(message({ messageType: "activity", content: "Assigned to Kim", conversation: kim }));
@@ -482,7 +490,10 @@ describe("Relay", () => {
     // A post whose record was cleared, as the migration to Chatwoot user ids does.
     store.updateConversation(3, 12, { threadId: "thread-9", state: "recorded" });
     const run = async (relayed: RelayMessage) => {
-      if (await relay.relay(relayed)) await relay.announceAssignee(3, relayed.conversation);
+      await relay.relay(relayed);
+      if (store.conversation(3, relayed.conversation.id)?.announcePending) {
+        await relay.announceAssignee(3, relayed.conversation);
+      }
     };
     const kim = { assignee: { id: 7, name: "Kim" } };
     await run(message({ id: 102, messageType: "outgoing", content: "On it", conversation: kim }));
@@ -615,12 +626,12 @@ describe("Relay", () => {
       message({ createdAt: hourAgo - 86400, content: "old question", conversation: assigned }),
       message({ id: 102, createdAt: hourAgo, content: "old follow-up", conversation: assigned }),
     ];
-    for (const old of history) expect(await relay.relay(old)).toBe(false);
-    expect(
-      await relay.relay(
-        message({ id: 103, createdAt: NOW_SECONDS - 60, content: "still there?", conversation: assigned }),
-      ),
-    ).toBe(true);
+    for (const old of history) await relay.relay(old);
+    expect(store.conversation(3, 12)?.announcePending).toBeUndefined();
+    await relay.relay(
+      message({ id: 103, createdAt: NOW_SECONDS - 60, content: "still there?", conversation: assigned }),
+    );
+    expect(store.conversation(3, 12)?.announcePending).toBe(1);
     const replies = forum.calls.slice(1).map(([, payload]) => [payload.content, payload.allowed_mentions]);
     expect(replies).toEqual([
       ["old question", { parse: [] }],

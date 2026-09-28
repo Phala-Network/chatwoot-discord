@@ -42,6 +42,8 @@ class World {
   };
   messages: FakeMessage[] = [];
   failLinks = 0;
+  /** Assignee announcements Discord fails before accepting them. */
+  failAnnouncements = 0;
   /** Posts deleted in Discord. */
   goneThreads = new Set<string>();
   /** Discord's answer to posting into a thread, while it fails. */
@@ -102,6 +104,14 @@ class World {
       on("POST", "discord.com/api/v10/webhooks/1/tok", (request) => {
         const thread = request.url.searchParams.get("thread_id");
         if (thread && this.threadFailure) return this.threadFailure();
+        if (
+          thread &&
+          this.failAnnouncements > 0 &&
+          String(JSON.parse(request.body).content).startsWith("-# Assigned to")
+        ) {
+          this.failAnnouncements -= 1;
+          return json({ message: "unavailable" }, { status: 503 });
+        }
         if (thread) return json({ id: `m-${this.requests.length}`, channel_id: thread });
         this.threads += 1;
         return json({ id: "card", channel_id: `20000000000000000${this.threads}` });
@@ -365,6 +375,26 @@ describe("processConversation", () => {
       ]);
       // The new assignee is added to the post, once.
       expect(world.sent("PUT", `/thread-members/${BOB}`)).toHaveLength(1);
+    });
+  });
+
+  it("retries a failed assignee announcement without new messages, so the assignee is still pinged", async () => {
+    const world = new World();
+    world.conversation.meta = { ...Object(world.conversation.meta), assignee: { id: 43, name: "Bob" } };
+    world.messages = [{ id: 1, content: "hello", message_type: 0, created_at: now() - 5 }];
+    world.failAnnouncements = 1;
+    await withStore(async (store) => {
+      const settings = testSettings();
+      await expect(sync(store, settings)).rejects.toThrow();
+      await sync(store, settings);
+      // The customer message was posted once; the announcement failed, then its retry succeeded.
+      expect(world.replies()).toEqual([
+        `hello\n-# <@${TRIAGE}>`,
+        `-# Assigned to <@${BOB}>`,
+        `-# Assigned to <@${BOB}>`,
+      ]);
+      expect(world.posts().at(-1)?.body.allowed_mentions).toEqual({ parse: [], users: [BOB] });
+      expect(store.conversation(3, 12)?.announcePending).toBe(0);
     });
   });
 
