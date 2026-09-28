@@ -9,12 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Upgrading: re-register the commands after deploying (`npm run register-commands`), for the new
 `/reply` and `/note` options and the new `/unassign` and `/label` commands. `CONFIG` is now validated strictly: remove any key the
-[configuration reference](README.md#configuration-reference) does not list (the old
-`discord.applicationId` is still accepted). On deploy, the database migrates once: posts gain
+[configuration reference](README.md#configuration-reference) does not list, including the old
+`discord.applicationId`. Replace each `agents[]` entry's `email` with the agent's
+`chatwootUserId` (see the configuration reference); `CONFIG` with an `email` there is invalid. An
+`/assign` still queued from before the deploy is dropped as unreadable (its invoker sees no
+result). Setting an agent's `tag` re-tags their posts on each post's next sync. On deploy, the database migrates once: posts gain
 two title columns (empty for existing posts, which keep their titles), and the unused
 `deliveries` table is dropped, so versions before 0.2.0 can no longer run on it. Each existing
 post's stored state no longer matches its new format, so the next sync of each conversation
-(its next event, or the sweep for recent ones) updates its tags once. Queued jobs keep working.
+(its next event, or the sweep for recent ones) updates its tags once. Other queued jobs keep working.
 `relay.subrequestBudget` must now be at least `relay.maxChunks` + 24 (the default 45 fits
 `maxChunks` up to 10).
 
@@ -36,6 +39,8 @@ post's stored state no longer matches its new format, so the next sync of each c
   pinged.
 - Shared contacts and locations are shown instead of being dropped.
 - `accounts[].inboxIds` limits an account to some of its inboxes.
+- `agents[].tag` sets a linked agent's assignee tag, so the tag survives a change of their
+  Chatwoot name; without it the assignee tag is still the Chatwoot name.
 - An agent's replies and notes show the agent's own avatar instead of the Chatwoot icon: the
   Discord avatar of the linked Discord user (`agents[]`, looked up at most once a day per agent),
   else the agent's Chatwoot avatar. Agent bots, activity lines, cards, and notices keep
@@ -74,6 +79,11 @@ post's stored state no longer matches its new format, so the next sync of each c
 - Drafts are read with CommonMark's code fence rules (three or more backticks or tildes, closed
   by a matching fence), so a draft may contain a code block.
 - A linked agent whose Chatwoot user left the account is told so instead of "not linked".
+- **Breaking:** `agents[]` links a Discord user to a Chatwoot agent by Chatwoot user id
+  (`{ discordUserId, chatwootUserId }`, both required) instead of email, which the agent can
+  change in their Chatwoot profile. Assignee pings, mentions in private notes, agent avatars, and
+  `/assign` match by id, and the relay no longer reads the account's agent list for them. Each
+  Discord user and each Chatwoot user may be linked once.
 - A forum tag deleted in Discord since it was cached no longer fails posts: the request is sent
   once more with the tags read again.
 - A sweep that stops at its page limit continues from the oldest activity it read next time.
@@ -103,6 +113,8 @@ post's stored state no longer matches its new format, so the next sync of each c
 - The `deleted-message` job type, queued only by unreleased builds between 0.1.0 and 0.2.0; such
   a job, if one were still queued, is dropped with a warning like any unknown job.
 - The unused `deliveries` table.
+- `agents[].email`: link agents with `chatwootUserId`.
+- The ignored `discord.applicationId` key: `CONFIG` with it is invalid.
 
 ## [0.2.0] - 2026-09-27
 

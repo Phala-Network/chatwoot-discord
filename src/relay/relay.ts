@@ -5,7 +5,7 @@
 import type { RESTPostAPIWebhookWithTokenJSONBody } from "discord-api-types/v10";
 import {
   type Avatars,
-  assigneeTag,
+  assigneeName,
   body,
   CONTENT_LIMIT,
   charLength,
@@ -25,7 +25,7 @@ import {
   topicTag,
 } from "./format.ts";
 import { assignedLine, Notifier, type TriageOptions } from "./notify.ts";
-import type { RelayAssignee, RelayConversation, RelayMessage } from "./types.ts";
+import type { LinkedAgent, RelayConversation, RelayMessage } from "./types.ts";
 
 export type WebhookMessage = RESTPostAPIWebhookWithTokenJSONBody;
 
@@ -114,8 +114,8 @@ export interface RelayOptions {
   topicAttribute: string;
   maxChunks: number;
   triage?: TriageOptions | undefined;
-  /** The Discord user linked to a Chatwoot assignee, if any. */
-  discordUserFor?: ((assignee: RelayAssignee) => string | undefined) | undefined;
+  /** The agent linked to a Chatwoot user id, if any. */
+  linkedAgent?: ((chatwootUserId: number) => LinkedAgent | undefined) | undefined;
   /** Messages created longer ago than this are relayed without notifications. */
   liveSeconds: number;
   now?: () => Date;
@@ -132,7 +132,7 @@ export class Relay {
     this.notifier = new Notifier({
       store: options.store,
       triage: options.triage,
-      discordUserFor: options.discordUserFor,
+      linkedAgent: options.linkedAgent,
       liveSeconds: options.liveSeconds,
       now: options.now ?? (() => new Date()),
     });
@@ -188,7 +188,9 @@ export class Relay {
       });
       if (!posted) return;
     }
-    this.options.store.updateConversation(accountId, conversation.id, { announcedAssignee: assigneeTag(conversation) });
+    this.options.store.updateConversation(accountId, conversation.id, {
+      announcedAssignee: assigneeName(conversation),
+    });
   }
 
   /**
@@ -271,7 +273,7 @@ export class Relay {
   stateOf(conversation: RelayConversation): string {
     return JSON.stringify([
       conversation.status ?? "",
-      assigneeTag(conversation),
+      this.assigneeTag(conversation),
       topicTag(conversation, this.options.topicAttribute) ?? "",
       conversation.priority ?? "",
       conversation.labels.toSorted(),
@@ -401,6 +403,12 @@ export class Relay {
     };
   }
 
+  /** Tag for the assignee so the forum can be filtered by owner: a linked agent's `tag`, else their name. */
+  private assigneeTag(conversation: RelayConversation): string {
+    const assigneeId = conversation.assignee?.id;
+    return (assigneeId ? this.options.linkedAgent?.(assigneeId)?.tag : undefined) ?? assigneeName(conversation);
+  }
+
   private forumOf(accountId: number): string {
     return this.options.target(accountId).forumChannelId;
   }
@@ -416,7 +424,7 @@ export class Relay {
     const target = this.options.target(accountId);
     return this.options.forum.tagIds(
       target.forumChannelId,
-      tagNames(target.tag, conversation, this.options.topicAttribute),
+      tagNames(target.tag, this.assigneeTag(conversation), conversation, this.options.topicAttribute),
     );
   }
 }

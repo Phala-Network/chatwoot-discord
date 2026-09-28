@@ -2,7 +2,6 @@
 // after the stored cursor, in order, then links the post from the conversation and corrects its
 // tags, title, and archived flag.
 
-import { z } from "zod";
 import { type Budget, BudgetExhaustedError } from "../budget.ts";
 import {
   type ChatwootClient,
@@ -15,7 +14,6 @@ import {
 import { relaysInbox, type Settings } from "../config.ts";
 import { type DiscordRest, isInvalidRequest } from "../discord/rest.ts";
 import { fetchAvatarUrl } from "../discord/users.ts";
-import { parseJson } from "../json.ts";
 import { errorFields, log } from "../log.ts";
 import type { Store } from "../store.ts";
 import { mentionedUserIds } from "./format.ts";
@@ -24,8 +22,6 @@ import { type ForumClient, Relay, type RelayStore } from "./relay.ts";
 import type { RelayConversation } from "./types.ts";
 
 const INBOX_CACHE_MS = 24 * 60 * 60 * 1000;
-const agentEmailsSchema = z.record(z.string(), z.string());
-const AGENTS_CACHE_MS = 60 * 60 * 1000;
 const AVATAR_CACHE_MS = 24 * 60 * 60 * 1000;
 /** After a failed avatar lookup, the agent's Chatwoot avatar is used this long before trying again. */
 const AVATAR_RETRY_MS = 60 * 60 * 1000;
@@ -45,7 +41,7 @@ export function relayFor(settings: Settings, forum: ForumClient, store: RelaySto
     topicAttribute: settings.config.relay.topicAttribute,
     maxChunks: settings.config.relay.maxChunks,
     triage: triageUserId ? { ...settings.config.triage, userId: triageUserId } : undefined,
-    discordUserFor: (assignee) => settings.discordUserForEmail(assignee.email),
+    linkedAgent: settings.linkedAgent,
     // Normally every message is relayed within the sweep's window (by its webhook, or else by
     // the sweep), so an older one is history: a first sync, or a catch-up after downtime.
     liveSeconds: settings.config.reconcile.lookbackSeconds,
@@ -123,7 +119,7 @@ export async function processConversation(
         account: { id: accountId, name: account.name },
         inboxName: inboxName ?? null,
         conversation,
-        ...(await linkedAgents(context, accountId, message)),
+        ...(await linkedAgents(context, message)),
       });
       try {
         notified = (await relay.relay(relayMessage)) || notified;
@@ -272,22 +268,16 @@ async function cachedInboxName(
  */
 async function linkedAgents(
   context: ProcessorContext,
-  accountId: number,
   message: ChatwootMessage,
 ): Promise<{ mentionedAgents?: ReadonlyMap<number, string>; discordAvatarUrl?: string }> {
-  if (context.settings.config.agents.length === 0) return {};
   const mentioned = message.private && message.content ? mentionedUserIds(message.content) : [];
   const senderId = message.message_type === 1 && message.sender?.type === "user" ? message.sender.id : undefined;
-  if (mentioned.length === 0 && senderId == null) return {};
-  // Chatwoot's message sender has no email: agents are matched through the account's agent list.
-  const emails = await cachedAgentEmails(context, accountId);
-  const discordUser = (userId: number) => context.settings.discordUserForEmail(emails[String(userId)]);
   const linked = new Map<number, string>();
   for (const userId of mentioned) {
-    const discordId = discordUser(userId);
+    const discordId = context.settings.linkedAgent(userId)?.discordUserId;
     if (discordId) linked.set(userId, discordId);
   }
-  const senderDiscordId = senderId == null ? undefined : discordUser(senderId);
+  const senderDiscordId = context.settings.linkedAgent(senderId)?.discordUserId;
   const discordAvatarUrl = senderDiscordId ? await cachedDiscordAvatar(context, senderDiscordId) : undefined;
   return {
     ...(mentioned.length > 0 ? { mentionedAgents: linked } : {}),
@@ -315,26 +305,5 @@ async function cachedDiscordAvatar(
     log.warn("Discord avatar unavailable", { discordUserId, ...errorFields(error) });
     store.set(key, "", AVATAR_RETRY_MS);
     return undefined;
-  }
-}
-
-/** The account's agents' emails by Chatwoot user id; empty when Chatwoot will not say. */
-async function cachedAgentEmails(
-  { store, chatwoot }: ProcessorContext,
-  accountId: number,
-): Promise<Partial<Record<string, string>>> {
-  const key = `agents:${accountId}`;
-  const cached = agentEmailsSchema.safeParse(parseJson(store.get(key)));
-  if (cached.success) return cached.data;
-  try {
-    const agents = await chatwoot.listAgents(accountId);
-    const emails: Record<string, string> = {};
-    for (const agent of agents) if (agent.id && agent.email) emails[String(agent.id)] = agent.email;
-    store.set(key, JSON.stringify(emails), AGENTS_CACHE_MS);
-    return emails;
-  } catch (error) {
-    if (error instanceof BudgetExhaustedError) throw error;
-    log.warn("agents unavailable for mentions", { accountId, ...errorFields(error) });
-    return {};
   }
 }

@@ -253,10 +253,10 @@ export function fromCustomer(message: RelayMessage): boolean {
 }
 
 /**
- * Tag for the assignee so the forum can be filtered by owner: the agent's `name`, which is what
- * Chatwoot's dashboard shows as the assignee and in assignment activity messages.
+ * The assignee's `name`, which is what Chatwoot's dashboard shows as the assignee and in
+ * assignment activity messages; the assignee tag of an agent without a configured tag.
  */
-export function assigneeTag(conversation: RelayConversation): string {
+export function assigneeName(conversation: RelayConversation): string {
   return filled(conversation.assignee?.name) ?? "unassigned";
 }
 
@@ -266,11 +266,16 @@ export function topicTag(conversation: RelayConversation, attribute: string): st
 }
 
 /** The post's tags by name, most important first (Discord applies at most 5). */
-export function tagNames(accountTag: string, conversation: RelayConversation, topicAttribute: string) {
+export function tagNames(
+  accountTag: string,
+  assigneeTag: string,
+  conversation: RelayConversation,
+  topicAttribute: string,
+) {
   return [
     accountTag,
     conversation.status,
-    assigneeTag(conversation),
+    assigneeTag,
     topicTag(conversation, topicAttribute),
     filled(conversation.priority),
     ...conversation.labels,

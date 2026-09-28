@@ -114,13 +114,13 @@ describe("executeCommand", () => {
     ]);
   });
 
-  it("assigns by the target agent's email", async () => {
+  it("assigns by the target agent's Chatwoot user id, whatever their email", async () => {
     const { result, requests } = run(
-      { type: "assign", email: "bob@example.com" },
+      { type: "assign", chatwootUserId: 43 },
       on("GET", `${cw}/accounts/3/agents`, () =>
         json([
           { id: 42, name: "Alice Example", available_name: "Alice", email: "alice@example.com" },
-          { id: 43, name: "Bob Example", available_name: "Bob", email: "Bob@example.com" },
+          { id: 43, name: "Bob Example", available_name: "Bob", email: "robert@example.org" },
         ]),
       ),
       ok("POST", `${conversation}/assignments`),
@@ -130,12 +130,13 @@ describe("executeCommand", () => {
     expect(JSON.parse(requests.at(-1)?.body ?? "")).toEqual({ assignee_id: 43 });
   });
 
-  it("refuses to assign an agent outside the account", async () => {
-    const { result } = run(
-      { type: "assign", email: "bob@example.com" },
-      on("GET", `${cw}/accounts/3/agents`, () => json([])),
+  it("refuses to assign an agent outside the account, which Chatwoot would treat as unassigning", async () => {
+    const { result, requests } = run(
+      { type: "assign", chatwootUserId: 43 },
+      on("GET", `${cw}/accounts/3/agents`, () => json([{ id: 42, name: "Alice Example" }])),
     );
     expect(await result).toBe("❌ That agent is not in this Chatwoot account.");
+    expect(requests.some((request) => request.url.pathname.endsWith("/assignments"))).toBe(false);
   });
 
   it("a public reply to an unassigned conversation assigns it to the sender first", async () => {

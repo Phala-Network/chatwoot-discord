@@ -8,7 +8,7 @@ import type { RelayMessage } from "../src/relay/types.ts";
 
 export const ALICE = "100000000000000011";
 export const BOB = "100000000000000012";
-export const CAROL = "100000000000000013"; // mapped to an email but has no token
+export const CAROL = "100000000000000013"; // linked but has no token
 export const TRIAGE = "100000000000000777";
 export const FORUM = "100000000000000055";
 
@@ -173,9 +173,9 @@ export function testSettings(overrides: Record<string, unknown> = {}): Settings 
       { id: 1, name: "Globex", forumChannelId: FORUM },
     ],
     agents: [
-      { discordUserId: ALICE, email: "Alice@example.com" },
-      { discordUserId: BOB, email: "bob@example.com" },
-      { discordUserId: CAROL, email: "carol@example.com" },
+      { discordUserId: ALICE, chatwootUserId: 42 },
+      { discordUserId: BOB, chatwootUserId: 43 },
+      { discordUserId: CAROL, chatwootUserId: 45 },
     ],
     triage: { userId: TRIAGE, draftLabels: ["Draft"] },
     ...overrides,

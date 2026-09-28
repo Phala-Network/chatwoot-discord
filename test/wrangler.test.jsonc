@@ -18,9 +18,9 @@
         { "id": 1, "name": "Globex", "forumChannelId": "100000000000000055" }
       ],
       "agents": [
-        { "discordUserId": "100000000000000011", "email": "Alice@example.com" },
-        { "discordUserId": "100000000000000012", "email": "bob@example.com" },
-        { "discordUserId": "100000000000000013", "email": "carol@example.com" }
+        { "discordUserId": "100000000000000011", "chatwootUserId": 42 },
+        { "discordUserId": "100000000000000012", "chatwootUserId": 43 },
+        { "discordUserId": "100000000000000013", "chatwootUserId": 45 }
       ],
       "triage": { "userId": "100000000000000777", "draftLabels": ["Draft", "Brouillon"] }
     }

@@ -4,9 +4,9 @@
 // live messages notify; history relayed later (the first sync of an older conversation, a
 // catch-up after downtime) and automatic email replies are posted without them.
 
-import { assigneeTag, fromCustomer } from "./format.ts";
+import { assigneeName, fromCustomer } from "./format.ts";
 import type { RelayStore } from "./relay.ts";
-import type { RelayAssignee, RelayConversation, RelayMessage } from "./types.ts";
+import type { LinkedAgent, RelayConversation, RelayMessage } from "./types.ts";
 
 export interface TriageOptions {
   userId: string;
@@ -18,8 +18,8 @@ export interface TriageOptions {
 interface NotifierOptions {
   store: RelayStore;
   triage?: TriageOptions | undefined;
-  /** The Discord user linked to a Chatwoot assignee, if any. */
-  discordUserFor?: ((assignee: RelayAssignee) => string | undefined) | undefined;
+  /** The agent linked to a Chatwoot user id, if any. */
+  linkedAgent?: ((chatwootUserId: number) => LinkedAgent | undefined) | undefined;
   /** A message created longer ago than this is history. */
   liveSeconds: number;
   now: () => Date;
@@ -81,7 +81,7 @@ export class Notifier {
     // A post adopted from the link attribute has no recorded state, so an unchanged assignee
     // cannot be told apart from a new one: do not ping (its tags are still brought up to date).
     if (recorded?.threadId !== undefined && recorded.state === undefined) return undefined;
-    if (recorded?.announcedAssignee === assigneeTag(conversation)) return undefined;
+    if (recorded?.announcedAssignee === assigneeName(conversation)) return undefined;
     return this.linkedAssignee(conversation);
   }
 
@@ -103,8 +103,8 @@ export class Notifier {
 
   /** The linked Discord user of the conversation's assignee, if any. */
   private linkedAssignee(conversation: RelayConversation): string | undefined {
-    const assignee = conversation.assignee;
-    return assignee?.id ? this.options.discordUserFor?.(assignee) : undefined;
+    const assigneeId = conversation.assignee?.id;
+    return assigneeId ? this.options.linkedAgent?.(assigneeId)?.discordUserId : undefined;
   }
 }
 

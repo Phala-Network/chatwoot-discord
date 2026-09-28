@@ -26,7 +26,7 @@ const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("priority"), priority: prioritySchema.nullable() }),
   z.object({ type: z.literal("block") }),
   z.object({ type: z.literal("unblock") }),
-  z.object({ type: z.literal("assign"), email: z.string() }),
+  z.object({ type: z.literal("assign"), chatwootUserId: z.number().int().positive() }),
   z.object({ type: z.literal("unassign") }),
   /** Adds or removes one label, by its name (Chatwoot's label names are lower-case). */
   z.object({ type: z.literal("label"), change: z.enum(["add", "remove"]), label: z.string().min(1) }),
