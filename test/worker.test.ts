@@ -782,7 +782,7 @@ describe("worker", () => {
     });
   });
 
-  it("drops a job that keeps failing instead of retrying it forever", async () => {
+  it("keeps retrying a job that keeps failing, at most every 30 minutes, so an outage loses nothing", async () => {
     world.conversation(31, [{ id: 3101, content: "hello", message_type: 0 }]);
     world.failConversations = 100;
     await chatwootWebhook(created(31));
@@ -790,17 +790,27 @@ describe("worker", () => {
     expect(await jobAttempts("conversation:3:31")).toBe(1);
 
     await runInDurableObject(hub(), (_instance, state) => {
-      state.storage.sql.exec("UPDATE jobs SET attempts = 9, not_before = 0 WHERE key = 'conversation:3:31'");
+      state.storage.sql.exec("UPDATE jobs SET attempts = 20, not_before = 0 WHERE key = 'conversation:3:31'");
     });
     await setAlarmNow();
     await drain();
-    expect(await jobAttempts("conversation:3:31")).toBeUndefined();
+    expect(await jobAttempts("conversation:3:31")).toBe(21);
+    const due = await runInDurableObject(hub(), (_instance, state) =>
+      state.storage.sql
+        .exec<{ not_before: number }>("SELECT not_before FROM jobs WHERE key = 'conversation:3:31'")
+        .one(),
+    );
+    expect(due.not_before - Date.now()).toBeLessThanOrEqual(30 * 60 * 1000);
 
-    // The next event starts over.
+    // Once Chatwoot answers again, the retry relays the message.
     world.failConversations = 0;
-    await chatwootWebhook(created(31));
+    await runInDurableObject(hub(), (_instance, state) => {
+      state.storage.sql.exec("UPDATE jobs SET not_before = 0 WHERE key = 'conversation:3:31'");
+    });
+    await setAlarmNow();
     await drain();
     expect(world.webhookPosts().at(-1)?.body.content).toBe("hello\n-# <@100000000000000777>");
+    expect(await jobAttempts("conversation:3:31")).toBeUndefined();
   });
 
   it("the sweep queues only conversations whose post is behind or out of date", async () => {
@@ -822,26 +832,37 @@ describe("worker", () => {
     });
   });
 
-  it("the sweep stops at its page limit and continues back from the oldest activity it read", async () => {
+  it("a sweep longer than a run's page limit continues where it stopped, down to its window's start", async () => {
     const start = Math.floor(Date.now() / 1000);
+    // 11 pages of recent conversations; only the last one is behind (a message never relayed).
     const busy = on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations", (request) => {
       const page = Number(request.url.searchParams.get("page"));
-      const payload = Array.from({ length: 25 }, (_, index) => ({
-        id: 50000 + (page - 1) * 25 + index,
-        status: "open",
-        last_activity_at: start - ((page - 1) * 25 + index),
-        messages: [],
-      }));
+      const payload =
+        page > 11
+          ? []
+          : Array.from({ length: 25 }, (_, index) => {
+              const id = 50000 + (page - 1) * 25 + index;
+              return {
+                id,
+                status: "open",
+                last_activity_at: start - id + 50000,
+                messages: id === 50274 ? [{ id: 1 }] : [],
+              };
+            });
       return json({ data: { meta: {}, payload } });
     });
     world.mock.spy.mockRestore();
     world = new World([busy]);
     await sweep();
-    expect(world.sent("GET", /^\/api\/v1\/accounts\/3\/conversations$/)).toHaveLength(10);
-    const watermark = await runInDurableObject(hub(), (_instance, state) =>
-      state.storage.sql.exec<{ value: string }>("SELECT value FROM cache WHERE key = 'sweep:3:last'").one(),
+    const pages = world
+      .sent("GET", /^\/api\/v1\/accounts\/3\/conversations$/)
+      .map((request) => Number(request.url.searchParams.get("page")));
+    expect(pages).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(world.sent("GET", /^\/api\/v1\/accounts\/3\/conversations\/50274$/).length).toBeGreaterThan(0);
+    const cache = await runInDurableObject(hub(), (_instance, state) =>
+      state.storage.sql.exec<{ key: string }>("SELECT key FROM cache WHERE key LIKE 'sweep:3:%'").toArray(),
     );
-    expect(Number(watermark.value)).toBe((start - 249) * 1000);
+    expect(cache.map((row) => row.key)).toEqual(["sweep:3:last"]);
   });
 
   it("closes the post when a command finds its conversation deleted", async () => {
