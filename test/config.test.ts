@@ -31,13 +31,35 @@ describe("configuration", () => {
     const issues = (agents: unknown[]) =>
       configSchema.safeParse({ ...minimal, agents }).error?.issues.map((issue) => issue.message);
     const alice = { discordUserId: "100000000000000011", chatwootUserId: 42 };
-    const bob = { discordUserId: "100000000000000012", chatwootUserId: 43, tag: "Bob" };
+    const bob = { discordUserId: "100000000000000012", chatwootUserId: 43 };
     expect(issues([alice, bob])).toBeUndefined();
+    // Tags are bound by id in forumTags, never by an agent's name.
+    expect(issues([{ ...bob, tag: "Bob" }])).toEqual(['Unrecognized key: "tag"']);
     expect(issues([{ ...alice, email: "alice@example.com" }])).toHaveLength(1);
     expect(issues([{ discordUserId: alice.discordUserId, email: "alice@example.com" }])).toHaveLength(2);
     expect(issues([{ discordUserId: alice.discordUserId }])).toHaveLength(1);
     expect(issues([alice, { ...alice, discordUserId: bob.discordUserId }])).toEqual(["chatwootUserId must be unique"]);
     expect(issues([alice, { ...bob, discordUserId: alice.discordUserId }])).toEqual(["discordUserId must be unique"]);
+  });
+
+  it("binds forum tags by id to what they stand for", () => {
+    const forumTags = (tags: Record<string, string>) =>
+      configSchema.safeParse({ ...minimal, forumTags: { "100000000000000055": tags } }).success;
+    const tag = "100000000000000301";
+    expect(
+      forumTags({
+        "account:3": tag,
+        "status:snoozed": tag,
+        "assignee:none": tag,
+        "assignee:42": tag,
+        "priority:urgent": tag,
+        "topic:Technical support": tag,
+        "label:web3": tag,
+      }),
+    ).toBe(true);
+    expect(forumTags({ "status:closed": tag })).toBe(false);
+    expect(forumTags({ Open: tag })).toBe(false);
+    expect(forumTags({ "status:open": "Open" })).toBe(false);
   });
 
   it("bounds the triage bot's name, which its budget notes repeat", () => {

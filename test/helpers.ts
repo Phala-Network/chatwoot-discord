@@ -80,12 +80,13 @@ export class MemoryStore implements RelayStore {
   }
 }
 
+/** Forum tag ids by what they stand for, like `forumTags` of one forum. */
 export const TAGS: Record<string, string> = {
-  acme: "t-acme",
-  globex: "t-globex",
-  open: "t-open",
-  pending: "t-pending",
-  resolved: "t-resolved",
+  "account:3": "t-acme",
+  "account:1": "t-globex",
+  "status:open": "t-open",
+  "status:pending": "t-pending",
+  "status:resolved": "t-resolved",
 };
 
 type ThreadPatch = { archived: boolean; applied_tags?: string[]; name?: string };
@@ -107,10 +108,7 @@ export class FakeForum implements ForumClient {
   /** Fails the next execution into a thread after this many succeed. */
   failAfter: number | undefined;
 
-  constructor(
-    public tags: Record<string, string> = TAGS,
-    public guildId = "100000000000000044",
-  ) {}
+  constructor(public guildId = "100000000000000044") {}
 
   async execute(_forum: string, payload: WebhookMessage, threadId?: string) {
     if (threadId && this.failAfter !== undefined) {
@@ -145,14 +143,6 @@ export class FakeForum implements ForumClient {
 
   async deleteMessage(_forum: string, _threadId: string, messageId: string) {
     this.deleted.push(messageId);
-  }
-
-  async tagIds(_forum: string, names: ReadonlyArray<string | undefined>) {
-    const ids = names.flatMap((name) => {
-      const id = name === undefined ? undefined : this.tags[name.toLowerCase()];
-      return id ? [id] : [];
-    });
-    return [...new Set(ids)].slice(0, 5);
   }
 
   async threadExists() {

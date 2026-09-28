@@ -9,7 +9,7 @@ import {
   senderName,
   split,
   TITLE_LIMIT,
-  tagNames,
+  tagKeys,
   threadTitle,
   titleSubject,
 } from "../src/relay/format.ts";
@@ -82,23 +82,25 @@ describe("format", () => {
     expect(chatwootMentions("[@Billing](mention://team/7/Billing)", new Map([[7, "592"]]))).toBe("@Billing");
   });
 
-  it("orders tags account, status, assignee, topic, priority, then labels", () => {
+  it("orders tags account, status, assignee, topic, priority, then labels, each by what it stands for", () => {
     const conversation = message({
       conversation: {
         priority: "urgent",
         labels: ["vip", "refund"],
         customAttributes: { topic: "Billing" },
+        assignee: { id: 7, name: "Kim" },
       },
     }).conversation;
-    expect(tagNames("Acme", "Kim", conversation, "topic")).toEqual([
-      "Acme",
-      "open",
-      "Kim",
-      "Billing",
-      "urgent",
-      "vip",
-      "refund",
+    expect(tagKeys(3, conversation, "topic")).toEqual([
+      "account:3",
+      "status:open",
+      "assignee:7",
+      "topic:Billing",
+      "priority:urgent",
+      "label:vip",
+      "label:refund",
     ]);
+    expect(tagKeys(3, message().conversation, "topic")).toEqual(["account:3", "status:open", "assignee:none"]);
   });
 
   it("header shows channel, inbox, email, and the phone number on phone channels", () => {

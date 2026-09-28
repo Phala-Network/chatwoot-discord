@@ -4,7 +4,7 @@ import { Relay, type RelayOptions } from "../src/relay/relay.ts";
 import type { LinkedAgent, RelayAssignee, RelayMessage } from "../src/relay/types.ts";
 import { FakeForum, FORUM, MemoryStore, message, TAGS, TRIAGE } from "./helpers.ts";
 
-function relayWith(options: Partial<RelayOptions> = {}) {
+function relayWith(options: Partial<RelayOptions> = {}, tags: Record<string, string> = TAGS) {
   const forum = options.forum instanceof FakeForum ? options.forum : new FakeForum();
   const store = new MemoryStore();
   const relay = new Relay({
@@ -12,11 +12,7 @@ function relayWith(options: Partial<RelayOptions> = {}) {
     store,
     frontendUrl: "https://chatwoot.example.com/",
     avatars: AVATARS,
-    target: (accountId) => ({
-      forumChannelId: FORUM,
-      name: accountId === 3 ? "Acme" : "Globex",
-      tag: accountId === 3 ? "Acme" : "Globex",
-    }),
+    target: (accountId) => ({ forumChannelId: FORUM, name: accountId === 3 ? "Acme" : "Globex", tags }),
     topicAttribute: "topic",
     maxChunks: 4,
     liveSeconds: 3600,
@@ -182,8 +178,7 @@ describe("Relay", () => {
   });
 
   it("changes the tags of an archived post by unarchiving it in the same update", async () => {
-    const tagged = new FakeForum({ ...TAGS, billing: "t-billing" });
-    ({ relay, forum } = relayWith({ forum: tagged }));
+    ({ relay, forum } = relayWith({}, { ...TAGS, "topic:Billing": "t-billing" }));
     await relay.relay(message({ conversation: resolved }));
     await relay.sync(3, message({ conversation: resolved }).conversation, "thread-1");
     // The topic changes after the post was archived, without a new message.
@@ -210,12 +205,14 @@ describe("Relay", () => {
   });
 
   it("tags the topic and the assignee, at most five tags", async () => {
-    const tagged = new FakeForum({ ...TAGS, unassigned: "t-none", billing: "t-billing", sam: "t-sam" });
-    ({ relay, forum } = relayWith({ forum: tagged }));
+    const tags = { ...TAGS, "assignee:none": "t-none", "topic:Billing": "t-billing", "assignee:8": "t-sam" };
+    ({ relay, forum } = relayWith({}, tags));
     await relay.relay(message({ conversation: { customAttributes: { topic: "Billing" } } }));
     expect(forum.calls[0]?.[1].applied_tags).toEqual(["t-acme", "t-open", "t-none", "t-billing"]);
 
-    const assigned = message({ conversation: { customAttributes: { topic: "Billing" }, assignee: { name: "Sam" } } });
+    const assigned = message({
+      conversation: { customAttributes: { topic: "Billing" }, assignee: { id: 8, name: "Sam" } },
+    });
     await relay.relay({ ...assigned, id: 106, messageType: "activity", content: "Assigned to Sam" });
     await relay.relay({ ...assigned, id: 107, messageType: "outgoing", content: "On it" });
     await relay.sync(3, assigned.conversation, "thread-1");
@@ -224,13 +221,10 @@ describe("Relay", () => {
     ]);
   });
 
-  it("tags a linked agent with their configured tag, whatever their Chatwoot name", async () => {
-    const tagged = new FakeForum({ ...TAGS, kingsley: "t-kingsley", "sam lee": "t-sam", dana: "t-dana" });
-    const agents: Record<number, LinkedAgent> = {
-      7: { discordUserId: "592", tag: "Kingsley" },
-      8: { discordUserId: "593" },
-    };
-    ({ relay, forum } = relayWith({ forum: tagged, linkedAgent: (id) => agents[id] }));
+  it("tags the assignee by Chatwoot user id, linked or not, whatever their name", async () => {
+    const agents: Record<number, LinkedAgent> = { 7: { discordUserId: "592" } };
+    const tagged = { ...TAGS, "assignee:7": "t-kingsley", "assignee:8": "t-sam", "assignee:9": "t-dana" };
+    ({ relay, forum } = relayWith({ linkedAgent: (id) => agents[id] }, tagged));
     const assignedTo = (assignee: RelayAssignee) => message({ conversation: { assignee } }).conversation;
     const tags = async (assignee: RelayAssignee) => {
       await relay.sync(3, assignedTo(assignee), "thread-1");
@@ -238,13 +232,13 @@ describe("Relay", () => {
     };
     await relay.relay(message());
     expect(await tags({ id: 7, name: "Kingsley" })).toEqual(["t-acme", "t-open", "t-kingsley"]);
-    // Renamed in Chatwoot: the configured tag stays, so the post is not synced again.
+    // Renamed in Chatwoot: the tag stays, so the post is not synced again.
     const patches = forum.patches.length;
     expect(await tags({ id: 7, name: "Kingsley Don" })).toEqual(["t-acme", "t-open", "t-kingsley"]);
     expect(forum.patches).toHaveLength(patches);
-    // A linked agent without a tag, and an agent who is not linked, are tagged by Chatwoot name.
+    // An agent who is not linked is tagged by id too; one without a tag in the forum gets none.
     expect(await tags({ id: 8, name: "Sam Lee" })).toEqual(["t-acme", "t-open", "t-sam"]);
-    expect(await tags({ id: 9, name: "Dana" })).toEqual(["t-acme", "t-open", "t-dana"]);
+    expect(await tags({ id: 10, name: "Lee" })).toEqual(["t-acme", "t-open"]);
   });
 
   it("skips templates, empty messages, and deleted messages", async () => {
@@ -683,8 +677,10 @@ describe("Relay", () => {
   });
 
   it("tags priority and labels after the other tags, and syncs when they change", async () => {
-    const tagged = new FakeForum({ ...TAGS, urgent: "t-urgent", vip: "t-vip", refund: "t-refund" });
-    ({ relay, forum } = relayWith({ forum: tagged }));
+    ({ relay, forum } = relayWith(
+      {},
+      { ...TAGS, "priority:urgent": "t-urgent", "label:vip": "t-vip", "label:refund": "t-refund" },
+    ));
     await relay.relay(message({ conversation: { priority: "urgent", labels: ["vip"] } }));
     expect(forum.calls[0]?.[1].applied_tags).toEqual(["t-acme", "t-open", "t-urgent", "t-vip"]);
     await relay.sync(3, message({ conversation: { priority: "urgent", labels: ["vip"] } }).conversation, "thread-1");
