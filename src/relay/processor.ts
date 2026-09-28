@@ -1,6 +1,6 @@
 // Brings one conversation's forum post up to date from Chatwoot's API: relays every message
-// after the stored cursor, in order, then links the post from the conversation and corrects its
-// tags, title, and archived flag.
+// after the stored cursor, in order, then corrects the post's tags, title, and archived flag and
+// links the post from the conversation.
 
 import { type Budget, BudgetExhaustedError } from "../budget.ts";
 import {
@@ -156,8 +156,8 @@ export async function processConversation(
   if (threadId) {
     if (budget.remaining < FINISH_REQUESTS) return "yield";
     if (post?.announcePending) await relay.announceAssignee(accountId, conversation);
-    await linkPost(context, accountId, account.forumChannelId, conversation, threadId);
     await relay.sync(accountId, conversation, threadId);
+    await linkPost(context, accountId, account.forumChannelId, conversation, threadId);
   }
   return "done";
 }
@@ -198,8 +198,8 @@ async function recoverThread(
 
 /**
  * Records the post URL in the conversation's link attribute unless it already points to the
- * post, e.g. after the post was created or recreated. The link is a convenience: failing to
- * record it does not stop the relay, and the next sync tries again.
+ * post, e.g. after the post was created or recreated. It runs last: a failure fails the job,
+ * whose retry (the messages and the post's state are already recorded) only links.
  */
 async function linkPost(
   { settings, chatwoot, forum }: ProcessorContext,
@@ -210,18 +210,9 @@ async function linkPost(
 ): Promise<void> {
   const attribute = settings.config.relay.linkAttribute;
   if (!attribute || threadIdFromUrl(conversation.customAttributes[attribute]) === threadId) return;
-  try {
-    const url = await forum.postUrl(forumChannelId, threadId);
-    await chatwoot.setCustomAttribute(accountId, conversation.id, attribute, url);
-    conversation.customAttributes[attribute] = url;
-  } catch (error) {
-    if (error instanceof BudgetExhaustedError) throw error;
-    log.error("could not link post from conversation", {
-      accountId,
-      conversationId: conversation.id,
-      ...errorFields(error),
-    });
-  }
+  const url = await forum.postUrl(forumChannelId, threadId);
+  await chatwoot.setCustomAttribute(accountId, conversation.id, attribute, url);
+  conversation.customAttributes[attribute] = url;
 }
 
 /** The thread id in a https://discord.com/channels/<guild>/<thread> link. */

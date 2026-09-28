@@ -317,14 +317,15 @@ describe("processConversation", () => {
     });
   });
 
-  it("links the post from its conversation, and tries again on a later sync when that fails", async () => {
+  it("links the post from its conversation, failing the job for a retry when that fails", async () => {
     const world = new World();
     world.messages = [{ id: 1, content: "hello", message_type: 0 }];
     world.failLinks = 1;
     await withStore(async (store) => {
       const settings = testSettings();
-      await sync(store, settings);
+      await expect(sync(store, settings)).rejects.toThrow();
       expect(world.conversation.custom_attributes).toEqual({});
+      // The retry, with no new message, only links.
       await sync(store, settings);
       const link = `https://discord.com/channels/${GUILD}/${store.conversation(3, 12)?.threadId}`;
       expect(world.conversation.custom_attributes).toEqual({ discord_thread: link });
