@@ -20,9 +20,13 @@ attention to:
 - Request authentication: Chatwoot webhook HMAC signatures (`src/chatwoot/webhook.ts`) and Discord
   interaction Ed25519 signatures (`src/index.ts`).
 - Authorization of commands: the Discord user must be linked in config and have their own
-  Chatwoot token; the ticket comes from the stored post mapping (`src/commands/handler.ts`).
+  Chatwoot token, whose user must still belong to the account; the ticket comes from the stored
+  post mapping (`src/commands/handler.ts`, `src/commands/actions.ts`).
 - Outbound requests: attachment downloads are restricted to Discord's CDN
-  (`src/commands/attachments.ts`); Discord messages disable mentions.
+  (`src/commands/attachments.ts`).
+- Mentions: relayed messages set `allowed_mentions` so only linked agents can be pinged (the
+  assignee, and agents mentioned in a private note), and customer text is defused so it cannot
+  mention or pass for relay lines (`src/relay/format.ts`, `src/relay/notify.ts`).
 
 Secrets must only be provided as Worker secrets (or `.dev.vars` locally), never in `wrangler.jsonc`
 or the repository. Logs must not contain message bodies, tokens, or secrets.

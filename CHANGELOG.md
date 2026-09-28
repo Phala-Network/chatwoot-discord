@@ -7,118 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Upgrading: re-register the commands after deploying (`npm run register-commands`), for the new
-`/reply` and `/note` options and the new `/unassign` and `/label` commands. `CONFIG` is now validated strictly: remove any key the
-[configuration reference](README.md#configuration-reference) does not list, including the old
-`discord.applicationId`. Replace each `agents[]` entry's `email` with the agent's
-`chatwootUserId` (see the configuration reference); `CONFIG` with an `email` there is invalid. An
-`/assign` still queued from before the deploy is dropped as unreadable (its invoker sees no
-result). Setting an agent's `tag` re-tags their posts on each post's next sync. On deploy, the database migrates once: posts gain
-two title columns (empty for existing posts, which keep their titles), and the unused
-`deliveries` table is dropped, so versions before 0.2.0 can no longer run on it, and each post's
-record of the assignee it announced is cleared (it held a name, now a Chatwoot user id): each
-existing post records its current assignee on its next live message without pinging them. Each existing
-post's stored state no longer matches its new format, so the next sync of each conversation
-(its next event, or the sweep for recent ones) updates its tags once. Other queued jobs keep working.
-`relay.subrequestBudget` must now be at least `relay.maxChunks` + 24 (the default 45 fits
-`maxChunks` up to 10).
+### Upgrading
+
+- **Breaking:** link agents by Chatwoot user id. Replace each `agents[]` entry's `email` with
+  `chatwootUserId`: the `id` from `GET /api/v1/profile` with the agent's own token, or from an
+  administrator's `GET /api/v1/accounts/<account id>/agents`. `CONFIG` with `email` is invalid.
+- `CONFIG` is validated strictly: remove any key the
+  [configuration reference](README.md#configuration-reference) does not list, including
+  `discord.applicationId`. `relay.subrequestBudget` must be at least `relay.maxChunks` + 24 (the
+  default 45 fits `maxChunks` up to 10), and `triage.name` at most 100 characters.
+- Re-register the commands after deploying (`npm run register-commands`) for the new `/reply` and
+  `/note` options and the new `/unassign` and `/label` commands.
+- On deploy the database migrates once: posts gain title columns (existing posts keep their
+  titles), the unused `deliveries` table is dropped (versions before 0.2.0 can no longer run on
+  it), and each post's announced assignee is cleared (it held a name, now a Chatwoot user id), so
+  each post records its current assignee on its next live message without pinging them. Each
+  post's tags are updated once on its next sync. An `/assign` queued before the deploy is dropped
+  as unreadable (its invoker sees no result); other queued jobs keep working.
 
 ### Added
 
-- The README explains what the service is for, how it works, and its design, with illustrations
-  of the forum and a ticket post (fictional data).
-- `docs/ai-agent.md` describes how to connect an AI agent (triage bot).
-- A Deploy to Cloudflare button in the README, with the steps after deploying.
-- `/reply` and `/note` take optional `message` and `attachment` options that send at once,
-  without the editor; without options they open the editor as before.
-- A reply the channel could not deliver (Chatwoot marks it failed, e.g. outside WhatsApp's
-  24-hour window) gets one ⚠️ notice in its post; `/reply` refuses to send when the conversation's
-  channel does not accept a reply (`can_reply`).
-- Priority and Chatwoot labels become forum tags when a tag of that name exists (after account,
-  status, assignee, and topic; Discord applies at most 5).
-- The post title follows the contact's name (for posts created from this version on).
-- Chatwoot @mentions in messages show as `@name`; a linked agent mentioned in a private note is
-  pinged.
-- Shared contacts and locations are shown instead of being dropped.
+- `/reply` and `/note` take optional `message` and `attachment` options that send at once; without
+  options they open the editor.
+- `/unassign` removes the assignee; `/label add|remove <label>` changes one label.
+- Priority and Chatwoot labels become forum tags when a tag of that name exists.
 - `accounts[].inboxIds` limits an account to some of its inboxes.
-- `agents[].tag` sets a linked agent's assignee tag, so the tag survives a change of their
-  Chatwoot name; without it the assignee tag is still the Chatwoot name.
-- An agent's replies and notes show the agent's own avatar instead of the Chatwoot icon: the
-  Discord avatar of the linked Discord user (`agents[]`, looked up at most once a day per agent),
-  else the agent's Chatwoot avatar. Agent bots, activity lines, cards, and notices keep
-  `avatars.chatwoot`.
+- `agents[].tag` sets a linked agent's assignee tag, independent of their Chatwoot name.
+- An agent's replies and notes show the linked Discord user's avatar (looked up at most once a
+  day), else the agent's Chatwoot avatar.
+- A newly assigned, linked agent is added to the post.
+- A reply the channel could not deliver gets one ⚠️ notice in its post; `/reply` refuses when the
+  channel does not accept a reply (`can_reply`).
+- The post title follows the contact's name (posts created from this version on).
+- Chatwoot @mentions show as `@name`; a linked agent mentioned in a private note is pinged.
+- Shared contacts and locations, Instagram story mentions and reels, `fallback` attachments, LINE
+  stickers, and bots' options, cards, and articles are shown instead of dropped.
+- The ticket card names every Chatwoot channel type and shows the phone number on SMS, Twilio,
+  and WhatsApp.
 - A command dropped because it could not start in time tells the invoker.
-- `/unassign` removes the assignee, and `/label add|remove <label>` changes one label.
-- The ticket card names every Chatwoot channel type and shows the contact's phone number on SMS,
-  Twilio, and WhatsApp.
-- Instagram story mentions and reels, `fallback` attachments, LINE stickers, Telegram shared
-  contacts' names, and bots' options, cards, and articles are shown instead of dropped.
-- README: installing on an existing Chatwoot (`relay.startAfterMessageId`), forum tag limits and
-  the "Require tags" setting.
+- README: purpose, design, illustrations, a Deploy to Cloudflare button, installing on an
+  existing Chatwoot, and forum tag limits; `docs/ai-agent.md` for connecting an AI agent.
 
 ### Changed
 
-- The triage mention and pings go on the last Discord message of a split message, so a bot sees
-  the whole message when it is called.
-- Messages created more than `reconcile.lookbackSeconds` ago (the history relayed when an older
-  conversation gets its post, or a catch-up after downtime) are posted without notifications and
-  do not use the triage budget.
-- Conversation events (`conversation_updated`, `conversation_status_changed`) sync after 10
-  seconds, so the activity message for the change is posted with it.
-- A job that fails 10 times is dropped instead of retrying forever; the sweep and the next event
-  pick its conversation up again. A rate limited job waits as long as Discord asks, without
-  counting an attempt.
+- Notifications are live-only: messages created more than `reconcile.lookbackSeconds` ago
+  (history of an older conversation, a catch-up after downtime) and automatic email replies
+  notify nobody and do not use the triage budget.
+- The triage mention and pings go on the last line of the last Discord message of a split
+  message, so a bot sees the whole message.
+- A new assignee is pinged in a notice of its own after the run's messages, and assignees are
+  told apart by Chatwoot user id, so a rename does not ping again.
+- An email is relayed without the earlier emails it quotes, as Chatwoot forwards it.
+- Conversation events sync after 10 seconds, so the change's activity message comes with them.
 - Only a request Discord refuses as invalid (a 4xx other than 401, 403, 404, 408, 429) counts
   towards skipping a message after `relay.maxAttempts`; rate limits, server errors, timeouts, and
-  missing permissions retry until they succeed.
-- Every outbound request times out after 60 seconds.
-- An email is relayed without the earlier emails it quotes, as Chatwoot forwards it; an
-  automatic reply notifies nobody.
-- A newly assigned agent is pinged in a notice of its own after the assignment's activity line,
-  so two quick reassignments ping the latest assignee after the latest line. Assignees are told
-  apart by Chatwoot user id, so an agent who changes their name is not pinged again. The new
-  assignee is also added to the post (Discord's Add Thread Member), best effort.
-- Customer text cannot call the triage bot or look like a relay notification: mention tokens,
-  `@everyone`, `@here`, and a leading `-#` get a zero-width space.
-- Drafts are read with CommonMark's code fence rules (three or more backticks or tildes, closed
-  by a matching fence), so a draft may contain a code block.
+  missing permissions retry until they succeed. A rate limited job waits as long as Discord asks
+  without counting an attempt, and a job that fails 10 times is dropped (the sweep and the next
+  event pick its conversation up again). Every outbound request times out after 60 seconds.
+- Customer text cannot mention anyone or look like a relay line (mention tokens, `@everyone`,
+  `@here`, and a leading `-#` get a zero-width space).
+- Drafts are read with CommonMark's code fence rules, so a draft may contain a code block.
 - A linked agent whose Chatwoot user left the account is told so instead of "not linked".
-- **Breaking:** `agents[]` links a Discord user to a Chatwoot agent by Chatwoot user id
-  (`{ discordUserId, chatwootUserId }`, both required) instead of email, which the agent can
-  change in their Chatwoot profile. Assignee pings, mentions in private notes, agent avatars, and
-  `/assign` match by id, and the relay no longer reads the account's agent list for them. Each
-  Discord user and each Chatwoot user may be linked once.
+- `wrangler.jsonc` is committed with placeholder `CONFIG` (replacing `wrangler.example.jsonc`),
+  and `package.json` describes each secret for the Cloudflare dashboard.
+- npm replaces Bun (npm 12 pinned in `packageManager`; `allowScripts` limits install scripts to
+  esbuild and workerd); `register-commands` runs with Node's type stripping and takes its options
+  after `--`.
+- TypeScript 7; runtime types come from `wrangler types`; compatibility date 2026-08-15; wrangler
+  4.142.0. `gen:chatwoot` runs openapi-typescript through `npx`.
+
+### Fixed
+
 - A forum tag deleted in Discord since it was cached no longer fails posts: the request is sent
   once more with the tags read again.
-- A sweep that stops at its page limit continues from the oldest activity it read next time.
-- The link attribute is written whenever it does not point to the conversation's post, so a link
-  that could not be written is retried on a later sync.
+- A sweep that stops at its page limit continues from the oldest activity it read.
+- A link attribute that could not be written is retried on a later sync.
 - A command that finds its conversation deleted closes its post.
-- `CONFIG` rejects unknown keys, a `relay.subrequestBudget` too small for `relay.maxChunks`, and
-  a `triage.name` over 100 characters. The budget must fit a run's setup and one message's worst
-  case, at least `relay.maxChunks` + 24 (`src/relay/limits.ts`); budgets that were accepted before
-  but could never relay a message are now rejected.
-- `wrangler.jsonc` is committed with placeholder `CONFIG` (it replaces `wrangler.example.jsonc`);
-  edit it in place, and `npm run deploy` deploys it. `package.json` describes each secret for the
-  Cloudflare dashboard.
-- Runtime types are generated with `wrangler types` (`worker-configuration.d.ts`) instead of the
-  `@cloudflare/workers-types` package, and the compatibility date is 2026-08-15.
-- wrangler 4.142.0.
-- npm replaces Bun as the package manager and script runner (`npm ci`, `npm run <script>`,
-  lockfile `package-lock.json`, npm 12 pinned in `packageManager`): Workers Builds and Dependabot
-  cannot read Bun 1.4's lockfile. `allowScripts` lets only esbuild and workerd run install scripts.
-  `register-commands` runs with Node's type stripping and takes its options after `--`
-  (`npm run register-commands -- --application <app id> --guild <guild id>`).
-- TypeScript 7. `gen:chatwoot` runs openapi-typescript 7.13.0 with TypeScript 5.9.3 through `npx`,
-  since openapi-typescript does not support TypeScript 7; it is no longer a dev dependency.
+- Budgets that could never relay a message are rejected at startup.
 
 ### Removed
 
-- The `deleted-message` job type, queued only by unreleased builds between 0.1.0 and 0.2.0; such
-  a job, if one were still queued, is dropped with a warning like any unknown job.
+- `agents[].email` (use `chatwootUserId`) and the ignored `discord.applicationId` key.
 - The unused `deliveries` table.
-- `agents[].email`: link agents with `chatwootUserId`.
-- The ignored `discord.applicationId` key: `CONFIG` with it is invalid.
+- The `deleted-message` job type of unreleased builds; such a job is dropped with a warning.
 
 ## [0.2.0] - 2026-09-27
 

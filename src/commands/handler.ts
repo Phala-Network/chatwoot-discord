@@ -22,7 +22,7 @@ import { filesTooLarge, fileTooLarge, isDiscordAttachmentUrl, NOT_LINKED, UserEr
 import { CONTENT_MAX, REPLY_WITH_THIS } from "./definitions.ts";
 import { type AttachmentRef, type CommandAction, type CommandJob, prioritySchema } from "./job.ts";
 
-export interface Ticket {
+interface Ticket {
   accountId: number;
   conversationId: number;
 }

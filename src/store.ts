@@ -32,9 +32,8 @@ export const MIGRATIONS: string[] = [
    CREATE TABLE cache (key TEXT PRIMARY KEY, value TEXT NOT NULL, expires_at INTEGER);`,
   // posted_messages checkpoints relaying (a retry resumes after the parts already posted) and
   // finds the Discord messages to delete when a message is deleted in Chatwoot.
-  // announced_assignee starts from the assignee field of the stored state, which was used for
-  // this before. Webhook deliveries are no longer deduplicated; the table is emptied (and
-  // dropped by a later migration).
+  // announced_assignee is seeded from the assignee in the stored state. deliveries (webhooks are
+  // not deduplicated) is emptied here and dropped in migration 4.
   `CREATE TABLE posted_messages (
      account_id INTEGER NOT NULL,
      conversation_id INTEGER NOT NULL,
@@ -58,15 +57,13 @@ export const MIGRATIONS: string[] = [
      PRIMARY KEY (account_id, conversation_id, message_id)
    );`,
   // title_subject and title keep what a post's title ends with and the title last applied, so
-  // the title can follow the contact's name; posts made before this stay as they are (NULL).
-  // deliveries has been unused since 0.2.0, which only emptied it; 0.1.0, the last version that
-  // read it, can no longer run on this database.
+  // the title can follow the contact's name; older posts keep their title (NULL).
   `ALTER TABLE conversations ADD COLUMN title_subject TEXT;
    ALTER TABLE conversations ADD COLUMN title TEXT;
    DROP TABLE IF EXISTS deliveries;`,
-  // announced_assignee holds the announced assignee's Chatwoot user id instead of their name.
-  // Names cannot be turned into ids, so every record is cleared: a post without one records its
-  // current assignee without pinging them (see Notifier#newAssignee).
+  // announced_assignee holds a Chatwoot user id, not a name. Names cannot be turned into ids, so
+  // every record is cleared: such a post records its assignee without pinging them
+  // (see Notifier#newAssignee).
   `UPDATE conversations SET announced_assignee = NULL;`,
 ];
 

@@ -25,6 +25,7 @@ const INBOX_CACHE_MS = 24 * 60 * 60 * 1000;
 const AVATAR_CACHE_MS = 24 * 60 * 60 * 1000;
 /** After a failed avatar lookup, the agent's Chatwoot avatar is used this long before trying again. */
 const AVATAR_RETRY_MS = 60 * 60 * 1000;
+
 /** The relay as configured by `settings`. */
 export function relayFor(settings: Settings, forum: ForumClient, store: RelayStore): Relay {
   const triageUserId = settings.config.triage.userId;
