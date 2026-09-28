@@ -204,6 +204,7 @@ export interface Recorded {
   method: string;
   url: URL;
   headers: Headers;
+  redirect: Request["redirect"];
   body: string;
   form: FormData | undefined;
 }
@@ -224,6 +225,7 @@ export function mockFetch(...routes: Route[]) {
       method: request.method,
       url: new URL(request.url),
       headers: request.headers,
+      redirect: request.redirect,
       body: form ? "" : await request.text(),
       form,
     };

@@ -143,7 +143,9 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
   const client = createClient<paths>({
     baseUrl: baseUrl.replace(/\/+$/, ""),
     headers: { api_access_token: token },
-    fetch,
+    // A redirect is an error, never followed: it could carry the token to another host, and each
+    // hop would be a subrequest the budget does not count. Configure Chatwoot's final URL.
+    fetch: (request) => fetch(new Request(request, { redirect: "manual" })),
   });
 
   async function data<T>(operation: string, pending: Promise<{ data?: T; response: Response }>): Promise<T> {

@@ -236,6 +236,21 @@ describe("executeCommand", () => {
     expect(requests.map((request) => request.url.pathname)).toEqual(["/api/v1/profile"]);
   });
 
+  it("fails on a redirect from Chatwoot instead of following it with the agent's token", async () => {
+    const { requests } = mockFetch(
+      on(
+        "GET",
+        `${cw}/profile`,
+        () => new Response(null, { status: 301, headers: { location: "https://evil.example/" } }),
+      ),
+    );
+    const { content } = await executeCommand(job({ type: "block" }), settings, (request) => fetch(request));
+    expect(content).toBe("❌ That did not work. Please do it in Chatwoot.");
+    expect(requests.map((request) => [request.url.hostname, request.redirect])).toEqual([
+      ["chatwoot.example.com", "manual"],
+    ]);
+  });
+
   it("refuses a queued command once its invoker is no longer linked", async () => {
     const unlinked = testSettings({ agents: [{ discordUserId: BOB, chatwootUserId: 43 }] });
     const { requests } = mockFetch(profile);

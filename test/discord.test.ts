@@ -187,6 +187,19 @@ describe("DiscordForum", () => {
 });
 
 describe("DiscordRest", () => {
+  it("fails on a redirect instead of following it with the bot token", async () => {
+    const { requests } = mockFetch(
+      on(
+        "GET",
+        `${api}/channels/55`,
+        () => new Response(null, { status: 302, headers: { location: "https://evil.example/" } }),
+      ),
+    );
+    const rest = new DiscordRest("bot-token", (request) => fetch(request));
+    await expect(rest.get("/channels/55")).rejects.toBeInstanceOf(DiscordHttpError);
+    expect(requests.map((request) => [request.url.hostname, request.redirect])).toEqual([["discord.com", "manual"]]);
+  });
+
   it("waits for retry_after on 429 and retries", async () => {
     let calls = 0;
     mockFetch(
