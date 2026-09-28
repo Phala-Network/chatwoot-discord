@@ -211,14 +211,7 @@ describe("interaction handler", () => {
   });
 
   it("submitting a reply defers a job that sends as the invoker", async () => {
-    const legacy = interaction({
-      type: 5,
-      data: {
-        custom_id: "reply",
-        components: [{ type: 1, components: [{ type: 4, custom_id: "content", value: " Thanks! " }] }],
-      },
-    });
-    const { response, job } = await handleInteraction(legacy, deps);
+    const { response, job } = await handleInteraction(submission("reply", " Thanks! "), deps);
     expect(response).toEqual({ type: 5, data: { flags: MessageFlags.Ephemeral } });
     expect(job).toMatchObject({
       discordUserId: ALICE,
@@ -324,10 +317,10 @@ describe("interaction handler", () => {
   it("/assign defaults to the invoker and maps other Discord users", async () => {
     expect((await handleInteraction(interaction({ name: "assign" }), deps)).job?.action).toEqual({
       type: "assign",
-      email: "alice@example.com",
+      chatwootUserId: 42,
     });
     const other = interaction({ name: "assign", options: [{ name: "agent", type: 6, value: BOB }] });
-    expect((await handleInteraction(other, deps)).job?.action).toEqual({ type: "assign", email: "bob@example.com" });
+    expect((await handleInteraction(other, deps)).job?.action).toEqual({ type: "assign", chatwootUserId: 43 });
     const stranger = interaction({
       name: "assign",
       options: [{ name: "agent", type: 6, value: "100000000000000042" }],
@@ -364,7 +357,7 @@ describe("interaction handler", () => {
     expect(
       privateText(await handleInteraction(interaction({ name: "resolve", user: "100000000000000099" }), deps)),
     ).toBe(notLinked);
-    // Mapped to an email but without a Chatwoot token secret.
+    // Linked but without a Chatwoot token secret.
     expect(privateText(await handleInteraction(interaction({ name: "resolve", user: CAROL }), deps))).toBe(notLinked);
     // The ticket comes from the relay's mapping, never from the post title.
     expect(

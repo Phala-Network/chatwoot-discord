@@ -51,7 +51,8 @@ export async function handleInteraction(interaction: APIInteraction, deps: Handl
     if (!ticket || !account) return privately("Use this command inside a ticket post in the Chatwoot forum.");
 
     const userId = invokerId(interaction);
-    if (!userId || !deps.settings.agentEmail(userId) || !deps.settings.agentToken(userId)) return privately(NOT_LINKED);
+    if (!userId || !deps.settings.chatwootUserFor(userId) || !deps.settings.agentToken(userId))
+      return privately(NOT_LINKED);
 
     const context: Context = {
       deps,
@@ -113,9 +114,9 @@ function command(context: Context, interaction: APIApplicationCommandInteraction
       const option =
         data.type === ApplicationCommandType.ChatInput ? data.options?.find((o) => o.name === "agent") : undefined;
       const target = option && "value" in option ? String(option.value) : context.userId;
-      const email = context.deps.settings.agentEmail(target);
-      if (!email) throw new UserError("That Discord user is not linked to a Chatwoot agent.");
-      return defer(context, { type: "assign", email });
+      const chatwootUserId = context.deps.settings.chatwootUserFor(target);
+      if (chatwootUserId === undefined) throw new UserError("That Discord user is not linked to a Chatwoot agent.");
+      return defer(context, { type: "assign", chatwootUserId });
     }
     default:
       return privately("Unknown command.");
@@ -192,10 +193,9 @@ function submit(context: Context, interaction: APIModalSubmitInteraction): Handl
   const kind = interaction.data.custom_id.split(":", 1)[0];
   if (kind !== "reply" && kind !== "note") throw new UserError("Unknown form.");
 
-  const inputs = interaction.data.components.flatMap((component) => {
-    if (component.type === ComponentType.Label) return [component.component];
-    return component.type === ComponentType.ActionRow ? component.components : [];
-  });
+  const inputs = interaction.data.components.flatMap((component) =>
+    component.type === ComponentType.Label ? [component.component] : [],
+  );
   // Ids are "<name>:<nonce>" (see `editor`).
   const input = (name: string) => inputs.find((component) => component.custom_id.split(":", 1)[0] === name);
   const text = input("content");

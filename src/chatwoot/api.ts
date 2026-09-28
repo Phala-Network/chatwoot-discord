@@ -386,7 +386,7 @@ export function toRelayConversation(conversationId: number, conversation: Chatwo
       blocked: meta?.sender?.blocked ?? false,
       avatarUrl: meta?.sender?.thumbnail ?? null,
     },
-    assignee: assignee ? { id: assignee.id, name: assignee.name, email: assignee.email } : null,
+    assignee: assignee ? { id: assignee.id, name: assignee.name } : null,
     customAttributes: conversation.custom_attributes ?? {},
   };
 }

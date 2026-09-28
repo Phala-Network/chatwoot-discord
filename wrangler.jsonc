@@ -23,8 +23,8 @@
         { "id": 2, "name": "Globex", "forumChannelId": "100000000000000002", "tag": "Globex" }
       ],
       "agents": [
-        { "discordUserId": "100000000000000011", "email": "alice@example.com" },
-        { "discordUserId": "100000000000000012", "email": "bob@example.com" }
+        { "discordUserId": "100000000000000011", "chatwootUserId": 1, "tag": "Alice" },
+        { "discordUserId": "100000000000000012", "chatwootUserId": 2 }
       ],
       "triage": { "userId": "100000000000000021", "name": "Triage bot", "draftLabels": ["Draft"] },
       "relay": { "maxChunks": 4, "topicAttribute": "topic", "linkAttribute": "discord_thread" }

@@ -224,17 +224,20 @@ while the conversation is resolved.
   fallback and tries again an hour later. Agent bots keep `avatars.chatwoot`.
 - Tags are matched by name, case-insensitively. Discord applies at most 5 per post, taken in
   this order: account, status, assignee, topic, priority, then labels. The assignee tag is the
-  agent's Chatwoot `name`; the topic tag is the conversation's `topic` custom attribute
-  (`relay.topicAttribute`). A resolved conversation's post is archived; any other status
+  linked agent's `tag` (`agents[]`), else the agent's Chatwoot `name`; the topic tag is the
+  conversation's `topic` custom attribute (`relay.topicAttribute`). A resolved conversation's post is archived; any other status
   unarchives it. The forum's tags are read at most every 10 minutes; when Discord refuses a
   request because a tag was deleted since, it is sent again with the tags read anew.
 - The post title follows the contact's name when it changes (on the conversation's next sync);
   posts adopted from another relay or created by earlier versions keep their title.
-- A newly assigned agent who is linked in `agents[]` is pinged once, in a `-# Assigned to @name`
-  notice after the live messages that came with the assignment (after the last one, when the
-  conversation was reassigned several times in a row). After that, every customer message pings
-  the linked assignee, on the same line as the triage mention. A linked agent @mentioned in a private note is pinged there; other Chatwoot mentions
-  show as `@name`. Nothing else pings anyone.
+- A newly assigned agent who is linked in `agents[]` is pinged once (a change of their Chatwoot
+  name does not count as a new assignment), in a `-# Assigned to @name` notice after the live
+  messages that came with the assignment (after the last one, when the conversation was
+  reassigned several times in a row), and is added to the post, so it shows in their thread list
+  (if Discord refuses, e.g. they left the server, only a warning is logged). After that, every
+  customer message pings the linked assignee, on the same line as the triage mention. A linked
+  agent @mentioned in a private note is pinged there; other Chatwoot mentions show as `@name`.
+  Nothing else pings anyone.
 - Notification lines (the triage mention, pings, budget notes) go on the last Discord message of
   a split message, so a bot they call sees all of it. Only live messages carry them: messages
   created more than `reconcile.lookbackSeconds` ago (the history of an older conversation, or a
@@ -281,7 +284,7 @@ replace:
 | `chatwoot.baseUrl` | required | Chatwoot base URL for API calls. |
 | `chatwoot.publicUrl` | `baseUrl` | Base URL for dashboard links posted in Discord. |
 | `accounts[]` | required | `{ id, name, forumChannelId, tag?, inboxIds? }`: Chatwoot account id, the name shown in titles and confirmations, its forum, its forum tag (default `name`), and the inboxes to relay (default: all). Accounts may share a forum. |
-| `agents[]` | `[]` | `{ discordUserId, email }`: links Discord users to Chatwoot agents (commands, assignee pings, `/assign` targets, and the Discord avatar on the agent's messages). |
+| `agents[]` | `[]` | `{ discordUserId, chatwootUserId, tag? }`: links Discord users to Chatwoot agents (commands, assignee pings, mentions in private notes, `/assign` targets, and the Discord avatar on the agent's messages). `chatwootUserId` is the agent's Chatwoot user id, the same in every account: the `id` from `GET /api/v1/profile` with the agent's own access token, or from an administrator's `GET /api/v1/accounts/<account id>/agents`. Each Discord user and each Chatwoot user may be linked once. `tag` is the forum tag of the agent's posts (default: their Chatwoot `name`, which they can change). |
 | `triage.userId` | unset | Discord user id of an AI agent (triage bot) to mention on customer messages. |
 | `triage.name` | `Triage bot` | Name used in budget notes (at most 100 characters). |
 | `triage.perConversationPerHour` / `perHour` | `5` / `30` | Mention budgets. |

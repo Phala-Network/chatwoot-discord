@@ -30,12 +30,12 @@ describe("Store", () => {
 
       const store = new Store(sql);
       store.migrate();
-      // The assignee a post announced was the assignee field of its state.
+      // Announced assignees were recorded by name, which cannot be turned into an id: cleared.
       expect(store.conversation(3, 12)).toEqual({
         threadId: "100000000000000101",
         state: "resolved|Kim Lee|billing",
         cursor: 500,
-        announcedAssignee: "Kim Lee",
+        announcedAssignee: undefined,
         titleSubject: undefined,
         title: undefined,
       });

@@ -64,12 +64,14 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
         break;
       }
       case "assign": {
+        // Chatwoot assigns a user who is not an agent of the account as no one (it unassigns:
+        // Conversations::AssignmentService at v4.18.0), so membership is checked first.
         const agents = await chatwoot.listAgents(accountId);
-        const assignee = agents.find((agent) => agent.email?.toLowerCase() === action.email);
-        if (assignee?.id === undefined) throw new UserError("That agent is not in this Chatwoot account.");
-        await chatwoot.assign(accountId, conversationId, assignee.id);
+        const assignee = agents.find((agent) => agent.id === action.chatwootUserId);
+        if (!assignee) throw new UserError("That agent is not in this Chatwoot account.");
+        await chatwoot.assign(accountId, conversationId, action.chatwootUserId);
         // The name Chatwoot shows as the assignee, which is also the post's assignee tag.
-        message = `Assigned to ${assignee.name ?? action.email}.`;
+        message = `Assigned to ${assignee.name ?? "the agent"}.`;
         break;
       }
       case "unassign":

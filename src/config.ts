@@ -9,12 +9,11 @@ import { minimumBudget } from "./relay/limits.ts";
 const DEFAULT_CONTACT_AVATAR = "https://gravatar.com/avatar/?d=mp&f=y&s=256";
 
 const snowflake = z.string().regex(/^\d{17,20}$/, "must be a Discord snowflake id");
+const unique = <T>(values: T[]) => new Set(values).size === values.length;
 const MB = 1024 * 1024;
 
 export const configSchema = z
   .strictObject({
-    /** Removed in 0.2.0 (`discord.applicationId` is no longer needed); accepted and ignored. */
-    discord: z.unknown().optional(),
     chatwoot: z.strictObject({
       /** Base URL for Chatwoot's REST API, e.g. https://chatwoot.example.com */
       baseUrl: z.url({ protocol: /^https?$/ }),
@@ -35,17 +34,25 @@ export const configSchema = z
         }),
       )
       .min(1)
-      .refine((accounts) => new Set(accounts.map((account) => account.id)).size === accounts.length, {
+      .refine((accounts) => unique(accounts.map((account) => account.id)), {
         message: "account ids must be unique",
       }),
     agents: z
       .array(
         z.strictObject({
           discordUserId: snowflake,
-          /** The Chatwoot agent's email. Used to ping assignees and to resolve /assign targets. */
-          email: z.email(),
+          /** The Chatwoot agent's user id, which (unlike their email) they cannot change. */
+          chatwootUserId: z.number().int().positive(),
+          /** Forum tag of the agent's posts. Default: their Chatwoot name, which they can change. */
+          tag: z.string().min(1).optional(),
         }),
       )
+      .refine((agents) => unique(agents.map((agent) => agent.discordUserId)), {
+        message: "discordUserId must be unique",
+      })
+      .refine((agents) => unique(agents.map((agent) => agent.chatwootUserId)), {
+        message: "chatwootUserId must be unique",
+      })
       .default([]),
     triage: z
       .strictObject({
@@ -116,11 +123,11 @@ export const configSchema = z
   .refine((config) => config.relay.subrequestBudget >= minimumBudget(config.relay.maxChunks), {
     path: ["relay", "subrequestBudget"],
     message: "must fit a run's setup and one message of relay.maxChunks parts (see src/relay/limits.ts)",
-  })
-  .transform(({ discord: _removed, ...config }) => config);
+  });
 
 type Config = z.infer<typeof configSchema>;
 type AccountConfig = Config["accounts"][number];
+type AgentConfig = Config["agents"][number];
 
 /** Whether conversations of `inboxId` are relayed for the account (see `inboxIds`). */
 export function relaysInbox(account: AccountConfig, inboxId: number | undefined): boolean {
@@ -158,10 +165,10 @@ export interface Settings {
   frontendUrl: string;
   avatars: { chatwoot: string; contact: string };
   account(id: number): AccountConfig | undefined;
-  /** Discord user id -> agent email (lower-cased). */
-  agentEmail(discordUserId: string): string | undefined;
-  /** Agent email -> Discord user id. */
-  discordUserForEmail(email: string | null | undefined): string | undefined;
+  /** Discord user id -> the linked agent's Chatwoot user id. */
+  chatwootUserFor(discordUserId: string): number | undefined;
+  /** Chatwoot user id -> the linked agent. */
+  linkedAgent(chatwootUserId: number | null | undefined): AgentConfig | undefined;
   agentToken(discordUserId: string): string | undefined;
 }
 
@@ -198,8 +205,8 @@ export function loadSettings(env: Env): Settings {
 
 export function buildSettings(config: Config, secrets: Secrets): Settings {
   const accounts = new Map(config.accounts.map((account) => [account.id, account]));
-  const emails = new Map(config.agents.map((agent) => [agent.discordUserId, agent.email.toLowerCase()]));
-  const discordByEmail = new Map(config.agents.map((agent) => [agent.email.toLowerCase(), agent.discordUserId]));
+  const chatwootUsers = new Map(config.agents.map((agent) => [agent.discordUserId, agent.chatwootUserId]));
+  const linkedAgents = new Map(config.agents.map((agent) => [agent.chatwootUserId, agent]));
   const frontendUrl = config.chatwoot.publicUrl ?? config.chatwoot.baseUrl;
   return {
     config,
@@ -211,8 +218,8 @@ export function buildSettings(config: Config, secrets: Secrets): Settings {
       contact: config.avatars.contact,
     },
     account: (id) => accounts.get(id),
-    agentEmail: (discordUserId) => emails.get(discordUserId),
-    discordUserForEmail: (email) => (email ? discordByEmail.get(email.toLowerCase()) : undefined),
+    chatwootUserFor: (discordUserId) => chatwootUsers.get(discordUserId),
+    linkedAgent: (chatwootUserId) => (chatwootUserId == null ? undefined : linkedAgents.get(chatwootUserId)),
     agentToken: (discordUserId) => secrets.CHATWOOT_AGENT_TOKENS[discordUserId],
   };
 }

@@ -8,7 +8,7 @@ import type { RelayMessage } from "../src/relay/types.ts";
 
 export const ALICE = "100000000000000011";
 export const BOB = "100000000000000012";
-export const CAROL = "100000000000000013"; // mapped to an email but has no token
+export const CAROL = "100000000000000013"; // linked but has no token
 export const TRIAGE = "100000000000000777";
 export const FORUM = "100000000000000055";
 
@@ -100,6 +100,9 @@ export class FakeForum implements ForumClient {
   patches: Array<[string, ThreadPatch]> = [];
   deleted: string[] = [];
   archived = new Set<string>();
+  /** Users added to posts, as [threadId, userId]. */
+  members: Array<[string, string]> = [];
+  failAddMember = false;
   failThreadWith: "gone" | "error" | undefined;
   /** Fails the next execution into a thread after this many succeed. */
   failAfter: number | undefined;
@@ -160,6 +163,13 @@ export class FakeForum implements ForumClient {
     return `https://discord.com/channels/${this.guildId}/${threadId}`;
   }
 
+  async addMember(threadId: string, userId: string) {
+    if (this.failAddMember) throw new Error("Discord HTTP 403: Missing Access");
+    // Like Discord, which requires the post not to be archived.
+    if (this.archived.has(threadId)) throw new Error("Discord HTTP 400: Thread is archived");
+    this.members.push([threadId, userId]);
+  }
+
   contents(): string[] {
     return this.calls.map(([, payload]) => payload.content ?? "");
   }
@@ -173,9 +183,9 @@ export function testSettings(overrides: Record<string, unknown> = {}): Settings 
       { id: 1, name: "Globex", forumChannelId: FORUM },
     ],
     agents: [
-      { discordUserId: ALICE, email: "Alice@example.com" },
-      { discordUserId: BOB, email: "bob@example.com" },
-      { discordUserId: CAROL, email: "carol@example.com" },
+      { discordUserId: ALICE, chatwootUserId: 42 },
+      { discordUserId: BOB, chatwootUserId: 43 },
+      { discordUserId: CAROL, chatwootUserId: 45 },
     ],
     triage: { userId: TRIAGE, draftLabels: ["Draft"] },
     ...overrides,

@@ -74,13 +74,6 @@ class World {
         return json({});
       }),
       on("GET", `${base}/inboxes/2`, () => json({ id: 2, name: "Web" })),
-      on("GET", `${base}/agents`, () =>
-        json([
-          { id: 42, name: "Alice", email: "alice@example.com" },
-          { id: 43, name: "Bob", email: "bob@example.com" },
-          { id: 44, name: "Dana", email: "dana@example.com" },
-        ]),
-      ),
       on("GET", `discord.com/api/v10/channels/${FORUM}/webhooks`, () =>
         json([{ id: "1", token: "tok", type: 1, name: "Chatwoot" }]),
       ),
@@ -101,6 +94,11 @@ class World {
           ? json({ id, username: "agent", ...user })
           : json({ message: "Unknown User", code: 10013 }, { status: 404 });
       }),
+      on(
+        "PUT",
+        /^discord\.com\/api\/v10\/channels\/\d+\/thread-members\/\d+$/,
+        () => new Response(null, { status: 204 }),
+      ),
       on("POST", "discord.com/api/v10/webhooks/1/tok", (request) => {
         const thread = request.url.searchParams.get("thread_id");
         if (thread && this.threadFailure) return this.threadFailure();
@@ -348,7 +346,8 @@ describe("processConversation", () => {
       await sync(store, settings);
       world.conversation.meta = {
         ...Object(world.conversation.meta),
-        assignee: { id: 43, name: "Bob", email: "bob@example.com" },
+        // Linked by Chatwoot user id: an email changed in Chatwoot does not matter.
+        assignee: { id: 43, name: "Bob", email: "robert@example.org" },
       };
       world.messages.push(
         { id: 2, content: "Assigned to Alice by Sam", message_type: 2, created_at: now() - 8 },
@@ -364,6 +363,8 @@ describe("processConversation", () => {
         ["_Assigned to Bob by Sam_", { parse: [] }],
         [`-# Assigned to <@${BOB}>`, { parse: [], users: [BOB] }],
       ]);
+      // The new assignee is added to the post, once.
+      expect(world.sent("PUT", `/thread-members/${BOB}`)).toHaveLength(1);
     });
   });
 
@@ -498,7 +499,7 @@ describe("processConversation", () => {
     });
   });
 
-  it("pings linked agents mentioned in private notes, reading the account's agents once", async () => {
+  it("pings linked agents mentioned in private notes by their Chatwoot user id", async () => {
     const world = new World();
     world.messages = [
       { id: 1, content: "[@Bob](mention://user/43/Bob) can you check?", message_type: 1, private: true },
@@ -523,7 +524,7 @@ describe("processConversation", () => {
         // Chatwoot notifies mentions in private notes only.
         ["@Bob in a reply", { parse: [] }],
       ]);
-      expect(world.sent("GET", "/agents")).toHaveLength(1);
+      expect(world.sent("GET", "/agents")).toEqual([]);
     });
   });
 });

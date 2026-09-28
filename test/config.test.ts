@@ -7,12 +7,9 @@ const minimal = {
 };
 
 describe("configuration", () => {
-  it("still accepts the removed discord.applicationId key", () => {
-    const config = configSchema.parse({ ...minimal, discord: { applicationId: "100000000000000001" } });
-    expect(config).not.toHaveProperty("discord");
-  });
-
   it("rejects unknown keys, so a typo does not silently fall back to a default", () => {
+    // Including the discord.applicationId key that 0.2.0 removed.
+    expect(configSchema.safeParse({ ...minimal, discord: { applicationId: "1" } }).success).toBe(false);
     expect(configSchema.safeParse({ ...minimal, relay: { maxChunk: 2 } }).success).toBe(false);
     expect(configSchema.safeParse({ ...minimal, triages: {} }).success).toBe(false);
     const account = { ...minimal.accounts[0], forumChannel: "100000000000000002" };
@@ -28,6 +25,19 @@ describe("configuration", () => {
     expect(result.error?.issues.map((issue) => issue.path.join("."))).toEqual(["relay.subrequestBudget"]);
     expect(budget(33).success).toBe(false);
     expect(budget(34).success).toBe(true);
+  });
+
+  it("links agents by Chatwoot user id, each Discord and Chatwoot user once", () => {
+    const issues = (agents: unknown[]) =>
+      configSchema.safeParse({ ...minimal, agents }).error?.issues.map((issue) => issue.message);
+    const alice = { discordUserId: "100000000000000011", chatwootUserId: 42 };
+    const bob = { discordUserId: "100000000000000012", chatwootUserId: 43, tag: "Bob" };
+    expect(issues([alice, bob])).toBeUndefined();
+    expect(issues([{ ...alice, email: "alice@example.com" }])).toHaveLength(1);
+    expect(issues([{ discordUserId: alice.discordUserId, email: "alice@example.com" }])).toHaveLength(2);
+    expect(issues([{ discordUserId: alice.discordUserId }])).toHaveLength(1);
+    expect(issues([alice, { ...alice, discordUserId: bob.discordUserId }])).toEqual(["chatwootUserId must be unique"]);
+    expect(issues([alice, { ...bob, discordUserId: alice.discordUserId }])).toEqual(["discordUserId must be unique"]);
   });
 
   it("bounds the triage bot's name, which its budget notes repeat", () => {

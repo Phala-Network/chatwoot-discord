@@ -85,13 +85,12 @@ describe("format", () => {
   it("orders tags account, status, assignee, topic, priority, then labels", () => {
     const conversation = message({
       conversation: {
-        assignee: { name: "Kim" },
         priority: "urgent",
         labels: ["vip", "refund"],
         customAttributes: { topic: "Billing" },
       },
     }).conversation;
-    expect(tagNames("Acme", conversation, "topic")).toEqual([
+    expect(tagNames("Acme", "Kim", conversation, "topic")).toEqual([
       "Acme",
       "open",
       "Kim",
