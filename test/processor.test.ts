@@ -76,8 +76,9 @@ class World {
         return json({});
       }),
       on("GET", `${base}/inboxes/2`, () => json({ id: 2, name: "Web" })),
+      on("GET", "discord.com/api/v10/applications/@me", () => json({ id: "100000000000000001" })),
       on("GET", `discord.com/api/v10/channels/${FORUM}/webhooks`, () =>
-        json([{ id: "1", token: "tok", type: 1, name: "Chatwoot" }]),
+        json([{ id: "1", token: "tok", type: 1, name: "Chatwoot", application_id: "100000000000000001" }]),
       ),
       on("GET", `discord.com/api/v10/channels/${FORUM}`, () =>
         json({ id: FORUM, guild_id: GUILD, available_tags: [] }),

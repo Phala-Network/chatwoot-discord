@@ -23,8 +23,8 @@ describe("configuration", () => {
     const result = budget(25);
     expect(result.success).toBe(false);
     expect(result.error?.issues.map((issue) => issue.path.join("."))).toEqual(["relay.subrequestBudget"]);
-    expect(budget(34).success).toBe(false);
-    expect(budget(35).success).toBe(true);
+    expect(budget(35).success).toBe(false);
+    expect(budget(36).success).toBe(true);
   });
 
   it("links agents by Chatwoot user id, each Discord and Chatwoot user once", () => {

@@ -130,8 +130,9 @@ class World {
         const all = [...this.conversations.values()].map((c) => this.conversationJson(c));
         return json({ data: { meta: {}, payload: request.url.searchParams.get("page") === "1" ? all : [] } });
       }),
+      on("GET", "discord.com/api/v10/applications/@me", () => json({ id: "100000000000000001" })),
       on("GET", `discord.com/api/v10/channels/${FORUM}/webhooks`, () =>
-        json([{ id: "1", token: "tok", type: 1, name: "Chatwoot" }]),
+        json([{ id: "1", token: "tok", type: 1, name: "Chatwoot", application_id: "100000000000000001" }]),
       ),
       on("GET", `discord.com/api/v10/channels/${FORUM}`, () =>
         json({

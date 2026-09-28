@@ -6,6 +6,7 @@ import {
   type RESTDeleteAPIWebhookWithTokenMessageResult,
   type RESTGetAPIChannelResult,
   type RESTGetAPIChannelWebhooksResult,
+  type RESTGetCurrentApplicationResult,
   type RESTPatchAPIChannelJSONBody,
   type RESTPatchAPIChannelResult,
   type RESTPostAPIChannelWebhookJSONBody,
@@ -28,6 +29,7 @@ const TAG_CACHE_MS = 10 * 60 * 1000;
 const UNKNOWN_WEBHOOK = 10015;
 const UNKNOWN_MESSAGE = 10008;
 const UNKNOWN_TAG = 10087;
+const APPLICATION_KEY = "discord:application";
 
 export interface Cache {
   get(key: string): string | undefined;
@@ -140,14 +142,19 @@ export class DiscordForum implements ForumClient {
     await this.rest.put<RESTPutAPIChannelThreadMembersResult, never>(Routes.threadMembers(threadId, userId), {});
   }
 
-  /** Reuses the forum's "Chatwoot" webhook, or creates it. */
+  /**
+   * Reuses the forum's incoming webhook this application created, or creates it. A webhook is
+   * recognized by its creator's application id, not its name: another integration's webhook of
+   * the same name is never used.
+   */
   private async webhook(forumChannelId: string): Promise<{ id: string; token: string }> {
     const key = webhookKey(forumChannelId);
     const [id, token] = this.cache.get(key)?.split(":") ?? [];
     if (id && token) return { id, token };
+    const applicationId = await this.applicationId();
     const hooks = await this.rest.get<RESTGetAPIChannelWebhooksResult>(Routes.channelWebhooks(forumChannelId));
     const existing = hooks.find(
-      (hook) => hook.type === WebhookType.Incoming && hook.name === WEBHOOK_NAME && hook.token,
+      (hook) => hook.type === WebhookType.Incoming && hook.application_id === applicationId && hook.token,
     );
     const hook =
       existing ??
@@ -158,6 +165,15 @@ export class DiscordForum implements ForumClient {
     if (!hook.token) throw new Error("Discord returned a webhook without a token");
     this.cache.set(key, `${hook.id}:${hook.token}`);
     return { id: hook.id, token: hook.token };
+  }
+
+  /** This bot's application id, which never changes. */
+  private async applicationId(): Promise<string> {
+    const cached = this.cache.get(APPLICATION_KEY);
+    if (cached) return cached;
+    const { id } = await this.rest.get<RESTGetCurrentApplicationResult>(Routes.currentApplication());
+    this.cache.set(APPLICATION_KEY, id);
+    return id;
   }
 
   /**
