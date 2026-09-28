@@ -20,10 +20,10 @@ export const PAGE_REQUESTS = 1;
 const MESSAGE_REQUESTS = 11;
 
 /**
- * After the messages: the notice that pings a new assignee and adding them to the post; linking the post from its
- * conversation (the forum's guild and the attribute update); and bringing the post's tags, title,
- * and archived flag up to date (the forum's tags, the update, the update again with the tags
- * looked up again, and archiving).
+ * After the messages: the notice that pings a new assignee and adding them to the post; linking
+ * the post from its conversation (the forum's guild and the attribute update); and bringing the
+ * post's tags, title, and archived flag up to date (the forum's tags, the update, the update
+ * again with the tags looked up again, and archiving).
  */
 export const FINISH_REQUESTS = 2 + 2 + 5;
 

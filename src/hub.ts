@@ -21,8 +21,7 @@ import { loadSettings, relaysInbox, type Settings } from "./config.ts";
 import { DiscordForum } from "./discord/forum.ts";
 import { DiscordHttpError, DiscordRest } from "./discord/rest.ts";
 import { errorFields, log } from "./log.ts";
-import { latestMessageId, processConversation, relayFor } from "./relay/processor.ts";
-import type { Relay } from "./relay/relay.ts";
+import { latestMessageId, type ProcessorContext, processConversation, relayFor } from "./relay/processor.ts";
 import { processMessageUpdate } from "./relay/updates.ts";
 import { type Job, Store } from "./store.ts";
 
@@ -121,7 +120,7 @@ export class Hub extends DurableObject<Env> {
         this.store.deleteJob(job.key);
         continue;
       }
-      if (budget.remaining < minimumBudget(payload) || Date.now() - startedAt > RUN_WALL_MS) {
+      if (budget.remaining < requiredBudget(payload) || Date.now() - startedAt > RUN_WALL_MS) {
         yielded = true;
         break;
       }
@@ -135,7 +134,7 @@ export class Hub extends DurableObject<Env> {
     await this.schedule(yielded ? Date.now() : undefined);
   }
 
-  private async run(job: Job, payload: JobPayload, services: Services): Promise<"done" | "yield"> {
+  private async run(job: Job, payload: JobPayload, services: ProcessorContext): Promise<"done" | "yield"> {
     try {
       switch (payload.type) {
         case "command":
@@ -194,7 +193,7 @@ export class Hub extends DurableObject<Env> {
     }
   }
 
-  private async runCommand(job: CommandJob, services: Services): Promise<void> {
+  private async runCommand(job: CommandJob, services: ProcessorContext): Promise<void> {
     const { content, conversationGone } = await executeCommand(job, services.settings, services.budget.fetch);
     // Chatwoot sends no webhook when a conversation is deleted: let its job close the post.
     if (conversationGone)
@@ -209,7 +208,7 @@ export class Hub extends DurableObject<Env> {
    * new message (Chatwoot's `last_activity_at`); a change that creates none, such as only a
    * custom attribute, relies on its webhook.
    */
-  private async sweep(accountId: number, { settings, chatwoot, relay }: Services): Promise<void> {
+  private async sweep(accountId: number, { settings, chatwoot, relay }: ProcessorContext): Promise<void> {
     const key = `sweep:${accountId}:last`;
     const last = Number(this.store.get(key) ?? 0);
     const now = Date.now();
@@ -257,7 +256,7 @@ export class Hub extends DurableObject<Env> {
     log.info("sweep done", { accountId, windowSeconds: Math.round(window), seen, queued });
   }
 
-  private services(settings: Settings, budget: Budget): Services {
+  private services(settings: Settings, budget: Budget): ProcessorContext {
     const rest = new DiscordRest(settings.secrets.DISCORD_BOT_TOKEN, budget.fetch);
     const chatwoot = chatwootClient(
       settings.config.chatwoot.baseUrl,
@@ -290,16 +289,6 @@ export class Hub extends DurableObject<Env> {
   }
 }
 
-interface Services {
-  settings: Settings;
-  store: Store;
-  relay: Relay;
-  forum: DiscordForum;
-  chatwoot: ReturnType<typeof chatwootClient>;
-  budget: Budget;
-  rest: DiscordRest;
-}
-
 /** Replaces the invoker's "thinking…" with `content`. */
 async function respond(rest: DiscordRest, job: CommandJob, content: string): Promise<void> {
   try {
@@ -312,7 +301,7 @@ async function respond(rest: DiscordRest, job: CommandJob, content: string): Pro
   }
 }
 
-function minimumBudget(payload: JobPayload): number {
+function requiredBudget(payload: JobPayload): number {
   if (payload.type === "command") return COMMAND_BUDGET;
   return payload.type === "sweep" ? SWEEP_PAGES : MIN_BUDGET;
 }

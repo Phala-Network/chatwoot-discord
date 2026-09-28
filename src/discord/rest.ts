@@ -61,12 +61,13 @@ export class DiscordRest {
   /** Bucket key -> when it has requests again (ms since the epoch). */
   private readonly resets = new Map<string, number>();
   private globalReset = 0;
-  private readonly token: string | undefined;
+  private readonly token: string;
   private readonly fetch: Fetch;
   private readonly sleep: (ms: number) => Promise<void>;
 
+  // Plain fields, not parameter properties: scripts/ runs this file with Node's type stripping.
   constructor(
-    token: string | undefined,
+    token: string,
     fetch: Fetch,
     sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   ) {
@@ -110,10 +111,7 @@ export class DiscordRest {
     }
     const url = `${API_BASE}${path}${query.size > 0 ? `?${query.toString()}` : ""}`;
     const headers = new Headers({ "user-agent": USER_AGENT });
-    if (request.auth !== false) {
-      if (!this.token) throw new Error("A Discord bot token is required for this request");
-      headers.set("authorization", `Bot ${this.token}`);
-    }
+    if (request.auth !== false) headers.set("authorization", `Bot ${this.token}`);
     if (request.body !== undefined) headers.set("content-type", "application/json");
 
     for (let attempt = 1; ; attempt += 1) {

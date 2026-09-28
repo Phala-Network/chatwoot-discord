@@ -152,31 +152,42 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
     return data;
   }
 
+  /** Like `data`, but undefined when the conversation does not exist (see `notFound`). */
+  async function dataUnlessNotFound<T>(
+    operation: string,
+    pending: Promise<{ data?: T; response: Response }>,
+  ): Promise<T | undefined> {
+    const { data, response } = await pending;
+    if (notFound(response)) return undefined;
+    if (!response.ok || data === undefined) throw new ChatwootError(response.status, operation);
+    return data;
+  }
+
   async function ensureOk(operation: string, pending: Promise<{ response: Response }>): Promise<void> {
     const { response } = await pending;
     if (!response.ok) throw new ChatwootError(response.status, operation);
   }
 
-  /** Messages oldest first, or undefined when the conversation does not exist (see `notFound`). */
+  /** Messages oldest first, or undefined when the conversation does not exist. */
   async function listMessages(accountId: number, conversationId: number, query: { after?: number; before?: number }) {
-    const { data, response } = await client.GET(
-      "/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages",
-      { params: { path: { account_id: accountId, conversation_id: conversationId }, query } },
+    const list = await dataUnlessNotFound(
+      "list messages",
+      client.GET("/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages", {
+        params: { path: { account_id: accountId, conversation_id: conversationId }, query },
+      }),
     );
-    if (notFound(response)) return undefined;
-    if (!response.ok || data === undefined) throw new ChatwootError(response.status, "list messages");
-    return messageListSchema.parse(data).payload.toSorted((a, b) => a.id - b.id);
+    return list && messageListSchema.parse(list).payload.toSorted((a, b) => a.id - b.id);
   }
 
   return {
     /** The conversation, or undefined when it does not exist (it was deleted). */
-    async getConversation(accountId: number, conversationId: number): Promise<ChatwootConversation | undefined> {
-      const { data, response } = await client.GET("/api/v1/accounts/{account_id}/conversations/{conversation_id}", {
-        params: { path: { account_id: accountId, conversation_id: conversationId } },
-      });
-      if (notFound(response)) return undefined;
-      if (!response.ok || data === undefined) throw new ChatwootError(response.status, "get conversation");
-      return data;
+    getConversation(accountId: number, conversationId: number): Promise<ChatwootConversation | undefined> {
+      return dataUnlessNotFound(
+        "get conversation",
+        client.GET("/api/v1/accounts/{account_id}/conversations/{conversation_id}", {
+          params: { path: { account_id: accountId, conversation_id: conversationId } },
+        }),
+      );
     },
 
     /** Messages with an id above `after`, oldest first; without `after`, the latest page. */

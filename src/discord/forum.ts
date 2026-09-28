@@ -136,11 +136,11 @@ export class DiscordForum implements ForumClient {
     return `https://discord.com/channels/${guildId}/${threadId}`;
   }
 
-  /** Reuses the forum's "Chatwoot" webhook, or creates it. */
   async addMember(threadId: string, userId: string): Promise<void> {
     await this.rest.put<RESTPutAPIChannelThreadMembersResult, never>(Routes.threadMembers(threadId, userId), {});
   }
 
+  /** Reuses the forum's "Chatwoot" webhook, or creates it. */
   private async webhook(forumChannelId: string): Promise<{ id: string; token: string }> {
     const key = webhookKey(forumChannelId);
     const [id, token] = this.cache.get(key)?.split(":") ?? [];

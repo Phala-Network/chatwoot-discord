@@ -17,7 +17,7 @@ export class BudgetExhaustedError extends Error {
  * How long a request may take, response body included. Generous for the largest transfers (a
  * 50 MB command upload to Chatwoot); a request that times out fails like a network error.
  */
-export const REQUEST_TIMEOUT_MS = 60_000;
+const REQUEST_TIMEOUT_MS = 60_000;
 
 export class Budget {
   private used = 0;

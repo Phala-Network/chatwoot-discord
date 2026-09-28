@@ -75,7 +75,7 @@ export interface PostFields {
   announcedAssignee: string;
   /**
    * The subject the post's title ends with and the title last applied; unset for a post whose
-   * title this service did not record (adopted, or created by an earlier version).
+   * title was not recorded (adopted, or created before titles were recorded).
    */
   titleSubject: string;
   title: string;
@@ -177,10 +177,10 @@ export class Relay {
   }
 
   /**
-   * After a run's messages that notify: pings a newly assigned, linked agent in a notice of its own, so
-   * the ping follows the latest assignment line and names the current assignee however often the
-   * conversation was reassigned in between, and adds them to the post. The assignee counts as
-   * announced either way.
+   * After a run's messages that notify: pings a newly assigned, linked agent in a notice of its
+   * own, so the ping follows the latest assignment line and names the current assignee however
+   * often the conversation was reassigned in between, and adds them to the post. The assignee
+   * counts as announced either way.
    */
   async announceAssignee(accountId: number, conversation: RelayConversation): Promise<void> {
     const discordId = this.notifier.newAssignee(accountId, conversation);

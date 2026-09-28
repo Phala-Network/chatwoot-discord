@@ -14,7 +14,6 @@ export type AttachmentRef = z.infer<typeof attachmentSchema>;
 
 /** Chatwoot's conversation priorities (`Conversation.priorities`); null clears the priority. */
 export const prioritySchema = z.enum(["urgent", "high", "medium", "low"]);
-export type Priority = z.infer<typeof prioritySchema>;
 
 const actionSchema = z.discriminatedUnion("type", [
   z.object({
