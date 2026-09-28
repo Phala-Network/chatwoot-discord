@@ -101,6 +101,11 @@ class World {
         /^discord\.com\/api\/v10\/channels\/\d+\/thread-members\/\d+$/,
         () => new Response(null, { status: 204 }),
       ),
+      on(
+        "DELETE",
+        /^discord\.com\/api\/v10\/webhooks\/1\/tok\/messages\/.+$/,
+        () => new Response(null, { status: 204 }),
+      ),
       on("POST", "discord.com/api/v10/webhooks/1/tok", (request) => {
         const thread = request.url.searchParams.get("thread_id");
         if (thread && this.threadFailure) return this.threadFailure();
@@ -636,27 +641,83 @@ describe("agent avatars", () => {
 describe("processMessageUpdate", () => {
   it("says once in the post when an agent's reply could not be delivered", async () => {
     const world = new World();
-    world.messages = [{ id: 1, content: "hello", message_type: 0 }];
+    world.messages = [
+      { id: 1, content: "hello", message_type: 0 },
+      { id: 2, content: "Here is your refund", message_type: 1, status: "sent" },
+    ];
     await withStore(async (store) => {
       const settings = testSettings();
       await sync(store, settings);
-      const failed: FakeMessage = {
-        id: 2,
-        content: "Here is your refund",
-        message_type: 1,
+      // Delivery fails after the reply was relayed.
+      Object.assign(world.messages[1] ?? {}, {
         status: "failed",
         content_attributes: { external_error: "Message outside the 24 hour window" },
-      };
-      world.messages.push(failed);
+      });
       await processMessageUpdate(context(store, settings), 3, 12, 2);
       await processMessageUpdate(context(store, settings), 3, 12, 2);
       const notices = world.replies().filter((content) => content?.startsWith("⚠️"));
       expect(notices).toEqual(["⚠️ A reply could not be delivered to the customer: Message outside the 24 hour window"]);
 
       // A delivered message posts nothing.
-      world.messages.push({ id: 3, content: "ok", message_type: 1, status: "sent" });
-      await processMessageUpdate(context(store, settings), 3, 12, 3);
+      await processMessageUpdate(context(store, settings), 3, 12, 1);
       expect(world.replies().filter((content) => content?.startsWith("⚠️"))).toHaveLength(1);
+    });
+  });
+
+  it("relays a failure and a response reported before their message was relayed, with the message", async () => {
+    const world = new World();
+    world.messages = [
+      { id: 1, content: "hello", message_type: 0 },
+      { id: 2, content: "Here is your refund", message_type: 1, status: "failed", content_attributes: {} },
+      {
+        id: 3,
+        content: "How did we do?",
+        message_type: 3,
+        content_type: "input_csat",
+        content_attributes: { submitted_values: { csat_survey_response: { rating: 5 } } },
+      },
+    ];
+    await withStore(async (store) => {
+      const settings = testSettings();
+      // The updates arrive first: there is no post yet, so the job relays them with the messages.
+      await processMessageUpdate(context(store, settings), 3, 12, 2);
+      await processMessageUpdate(context(store, settings), 3, 12, 3);
+      expect(world.posts()).toEqual([]);
+      await sync(store, settings);
+      expect(world.replies()).toEqual([
+        `hello\n-# <@${TRIAGE}>`,
+        "Here is your refund",
+        "⚠️ A reply could not be delivered to the customer.",
+        "How did we do?\n\n**CSAT:**\n• Rating: 5",
+      ]);
+    });
+  });
+
+  it("removes a deleted message with the response posted about it, and its text from the title", async () => {
+    const world = new World();
+    world.messages = [
+      { id: 1, content: "my password is hunter2", message_type: 0 },
+      {
+        id: 2,
+        content: "How did we do?",
+        message_type: 3,
+        content_type: "input_csat",
+        content_attributes: { submitted_values: { csat_survey_response: { rating: 1, feedback_message: "call me" } } },
+      },
+    ];
+    await withStore(async (store) => {
+      const settings = testSettings();
+      await sync(store, settings);
+      expect(world.replies()).toHaveLength(2); // the message and the response
+      for (const message of world.messages) Object.assign(message, { content_attributes: { deleted: true } });
+      await processMessageUpdate(context(store, settings), 3, 12, 1);
+      await processMessageUpdate(context(store, settings), 3, 12, 2);
+      expect(world.sent("DELETE", "")).toHaveLength(2);
+      const renamed = world
+        .sent("PATCH", "")
+        .map((request) => JSON.parse(request.body).name)
+        .filter(Boolean);
+      expect(renamed.at(-1)).toBe("[Acme #12] Jane Doe");
     });
   });
 });

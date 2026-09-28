@@ -81,6 +81,8 @@ export interface PostFields {
    */
   titleSubject: string;
   title: string;
+  /** The Chatwoot message the title's subject comes from. */
+  titleMessageId: number;
 }
 
 export interface RelayStore {
@@ -193,7 +195,7 @@ export class Relay {
         ...notice,
         allowed_mentions: { parse: [], users: [discordId] },
       });
-      if (!posted) return;
+      if (posted === undefined) return;
       await this.addMember(accountId, conversation.id, discordId);
     }
     this.options.store.updateConversation(accountId, conversation.id, {
@@ -236,10 +238,19 @@ export class Relay {
   }
 
   /**
+   * The message the post's title quotes was deleted in Chatwoot: the title keeps only the ticket
+   * and the customer.
+   */
+  async dropTitleSubject(accountId: number, conversation: RelayConversation, threadId: string): Promise<void> {
+    this.options.store.updateConversation(accountId, conversation.id, { titleSubject: "", state: OUT_OF_DATE });
+    await this.sync(accountId, conversation, threadId);
+  }
+
+  /**
    * Posts a customer's response to an interactive message into the conversation's post, under
    * the contact's name and avatar (see `postMessage`).
    */
-  postResponse(accountId: number, conversation: RelayConversation, text: string): Promise<boolean> {
+  postResponse(accountId: number, conversation: RelayConversation, text: string): Promise<string | undefined> {
     const { frontendUrl, avatars } = this.options;
     let content = defused(text);
     if (content.length > CONTENT_LIMIT) {
@@ -259,7 +270,7 @@ export class Relay {
    * Posts a notice into the conversation's post, e.g. when one of its messages could not be
    * relayed or delivered (see `postMessage`).
    */
-  notify(accountId: number, conversation: RelayConversation, content: string): Promise<boolean> {
+  notify(accountId: number, conversation: RelayConversation, content: string): Promise<string | undefined> {
     return this.postMessage(accountId, conversation, this.notice(content));
   }
 
@@ -268,7 +279,7 @@ export class Relay {
     const { store, forum } = this.options;
     const threadId = store.conversation(accountId, conversationId)?.threadId;
     const gone = this.notice("This conversation no longer exists in Chatwoot.");
-    if (threadId && (await this.postMessage(accountId, { id: conversationId }, gone))) {
+    if (threadId && (await this.postMessage(accountId, { id: conversationId }, gone)) !== undefined) {
       try {
         await forum.updateThread(this.forumOf(accountId), threadId, { archived: true });
       } catch (error) {
@@ -373,6 +384,7 @@ export class Relay {
       threadId,
       titleSubject: subject,
       title,
+      titleMessageId: message.id,
       state: this.stateOf(conversation),
       // Nothing announced yet: an assignee is announced after the run's messages.
       announcedAssignee: "",
@@ -381,27 +393,28 @@ export class Relay {
   }
 
   /**
-   * Posts one message into the conversation's post. Returns false when there is no post, or it
-   * no longer exists in Discord (it is then forgotten). Like any message, it unarchives the post:
-   * a resolved post needs a sync afterwards.
+   * Posts one message into the conversation's post and returns its Discord id; undefined when
+   * there is no post, or it no longer exists in Discord (it is then forgotten). Like any message,
+   * it unarchives the post: a resolved post needs a sync afterwards.
    */
   private async postMessage(
     accountId: number,
     conversation: Pick<RelayConversation, "id" | "status">,
     message: WebhookMessage,
-  ): Promise<boolean> {
+  ): Promise<string | undefined> {
     const { store, forum } = this.options;
     const threadId = store.conversation(accountId, conversation.id)?.threadId;
-    if (!threadId) return false;
+    if (!threadId) return undefined;
+    let messageId: string;
     try {
-      await forum.execute(this.forumOf(accountId), message, threadId);
+      ({ messageId } = await forum.execute(this.forumOf(accountId), message, threadId));
     } catch (error) {
       if (!(error instanceof UnknownThreadError)) throw error;
       store.forgetThread(accountId, conversation.id);
-      return false;
+      return undefined;
     }
     this.unarchived(accountId, conversation);
-    return true;
+    return messageId;
   }
 
   /**

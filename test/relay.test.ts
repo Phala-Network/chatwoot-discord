@@ -565,12 +565,12 @@ describe("Relay", () => {
   });
 
   it("posts a notice into the existing post, and archives a resolved post again afterwards", async () => {
-    expect(await relay.notify(3, message().conversation, "⚠️ Notice")).toBe(false); // no post yet
+    expect(await relay.notify(3, message().conversation, "⚠️ Notice")).toBeUndefined(); // no post yet
     await relay.relay(message({ conversation: resolved }));
     await relay.sync(3, message({ conversation: resolved }).conversation, "thread-1");
     expect(forum.archived.has("thread-1")).toBe(true);
 
-    expect(await relay.notify(3, message({ conversation: resolved }).conversation, "⚠️ Notice")).toBe(true);
+    expect(await relay.notify(3, message({ conversation: resolved }).conversation, "⚠️ Notice")).toBeTypeOf("string");
     expect(forum.calls.at(-1)).toEqual([
       "thread-1",
       { content: "⚠️ Notice", username: "Chatwoot", avatar_url: AVATARS.chatwoot, allowed_mentions: { parse: [] } },
@@ -584,7 +584,7 @@ describe("Relay", () => {
     await relay.relay(message());
     const contact = { name: "Jane Doe", avatarUrl: "https://cdn.example.com/jane.png" };
     const conversation = message({ conversation: { contact } }).conversation;
-    expect(await relay.postResponse(3, conversation, "Pick one\n\n**Response:** A")).toBe(true);
+    expect(await relay.postResponse(3, conversation, "Pick one\n\n**Response:** A")).toBeTypeOf("string");
     expect(forum.calls.at(-1)).toEqual([
       "thread-1",
       {
@@ -614,7 +614,7 @@ describe("Relay", () => {
   it("forgets a post deleted in Discord instead of posting a response", async () => {
     await relay.relay(message());
     forum.failThreadWith = "gone";
-    expect(await relay.postResponse(3, message().conversation, "**Email:** a@example.com")).toBe(false);
+    expect(await relay.postResponse(3, message().conversation, "**Email:** a@example.com")).toBeUndefined();
     expect(store.thread(3, 12)).toBeUndefined();
   });
 

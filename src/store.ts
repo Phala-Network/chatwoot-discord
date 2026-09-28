@@ -70,6 +70,17 @@ export const MIGRATIONS: string[] = [
   // interactions records the Discord interactions whose command was accepted, so a repeated
   // request never queues its command again (see acceptInteraction).
   `CREATE TABLE interactions (id TEXT PRIMARY KEY, received_at INTEGER NOT NULL);`,
+  // derived_messages holds the Discord messages posted about a Chatwoot message (a customer's
+  // response to it, a delivery failure), removed with it. title_message_id is the message a
+  // post's title quotes.
+  `CREATE TABLE derived_messages (
+     account_id INTEGER NOT NULL,
+     conversation_id INTEGER NOT NULL,
+     message_id INTEGER NOT NULL,
+     discord_message_id TEXT NOT NULL,
+     PRIMARY KEY (account_id, conversation_id, message_id, discord_message_id)
+   );
+   ALTER TABLE conversations ADD COLUMN title_message_id INTEGER;`,
 ];
 
 const COUNTER_TTL_MS = 2 * 60 * 60 * 1000;
@@ -92,6 +103,7 @@ const COLUMNS: ReadonlyArray<readonly [keyof ConversationFields, string]> = [
   ["announcePending", "announce_pending"],
   ["titleSubject", "title_subject"],
   ["title", "title"],
+  ["titleMessageId", "title_message_id"],
 ];
 
 export interface Job {
@@ -132,6 +144,7 @@ export class Store implements RelayStore, Cache {
         announce_pending: number | null;
         title_subject: string | null;
         title: string | null;
+        title_message_id: number | null;
       }>(
         `SELECT ${COLUMNS.map(([, column]) => column).join(", ")} FROM conversations
          WHERE account_id = ? AND conversation_id = ?`,
@@ -148,6 +161,7 @@ export class Store implements RelayStore, Cache {
       announcePending: row.announce_pending ?? undefined,
       titleSubject: row.title_subject ?? undefined,
       title: row.title ?? undefined,
+      titleMessageId: row.title_message_id ?? undefined,
     };
   }
 
@@ -206,7 +220,7 @@ export class Store implements RelayStore, Cache {
     this.sql.exec(
       `INSERT INTO conversations (account_id, conversation_id, thread_id) VALUES (?, ?, ?)
        ON CONFLICT (account_id, conversation_id) DO UPDATE SET thread_id = excluded.thread_id, state = NULL,
-         announced_assignee = NULL, announce_pending = NULL, title_subject = NULL, title = NULL`,
+         announced_assignee = NULL, announce_pending = NULL, title_subject = NULL, title = NULL, title_message_id = NULL`,
       accountId,
       conversationId,
       threadId,
@@ -275,7 +289,7 @@ export class Store implements RelayStore, Cache {
   forgetThread(accountId: number, conversationId: number): void {
     this.sql.exec(
       `UPDATE conversations SET thread_id = NULL, state = NULL, announced_assignee = NULL, announce_pending = NULL,
-         title_subject = NULL, title = NULL
+         title_subject = NULL, title = NULL, title_message_id = NULL
        WHERE account_id = ? AND conversation_id = ?`,
       accountId,
       conversationId,
@@ -289,6 +303,44 @@ export class Store implements RelayStore, Cache {
       "DELETE FROM submitted_responses WHERE account_id = ? AND conversation_id = ?",
       accountId,
       conversationId,
+    );
+    this.sql.exec(
+      "DELETE FROM derived_messages WHERE account_id = ? AND conversation_id = ?",
+      accountId,
+      conversationId,
+    );
+  }
+
+  /** Ids of the Discord messages posted about a Chatwoot message (see derived_messages). */
+  derivedMessages(accountId: number, conversationId: number, messageId: number): string[] {
+    return this.sql
+      .exec<{ discord_message_id: string }>(
+        "SELECT discord_message_id FROM derived_messages WHERE account_id = ? AND conversation_id = ? AND message_id = ?",
+        accountId,
+        conversationId,
+        messageId,
+      )
+      .toArray()
+      .map((row) => row.discord_message_id);
+  }
+
+  saveDerivedMessage(accountId: number, conversationId: number, messageId: number, discordId: string): void {
+    this.sql.exec(
+      "INSERT OR IGNORE INTO derived_messages (account_id, conversation_id, message_id, discord_message_id) VALUES (?, ?, ?, ?)",
+      accountId,
+      conversationId,
+      messageId,
+      discordId,
+    );
+  }
+
+  deleteDerivedMessage(accountId: number, conversationId: number, messageId: number, discordId: string): void {
+    this.sql.exec(
+      "DELETE FROM derived_messages WHERE account_id = ? AND conversation_id = ? AND message_id = ? AND discord_message_id = ?",
+      accountId,
+      conversationId,
+      messageId,
+      discordId,
     );
   }
 

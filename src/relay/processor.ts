@@ -20,6 +20,7 @@ import { mentionedUserIds } from "./format.ts";
 import { FINISH_REQUESTS, PAGE_REQUESTS, requestsPerMessage } from "./limits.ts";
 import { type ForumClient, Relay, type RelayStore } from "./relay.ts";
 import type { RelayConversation } from "./types.ts";
+import { relayDerived } from "./updates.ts";
 
 const INBOX_CACHE_MS = 24 * 60 * 60 * 1000;
 const AVATAR_CACHE_MS = 24 * 60 * 60 * 1000;
@@ -123,6 +124,8 @@ export async function processConversation(
       });
       try {
         await relay.relay(relayMessage);
+        // With its current state: an update reported before the message was relayed is not lost.
+        await relayDerived(context, accountId, conversation, message);
       } catch (error) {
         if (error instanceof BudgetExhaustedError) return "yield";
         // Only a request Discord refuses as invalid counts towards skipping the message. Anything

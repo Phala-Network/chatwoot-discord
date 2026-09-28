@@ -47,8 +47,8 @@ export class MemoryStore implements RelayStore {
   conversation(a: number, c: number) {
     const row = this.rows.get(`${a}:${c}`);
     if (!row) return undefined;
-    const { threadId, state, announcedAssignee, announcePending, titleSubject, title } = row;
-    return { threadId, state, announcedAssignee, announcePending, titleSubject, title };
+    const { threadId, state, announcedAssignee, announcePending, titleSubject, title, titleMessageId } = row;
+    return { threadId, state, announcedAssignee, announcePending, titleSubject, title, titleMessageId };
   }
   updateConversation(a: number, c: number, patch: Partial<PostFields>) {
     this.rows.set(`${a}:${c}`, { ...this.rows.get(`${a}:${c}`), ...patch });
