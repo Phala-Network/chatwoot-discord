@@ -67,9 +67,14 @@ export const MIGRATIONS: string[] = [
   `UPDATE conversations SET announced_assignee = NULL;`,
   // announce_pending keeps an owed assignee announcement across failed attempts.
   `ALTER TABLE conversations ADD COLUMN announce_pending INTEGER;`,
+  // interactions records the Discord interactions whose command was accepted, so a repeated
+  // request never queues its command again (see acceptInteraction).
+  `CREATE TABLE interactions (id TEXT PRIMARY KEY, received_at INTEGER NOT NULL);`,
 ];
 
 const COUNTER_TTL_MS = 2 * 60 * 60 * 1000;
+/** Longer than a signed interaction is accepted (see isFreshTimestamp), so a replay is always recognized. */
+const INTERACTION_TTL_MS = 60 * 60 * 1000;
 
 interface ConversationFields extends PostFields {
   /** Id of the last message handled; unset for an adopted post until its first run. */
@@ -330,6 +335,19 @@ export class Store implements RelayStore, Cache {
     this.sql.exec("DELETE FROM cache WHERE key = ?", key);
   }
 
+  // Interactions
+
+  /** True the first time a Discord interaction is accepted; a repeat of it is refused. */
+  acceptInteraction(interactionId: string): boolean {
+    return (
+      this.sql.exec(
+        "INSERT INTO interactions (id, received_at) VALUES (?, ?) ON CONFLICT (id) DO NOTHING",
+        interactionId,
+        this.now(),
+      ).rowsWritten > 0
+    );
+  }
+
   // Jobs
 
   /**
@@ -397,6 +415,7 @@ export class Store implements RelayStore, Cache {
     const now = this.now();
     this.sql.exec("DELETE FROM counters WHERE expires_at <= ?", now);
     this.sql.exec("DELETE FROM cache WHERE expires_at IS NOT NULL AND expires_at <= ?", now);
+    this.sql.exec("DELETE FROM interactions WHERE received_at <= ?", now - INTERACTION_TTL_MS);
   }
 
   private ensureRow(accountId: number, conversationId: number): void {

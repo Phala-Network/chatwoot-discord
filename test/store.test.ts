@@ -16,6 +16,7 @@ describe("Store", () => {
         "cache",
         "posted_messages",
         "submitted_responses",
+        "interactions",
       ]) {
         sql.exec(`DROP TABLE IF EXISTS ${table}`);
       }

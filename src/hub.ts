@@ -84,7 +84,12 @@ export class Hub extends DurableObject<Env> {
     await this.schedule();
   }
 
+  /** Queues a command once per interaction: a repeated (replayed) request is ignored. */
   async enqueueCommand(job: CommandJob): Promise<void> {
+    if (!this.store.acceptInteraction(job.interactionId)) {
+      log.warn("repeated interaction ignored", { interactionId: job.interactionId });
+      return;
+    }
     this.enqueue({ type: "command", job });
     await this.schedule();
   }
