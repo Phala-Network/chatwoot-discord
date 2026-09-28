@@ -76,6 +76,8 @@ app.post("/discord/interactions", bodyLimit({ maxSize: 1024 * 1024 }), async (c)
   if (!signature || !timestamp || !(await verifyKey(body, signature, timestamp, settings.secrets.DISCORD_PUBLIC_KEY))) {
     return c.text("invalid request signature", 401);
   }
+  // A signature does not expire: an old signed request is refused like a stale webhook.
+  if (!isFreshTimestamp(timestamp, Math.floor(Date.now() / 1000))) return c.text("stale request", 401);
 
   let interaction: APIInteraction;
   try {

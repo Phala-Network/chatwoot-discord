@@ -3,8 +3,9 @@
 // Requests (webhook events, deferred commands, sweeps) only write a job row and set an
 // alarm, so they return quickly. The alarm drains due jobs one at a time, which serializes work
 // per conversation (and globally), and yields to a fresh invocation before it would exceed the
-// per-invocation subrequest limit. Failed jobs back off and retry, and are dropped after
-// MAX_JOB_ATTEMPTS (rate limits do not count); nothing depends on a single delivery succeeding.
+// per-invocation subrequest limit. Failed jobs back off (up to MAX_BACKOFF_MS) and retry until
+// they succeed, so an outage of any length loses no work; nothing depends on a single delivery
+// succeeding.
 
 import { DurableObject } from "cloudflare:workers";
 import {
@@ -40,15 +41,16 @@ const PRIORITY = { command: 0, sweep: 1, conversation: 2, "message-updated": 3 }
 /** Requests a job may need before it can start without being cut short. */
 const COMMAND_BUDGET = 20;
 const MIN_BUDGET = 2;
-/** Pages of conversations (25 each by default) a sweep reads at most. */
+/** Pages of conversations (25 each by default) a sweep run reads; a longer pass continues in the next run. */
 const SWEEP_PAGES = 10;
-const MAX_BACKOFF_MS = 30 * 60 * 1000;
+/** A sweep pass left unfinished this long (e.g. its account was removed) is started over. */
+const SWEEP_PASS_TTL_MS = 24 * 60 * 60 * 1000;
+const sweepPassSchema = z.object({ cutoff: z.number(), page: z.number().int().positive(), startedAt: z.number() });
 /**
- * A job that fails this often is dropped (after about 45 minutes of backoff), so a persistent
- * failure stops holding the queue. The sweep queues conversations that are still behind again,
- * and the next webhook for one starts a new job without backoff.
+ * The longest wait between retries of a failing job. A job is never dropped: its log turns from
+ * warnings into errors after a few attempts, and it keeps retrying at this pace.
  */
-const MAX_JOB_ATTEMPTS = 10;
+const MAX_BACKOFF_MS = 30 * 60 * 1000;
 /** Stop draining and continue in a new invocation after this long (alarms may run 15 minutes). */
 const RUN_WALL_MS = 5 * 60 * 1000;
 /**
@@ -84,7 +86,12 @@ export class Hub extends DurableObject<Env> {
     await this.schedule();
   }
 
+  /** Queues a command once per interaction: a repeated (replayed) request is ignored. */
   async enqueueCommand(job: CommandJob): Promise<void> {
+    if (!this.store.acceptInteraction(job.interactionId)) {
+      log.warn("repeated interaction ignored", { interactionId: job.interactionId });
+      return;
+    }
     this.enqueue({ type: "command", job });
     await this.schedule();
   }
@@ -175,11 +182,6 @@ export class Hub extends DurableObject<Env> {
         this.store.deferJob(job, delay);
         return "done";
       }
-      if (job.attempts + 1 >= MAX_JOB_ATTEMPTS) {
-        log.error("job failed too often; dropped", { job: job.key, attempts: job.attempts + 1, ...errorFields(error) });
-        this.store.deleteJob(job.key);
-        return "done";
-      }
       // Transient failures are warnings; a job that keeps failing is an error.
       const logAt = job.attempts + 1 >= 3 ? log.error : log.warn;
       logAt("job failed; will retry", {
@@ -204,35 +206,31 @@ export class Hub extends DurableObject<Env> {
   /**
    * Finds conversations whose post is behind (new messages, or tags/status/archive state that
    * differ) and queues them. Covers webhooks that were never delivered and service downtime.
-   * Reads conversations newest activity first and stops at the window's start. Activity means a
-   * new message (Chatwoot's `last_activity_at`); a change that creates none, such as only a
-   * custom attribute, relies on its webhook.
+   * A pass reads conversations newest activity first, down to the start of its window (since the
+   * previous pass started, at least `lookbackSeconds`, at most `maxCatchUpSeconds`), SWEEP_PAGES
+   * pages per run, continuing where it stopped until it is done. Activity means a new message
+   * (Chatwoot's `last_activity_at`); a change that creates none, such as only a custom
+   * attribute, relies on its webhook.
    */
   private async sweep(accountId: number, { settings, chatwoot, relay }: ProcessorContext): Promise<void> {
-    const key = `sweep:${accountId}:last`;
-    const last = Number(this.store.get(key) ?? 0);
-    const now = Date.now();
-    const { lookbackSeconds, maxCatchUpSeconds } = settings.config.reconcile;
-    const sinceLast = last > 0 ? (now - last) / 1000 + 60 : lookbackSeconds;
-    const window = Math.min(Math.max(sinceLast, lookbackSeconds), maxCatchUpSeconds);
-    const cutoff = now / 1000 - window;
+    const lastKey = `sweep:${accountId}:last`;
+    const passKey = `sweep:${accountId}:pass`;
+    const pass = this.sweepPass(passKey) ?? this.newSweepPass(lastKey, settings);
 
     const account = settings.account(accountId);
     let seen = 0;
     let queued = 0;
     let reachedCutoff = false;
-    /** Unix seconds of the oldest activity read. */
-    let oldest = now / 1000;
-    for (let page = 1; page <= SWEEP_PAGES && !reachedCutoff; page += 1) {
+    let page = pass.page;
+    for (; page < pass.page + SWEEP_PAGES && !reachedCutoff; page += 1) {
       const conversations = await chatwoot.listConversations(accountId, page);
       if (conversations.length === 0) reachedCutoff = true;
       for (const conversation of conversations) {
         const activity = conversation.last_activity_at ?? 0;
-        if (activity < cutoff) {
+        if (activity < pass.cutoff) {
           reachedCutoff = true;
           break;
         }
-        oldest = Math.min(oldest, activity);
         const conversationId = conversation.id;
         if (conversationId === undefined || !account || !relaysInbox(account, conversation.inbox_id)) continue;
         seen += 1;
@@ -250,10 +248,37 @@ export class Hub extends DurableObject<Env> {
         }
       }
     }
-    // Stopped at the page limit: the next sweep continues back from the oldest activity read.
-    if (!reachedCutoff) log.warn("sweep stopped at its page limit", { accountId, pages: SWEEP_PAGES });
-    this.store.set(key, String(reachedCutoff ? now : Math.floor(oldest * 1000)));
-    log.info("sweep done", { accountId, windowSeconds: Math.round(window), seen, queued });
+    if (reachedCutoff) {
+      // The next pass covers everything active since this one started, so activity while it ran
+      // (which reorders the list) is read again.
+      this.store.set(lastKey, String(pass.startedAt));
+      this.store.delete(passKey);
+      log.info("sweep done", { accountId, pages: page - 1, seen, queued });
+    } else {
+      this.store.set(passKey, JSON.stringify({ ...pass, page }), SWEEP_PASS_TTL_MS);
+      this.enqueue({ type: "sweep", accountId }); // Continues in the next run.
+      log.info("sweep continues", { accountId, nextPage: page, seen, queued });
+    }
+  }
+
+  private sweepPass(key: string): z.infer<typeof sweepPassSchema> | undefined {
+    const stored = this.store.get(key);
+    if (stored === undefined) return undefined;
+    try {
+      const parsed = sweepPassSchema.safeParse(JSON.parse(stored));
+      return parsed.success ? parsed.data : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private newSweepPass(lastKey: string, settings: Settings): z.infer<typeof sweepPassSchema> {
+    const last = Number(this.store.get(lastKey) ?? 0);
+    const now = Date.now();
+    const { lookbackSeconds, maxCatchUpSeconds } = settings.config.reconcile;
+    const sinceLast = last > 0 ? (now - last) / 1000 + 60 : lookbackSeconds;
+    const window = Math.min(Math.max(sinceLast, lookbackSeconds), maxCatchUpSeconds);
+    return { cutoff: now / 1000 - window, page: 1, startedAt: now };
   }
 
   private services(settings: Settings, budget: Budget): ProcessorContext {

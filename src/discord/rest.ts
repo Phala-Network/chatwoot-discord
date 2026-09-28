@@ -123,6 +123,9 @@ export class DiscordRest {
         new Request(url, {
           method,
           headers,
+          // Never followed: a redirect could carry the bot token elsewhere, and each hop would be
+          // a subrequest the budget does not count.
+          redirect: "manual",
           ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
         }),
       );

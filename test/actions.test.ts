@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Budget } from "../src/budget.ts";
 import { executeCommand } from "../src/commands/actions.ts";
 import { type CommandAction, type CommandJob, commandJobSchema } from "../src/commands/job.ts";
-import { ALICE, json, mockFetch, on, type Route, testSettings } from "./helpers.ts";
+import { ALICE, BOB, json, mockFetch, on, type Route, testSettings } from "./helpers.ts";
 
 const settings = testSettings();
 const cw = "chatwoot.example.com/api/v1";
@@ -216,6 +216,47 @@ describe("executeCommand", () => {
     expect((await executeCommand(job({ type: "block" }), settings, (request) => fetch(request))).content).toBe(
       "❌ Your Chatwoot user is no longer an agent in this Chatwoot account. Ask an admin to add you back, or to unlink your Discord account.",
     );
+  });
+
+  it("refuses a token that belongs to another Chatwoot user than the one the invoker is linked to", async () => {
+    const { requests } = mockFetch(
+      on("GET", `${cw}/profile`, () =>
+        json({ id: 999, name: "Admin", email: "admin@example.com", accounts: [{ id: 3 }] }),
+      ),
+      ok("POST", `${conversation}/messages`),
+    );
+    const { content } = await executeCommand(
+      job({ type: "message", private: true, content: "hi", files: [] }),
+      settings,
+      (request) => fetch(request),
+    );
+    expect(content).toBe(
+      "❌ Your Chatwoot access token belongs to another Chatwoot user, so nothing was done. Ask an admin to fix your link.",
+    );
+    expect(requests.map((request) => request.url.pathname)).toEqual(["/api/v1/profile"]);
+  });
+
+  it("fails on a redirect from Chatwoot instead of following it with the agent's token", async () => {
+    const { requests } = mockFetch(
+      on(
+        "GET",
+        `${cw}/profile`,
+        () => new Response(null, { status: 301, headers: { location: "https://evil.example/" } }),
+      ),
+    );
+    const { content } = await executeCommand(job({ type: "block" }), settings, (request) => fetch(request));
+    expect(content).toBe("❌ That did not work. Please do it in Chatwoot.");
+    expect(requests.map((request) => [request.url.hostname, request.redirect])).toEqual([
+      ["chatwoot.example.com", "manual"],
+    ]);
+  });
+
+  it("refuses a queued command once its invoker is no longer linked", async () => {
+    const unlinked = testSettings({ agents: [{ discordUserId: BOB, chatwootUserId: 43 }] });
+    const { requests } = mockFetch(profile);
+    const { content } = await executeCommand(job({ type: "block" }), unlinked, (request) => fetch(request));
+    expect(content).toBe("❌ Your Discord account is not linked to a Chatwoot agent.");
+    expect(requests).toEqual([]);
   });
 
   it("unassigns the way Chatwoot's dashboard does", async () => {

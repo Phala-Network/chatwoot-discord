@@ -130,8 +130,9 @@ class World {
         const all = [...this.conversations.values()].map((c) => this.conversationJson(c));
         return json({ data: { meta: {}, payload: request.url.searchParams.get("page") === "1" ? all : [] } });
       }),
+      on("GET", "discord.com/api/v10/applications/@me", () => json({ id: "100000000000000001" })),
       on("GET", `discord.com/api/v10/channels/${FORUM}/webhooks`, () =>
-        json([{ id: "1", token: "tok", type: 1, name: "Chatwoot" }]),
+        json([{ id: "1", token: "tok", type: 1, name: "Chatwoot", application_id: "100000000000000001" }]),
       ),
       on("GET", `discord.com/api/v10/channels/${FORUM}`, () =>
         json({
@@ -226,8 +227,14 @@ async function chatwootWebhook(
 }
 
 async function discordInteraction(payload: unknown, tamper = false) {
+  const request = await signedInteraction(payload, Math.floor(Date.now() / 1000), tamper);
+  return call(request());
+}
+
+/** A signed interaction request, which can be sent again unchanged (a replay). */
+async function signedInteraction(payload: unknown, timestampSeconds: number, tamper = false) {
   const body = JSON.stringify(payload);
-  const timestamp = String(Math.floor(Date.now() / 1000));
+  const timestamp = String(timestampSeconds);
   const key = await crypto.subtle.importKey(
     "jwk",
     JSON.parse(env.TEST_DISCORD_PRIVATE_JWK),
@@ -237,13 +244,12 @@ async function discordInteraction(payload: unknown, tamper = false) {
   );
   const signature = new Uint8Array(await crypto.subtle.sign("Ed25519", key, encoder.encode(timestamp + body)));
   const hex = [...signature].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-  return call(
+  return () =>
     new Request("https://relay.example.com/discord/interactions", {
       method: "POST",
       body: tamper ? body.replace("1", "2") : body,
       headers: { "content-type": "application/json", "x-signature-ed25519": hex, "x-signature-timestamp": timestamp },
-    }),
-  );
+    });
 }
 
 function dueJobs(): Promise<number> {
@@ -283,6 +289,7 @@ afterEach(async () => {
   await drain();
   await runInDurableObject(hub(), async (_instance, state) => {
     state.storage.sql.exec("DELETE FROM jobs");
+    state.storage.sql.exec("DELETE FROM interactions");
     await state.storage.deleteAlarm();
   });
   vi.restoreAllMocks();
@@ -677,6 +684,44 @@ describe("worker", () => {
     expect(toggled?.headers.get("api_access_token")).toBe("token-alice");
   });
 
+  it("runs a replayed signed command once, and refuses an old signed request", async () => {
+    const thread = "100000000000030002";
+    await runInDurableObject(hub(), (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO conversations (account_id, conversation_id, thread_id, cursor) VALUES (3, 18, ?, 0)",
+        thread,
+      );
+    });
+    const profile = on("GET", "chatwoot.example.com/api/v1/profile", () =>
+      json({ id: 42, name: "Alice", email: "alice@example.com", accounts: [{ id: 3 }] }),
+    );
+    const toggle = on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/18/toggle_status", () => json({}));
+    world.mock.spy.mockRestore();
+    world = new World([profile, toggle]);
+    const resolve = (id: string) => ({
+      id,
+      application_id: "100000000000000001",
+      token: "interaction-token",
+      type: 2,
+      channel_id: thread,
+      channel: { id: thread, type: 11 },
+      member: { user: { id: ALICE } },
+      data: { type: 1, name: "resolve" },
+    });
+    const now = Math.floor(Date.now() / 1000);
+    const replayed = await signedInteraction(resolve("900003"), now);
+    // Sent while the first is queued, and again after it ran.
+    expect((await call(replayed())).status).toBe(200);
+    expect((await call(replayed())).status).toBe(200);
+    await drain();
+    expect((await call(replayed())).status).toBe(200);
+    await drain();
+    expect(world.requests.filter((request) => request.url.pathname.endsWith("/toggle_status"))).toHaveLength(1);
+
+    const old = await signedInteraction(resolve("900004"), now - 600);
+    expect((await call(old())).status).toBe(401);
+  });
+
   it("drops a command whose interaction token expires before it could report the result", async () => {
     const job = {
       interactionId: "900002",
@@ -738,7 +783,7 @@ describe("worker", () => {
     });
   });
 
-  it("drops a job that keeps failing instead of retrying it forever", async () => {
+  it("keeps retrying a job that keeps failing, at most every 30 minutes, so an outage loses nothing", async () => {
     world.conversation(31, [{ id: 3101, content: "hello", message_type: 0 }]);
     world.failConversations = 100;
     await chatwootWebhook(created(31));
@@ -746,17 +791,27 @@ describe("worker", () => {
     expect(await jobAttempts("conversation:3:31")).toBe(1);
 
     await runInDurableObject(hub(), (_instance, state) => {
-      state.storage.sql.exec("UPDATE jobs SET attempts = 9, not_before = 0 WHERE key = 'conversation:3:31'");
+      state.storage.sql.exec("UPDATE jobs SET attempts = 20, not_before = 0 WHERE key = 'conversation:3:31'");
     });
     await setAlarmNow();
     await drain();
-    expect(await jobAttempts("conversation:3:31")).toBeUndefined();
+    expect(await jobAttempts("conversation:3:31")).toBe(21);
+    const due = await runInDurableObject(hub(), (_instance, state) =>
+      state.storage.sql
+        .exec<{ not_before: number }>("SELECT not_before FROM jobs WHERE key = 'conversation:3:31'")
+        .one(),
+    );
+    expect(due.not_before - Date.now()).toBeLessThanOrEqual(30 * 60 * 1000);
 
-    // The next event starts over.
+    // Once Chatwoot answers again, the retry relays the message.
     world.failConversations = 0;
-    await chatwootWebhook(created(31));
+    await runInDurableObject(hub(), (_instance, state) => {
+      state.storage.sql.exec("UPDATE jobs SET not_before = 0 WHERE key = 'conversation:3:31'");
+    });
+    await setAlarmNow();
     await drain();
     expect(world.webhookPosts().at(-1)?.body.content).toBe("hello\n-# <@100000000000000777>");
+    expect(await jobAttempts("conversation:3:31")).toBeUndefined();
   });
 
   it("the sweep queues only conversations whose post is behind or out of date", async () => {
@@ -778,26 +833,37 @@ describe("worker", () => {
     });
   });
 
-  it("the sweep stops at its page limit and continues back from the oldest activity it read", async () => {
+  it("a sweep longer than a run's page limit continues where it stopped, down to its window's start", async () => {
     const start = Math.floor(Date.now() / 1000);
+    // 11 pages of recent conversations; only the last one is behind (a message never relayed).
     const busy = on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations", (request) => {
       const page = Number(request.url.searchParams.get("page"));
-      const payload = Array.from({ length: 25 }, (_, index) => ({
-        id: 50000 + (page - 1) * 25 + index,
-        status: "open",
-        last_activity_at: start - ((page - 1) * 25 + index),
-        messages: [],
-      }));
+      const payload =
+        page > 11
+          ? []
+          : Array.from({ length: 25 }, (_, index) => {
+              const id = 50000 + (page - 1) * 25 + index;
+              return {
+                id,
+                status: "open",
+                last_activity_at: start - id + 50000,
+                messages: id === 50274 ? [{ id: 1 }] : [],
+              };
+            });
       return json({ data: { meta: {}, payload } });
     });
     world.mock.spy.mockRestore();
     world = new World([busy]);
     await sweep();
-    expect(world.sent("GET", /^\/api\/v1\/accounts\/3\/conversations$/)).toHaveLength(10);
-    const watermark = await runInDurableObject(hub(), (_instance, state) =>
-      state.storage.sql.exec<{ value: string }>("SELECT value FROM cache WHERE key = 'sweep:3:last'").one(),
+    const pages = world
+      .sent("GET", /^\/api\/v1\/accounts\/3\/conversations$/)
+      .map((request) => Number(request.url.searchParams.get("page")));
+    expect(pages).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(world.sent("GET", /^\/api\/v1\/accounts\/3\/conversations\/50274$/).length).toBeGreaterThan(0);
+    const cache = await runInDurableObject(hub(), (_instance, state) =>
+      state.storage.sql.exec<{ key: string }>("SELECT key FROM cache WHERE key LIKE 'sweep:3:%'").toArray(),
     );
-    expect(Number(watermark.value)).toBe((start - 249) * 1000);
+    expect(cache.map((row) => row.key)).toEqual(["sweep:3:last"]);
   });
 
   it("closes the post when a command finds its conversation deleted", async () => {

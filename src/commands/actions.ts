@@ -18,14 +18,21 @@ interface CommandResult {
 
 /** Never throws. */
 export async function executeCommand(job: CommandJob, settings: Settings, fetch: Fetch): Promise<CommandResult> {
+  // The link is checked again here: it may have changed since the command was queued.
+  const chatwootUserId = settings.chatwootUserFor(job.discordUserId);
   const token = settings.agentToken(job.discordUserId);
-  if (!token) return { content: `❌ ${NOT_LINKED}`, conversationGone: false };
+  if (chatwootUserId === undefined || !token) return { content: `❌ ${NOT_LINKED}`, conversationGone: false };
   const chatwoot = chatwootClient(settings.config.chatwoot.baseUrl, token, fetch);
   const { accountId, conversationId, action } = job;
 
   try {
     const profile = await chatwoot.getProfile();
     if (profile.id === undefined) throw new UserError(NOT_LINKED);
+    // A token stored for the wrong Discord user would act as someone else.
+    if (profile.id !== chatwootUserId) {
+      log.error("agent token belongs to another Chatwoot user", { discordUserId: job.discordUserId, chatwootUserId });
+      throw new UserError(TOKEN_MISMATCH);
+    }
     // The token works, but its user was removed from the account (or never was in it).
     if (!profile.accounts?.some((account) => account.id === accountId)) throw new UserError(NOT_IN_ACCOUNT);
 
@@ -164,6 +171,9 @@ function statusMessage(status: StatusChange["status"], snoozedUntil: number | un
       return snoozedUntil === undefined ? "Snoozed until the next reply." : `Snoozed until <t:${snoozedUntil}:f>.`;
   }
 }
+
+const TOKEN_MISMATCH =
+  "Your Chatwoot access token belongs to another Chatwoot user, so nothing was done. Ask an admin to fix your link.";
 
 const NOT_IN_ACCOUNT =
   "Your Chatwoot user is no longer an agent in this Chatwoot account. Ask an admin to add you back, or to unlink your Discord account.";

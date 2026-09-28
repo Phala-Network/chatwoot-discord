@@ -96,15 +96,16 @@ export class Notifier {
   private triage(message: RelayMessage): { mention?: string; note?: string } {
     const { triage, store } = this.options;
     if (!triage || !fromCustomer(message)) return {};
-    // Count each message once: a retry after a failed post must not use up the budget.
-    if (!store.firstAttempt(`triage:seen:${message.account.id}:${message.id}`)) return { mention: triage.userId };
-
-    const hour = this.options.now().toISOString().slice(0, 13);
-    const key = `${message.account.id}:${message.conversation.id}`;
-    if (store.increment(`triage:${key}:${hour}`) > triage.perConversationPerHour) {
-      return { note: conversationBudgetNote(triage) };
-    }
-    if (store.increment(`triage:${hour}`) > triage.perHour) return { note: hourlyBudgetNote(triage) };
+    // Decided and counted once per message: a retry after a failed post repeats the decision.
+    const decision = store.once(`triage:${message.account.id}:${message.id}`, () => {
+      const hour = this.options.now().toISOString().slice(0, 13);
+      const key = `${message.account.id}:${message.conversation.id}`;
+      if (store.increment(`triage:${key}:${hour}`) > triage.perConversationPerHour) return "conversation";
+      if (store.increment(`triage:${hour}`) > triage.perHour) return "hour";
+      return "mention";
+    });
+    if (decision === "conversation") return { note: conversationBudgetNote(triage) };
+    if (decision === "hour") return { note: hourlyBudgetNote(triage) };
     return { mention: triage.userId };
   }
 

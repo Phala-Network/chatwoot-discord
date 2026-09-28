@@ -1,24 +1,19 @@
-// Acts on messages Chatwoot reports as updated: removes the Discord messages of a message deleted
-// in Chatwoot, posts customers' responses to interactive messages, and says when an agent's reply
-// could not be delivered.
+// What a Chatwoot message's state adds to its post beyond its text, when the message is relayed
+// and when Chatwoot reports it updated: a customer's response to an interactive message, a
+// notice when an agent's reply could not be delivered, and removal when the message is deleted.
 
-import { toRelayConversation } from "../chatwoot/api.ts";
+import { type ChatwootMessage, toRelayConversation } from "../chatwoot/api.ts";
 import { log } from "../log.ts";
 import { clip } from "./format.ts";
 import type { ProcessorContext } from "./processor.ts";
 import { interactiveMessage, responseText } from "./response.ts";
-
-interface MessageRef {
-  accountId: number;
-  conversationId: number;
-  messageId: number;
-}
+import type { RelayConversation } from "./types.ts";
 
 /**
  * Acts on a message reported as updated once Chatwoot's API confirms the change: a deleted
- * message's Discord messages are deleted, a customer's response to an interactive message is
- * posted, and a notice says when an agent's message could not be delivered. Nothing is done for
- * a conversation without a post.
+ * message's Discord messages are deleted, and what its state adds is posted (see relayDerived).
+ * Only a message already relayed is acted on: before that (no post yet, or its job has not
+ * reached it), its conversation's job relays it with its current state.
  */
 export async function processMessageUpdate(
   context: ProcessorContext,
@@ -26,73 +21,97 @@ export async function processMessageUpdate(
   conversationId: number,
   messageId: number,
 ): Promise<void> {
-  const { settings, store, chatwoot } = context;
-  const threadId = store.conversation(accountId, conversationId)?.threadId;
-  if (!settings.account(accountId) || !threadId) return;
+  const { settings, store, chatwoot, relay } = context;
+  const post = store.conversation(accountId, conversationId);
+  const threadId = post?.threadId;
+  if (!settings.account(accountId) || !threadId || post?.cursor === undefined || messageId > post.cursor) return;
   const message = await chatwoot.getMessage(accountId, conversationId, messageId);
   if (!message) return;
-  const ref = { accountId, conversationId, messageId };
   if (message.content_attributes?.deleted === true) {
-    await deleteRelayedMessage(context, ref, threadId);
+    await deleteRelayedMessage(context, accountId, conversationId, messageId, threadId);
     return;
   }
-  if (message.status === "failed" && message.message_type === 1) {
-    const reason = message.content_attributes?.external_error?.trim();
-    const why = reason ? `: ${clip(reason, 300)}` : ".";
-    await postOnce(context, ref, `⚠️ A reply could not be delivered to the customer${why}`, "notice");
-    return;
-  }
-  const text = responseText(interactiveMessage(message.content_type, message.content, message.content_attributes));
-  if (text) await postOnce(context, ref, text, "response");
+  const raw = await chatwoot.getConversation(accountId, conversationId);
+  if (!raw) return; // Deleted: the conversation's own job closes the post.
+  const conversation = toRelayConversation(conversationId, raw);
+  // Posting unarchives the post: bring its archived flag back.
+  if (await relayDerived(context, accountId, conversation, message))
+    await relay.sync(accountId, conversation, threadId);
 }
 
+/**
+ * Posts what a message's state adds, once: a customer's response to it (under the customer's
+ * name) or a notice that it could not be delivered. Chatwoot lets a customer submit again (a
+ * CSAT rating can be changed for 14 days), and only changed text is posted again. A blocked
+ * contact's response is not posted, like their messages. Each post is recorded, so it is removed
+ * with the message. Returns whether it posted.
+ */
+export async function relayDerived(
+  { store, relay }: ProcessorContext,
+  accountId: number,
+  conversation: RelayConversation,
+  message: ChatwootMessage,
+): Promise<boolean> {
+  const derived = derivedText(message);
+  if (!derived || (derived.kind === "response" && conversation.contact.blocked)) return false;
+  const digest = await sha256(derived.text);
+  if (store.postedResponse(accountId, conversation.id, message.id) === digest) return false;
+  const discordId =
+    derived.kind === "response"
+      ? await relay.postResponse(accountId, conversation, derived.text)
+      : await relay.notify(accountId, conversation, derived.text);
+  if (discordId === undefined) return false;
+  store.savePostedResponse(accountId, conversation.id, message.id, digest);
+  store.saveDerivedMessage(accountId, conversation.id, message.id, discordId);
+  log.info(derived.kind === "response" ? "response posted" : "delivery failure posted", {
+    accountId,
+    conversationId: conversation.id,
+    messageId: message.id,
+  });
+  return true;
+}
+
+function derivedText(message: ChatwootMessage): { kind: "response" | "notice"; text: string } | undefined {
+  if (message.content_attributes?.deleted === true) return undefined;
+  if (message.status === "failed" && message.message_type === 1) {
+    const reason = message.content_attributes?.external_error?.trim();
+    return {
+      kind: "notice",
+      text: `⚠️ A reply could not be delivered to the customer${reason ? `: ${clip(reason, 300)}` : "."}`,
+    };
+  }
+  const text = responseText(interactiveMessage(message.content_type, message.content, message.content_attributes));
+  return text ? { kind: "response", text } : undefined;
+}
+
+/** Removes a deleted message's Discord messages, and its text from the post's title. */
 async function deleteRelayedMessage(
-  { settings, store, forum }: ProcessorContext,
-  { accountId, conversationId, messageId }: MessageRef,
+  context: ProcessorContext,
+  accountId: number,
+  conversationId: number,
+  messageId: number,
   threadId: string,
 ): Promise<void> {
+  const { settings, store, forum, chatwoot, relay } = context;
   const account = settings.account(accountId);
+  if (!account) return;
   const parts = store.postedParts(accountId, conversationId, messageId);
-  if (!account || parts.length === 0) return;
   for (const discordId of parts) {
     await forum.deleteMessage(account.forumChannelId, threadId, discordId);
     store.deletePostedPart(accountId, conversationId, messageId, discordId);
   }
-  log.info("deleted message removed from post", { accountId, conversationId, messageId, parts: parts.length });
-}
-
-/**
- * Posts text about a message once: a customer's response to it (under the customer's name) or
- * a notice. Chatwoot lets a customer submit again (a CSAT rating can be changed for 14 days),
- * and only changed text is posted again. Webhook payloads do not say what changed, so other
- * updates of the message (such as its read status) end here and post nothing. A blocked
- * contact's response is not posted, like their messages.
- */
-async function postOnce(
-  { store, relay, chatwoot }: ProcessorContext,
-  { accountId, conversationId, messageId }: MessageRef,
-  text: string,
-  kind: "response" | "notice",
-): Promise<void> {
-  const digest = await sha256(text);
-  if (store.postedResponse(accountId, conversationId, messageId) === digest) return;
-  const raw = await chatwoot.getConversation(accountId, conversationId);
-  if (!raw) return; // Deleted: the conversation's own job closes the post.
-  const conversation = toRelayConversation(conversationId, raw);
-  if (kind === "response" && conversation.contact.blocked) return;
-  const posted =
-    kind === "response"
-      ? await relay.postResponse(accountId, conversation, text)
-      : await relay.notify(accountId, conversation, text);
-  if (!posted) return;
-  store.savePostedResponse(accountId, conversationId, messageId, digest);
-  log.info(kind === "response" ? "response posted" : "delivery failure posted", {
-    accountId,
-    conversationId,
-    messageId,
-  });
-  const threadId = store.conversation(accountId, conversationId)?.threadId;
-  if (threadId) await relay.sync(accountId, conversation, threadId);
+  const derived = store.derivedMessages(accountId, conversationId, messageId);
+  for (const discordId of derived) {
+    await forum.deleteMessage(account.forumChannelId, threadId, discordId);
+    store.deleteDerivedMessage(accountId, conversationId, messageId, discordId);
+  }
+  if (parts.length + derived.length > 0) {
+    log.info("deleted message removed from post", { accountId, conversationId, messageId, parts: parts.length });
+  }
+  if (store.conversation(accountId, conversationId)?.titleMessageId === messageId) {
+    const raw = await chatwoot.getConversation(accountId, conversationId);
+    if (raw) await relay.dropTitleSubject(accountId, toRelayConversation(conversationId, raw), threadId);
+  }
 }
 
 async function sha256(text: string): Promise<string> {

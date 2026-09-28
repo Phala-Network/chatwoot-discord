@@ -42,13 +42,13 @@ export class MemoryStore implements RelayStore {
   rows = new Map<string, Partial<PostFields>>();
   parts = new Map<string, string[]>();
   counters = new Map<string, number>();
-  seen = new Set<string>();
+  decisions = new Map<string, string>();
 
   conversation(a: number, c: number) {
     const row = this.rows.get(`${a}:${c}`);
     if (!row) return undefined;
-    const { threadId, state, announcedAssignee, titleSubject, title } = row;
-    return { threadId, state, announcedAssignee, titleSubject, title };
+    const { threadId, state, announcedAssignee, announcePending, titleSubject, title, titleMessageId } = row;
+    return { threadId, state, announcedAssignee, announcePending, titleSubject, title, titleMessageId };
   }
   updateConversation(a: number, c: number, patch: Partial<PostFields>) {
     this.rows.set(`${a}:${c}`, { ...this.rows.get(`${a}:${c}`), ...patch });
@@ -68,10 +68,10 @@ export class MemoryStore implements RelayStore {
     this.rows.delete(`${a}:${c}`);
     for (const key of this.parts.keys()) if (key.startsWith(`${a}:${c}:`)) this.parts.delete(key);
   }
-  firstAttempt(name: string) {
-    if (this.seen.has(name)) return false;
-    this.seen.add(name);
-    return true;
+  once(name: string, decide: () => string) {
+    const value = this.decisions.get(name) ?? decide();
+    this.decisions.set(name, value);
+    return value;
   }
   increment(name: string) {
     const count = (this.counters.get(name) ?? 0) + 1;
@@ -204,6 +204,7 @@ export interface Recorded {
   method: string;
   url: URL;
   headers: Headers;
+  redirect: Request["redirect"];
   body: string;
   form: FormData | undefined;
 }
@@ -224,6 +225,7 @@ export function mockFetch(...routes: Route[]) {
       method: request.method,
       url: new URL(request.url),
       headers: request.headers,
+      redirect: request.redirect,
       body: form ? "" : await request.text(),
       form,
     };

@@ -32,6 +32,8 @@ const forumChannel = on("GET", `${api}/channels/55`, () =>
   }),
 );
 
+const application = on("GET", `${api}/applications/@me`, () => json({ id: "100000000000000001" }));
+
 function forum() {
   return new DiscordForum(new DiscordRest("bot-token", (request) => fetch(request)), new MemoryCache());
 }
@@ -41,7 +43,10 @@ afterEach(() => vi.restoreAllMocks());
 describe("DiscordForum", () => {
   it("reuses the existing Chatwoot webhook and posts without the bot token", async () => {
     const { requests } = mockFetch(
-      on("GET", `${api}/channels/55/webhooks`, () => json([{ id: "1", token: "abc", type: 1, name: "Chatwoot" }])),
+      application,
+      on("GET", `${api}/channels/55/webhooks`, () =>
+        json([{ id: "1", token: "abc", type: 1, name: "Chatwoot", application_id: "100000000000000001" }]),
+      ),
       on("POST", `${api}/webhooks/1/abc`, () => json({ id: "m1", channel_id: "thread-9" })),
     );
     const client = forum();
@@ -50,18 +55,22 @@ describe("DiscordForum", () => {
       messageId: "m1",
     });
     await client.execute("55", { content: "again" }, "thread-9");
-    expect(requests.filter((request) => request.method === "GET")).toHaveLength(1); // webhook cached
+    // The application id and the webhook are looked up once, then cached.
+    expect(requests.filter((request) => request.method === "GET")).toHaveLength(2);
     const posts = requests.filter((request) => request.url.pathname.startsWith("/api/v10/webhooks/"));
     expect(posts.map((request) => request.url.search)).toEqual(["?wait=true", "?wait=true&thread_id=thread-9"]);
     expect(posts.every((request) => request.headers.get("authorization") === null)).toBe(true);
-    expect(requests[0]?.headers.get("authorization")).toBe("Bot bot-token");
+    expect(requests[1]?.headers.get("authorization")).toBe("Bot bot-token");
   });
 
-  it("creates the webhook when missing", async () => {
+  it("creates the webhook when the forum has none of this application's, even one of the same name", async () => {
     const { requests } = mockFetch(
-      on("GET", `${api}/channels/55/webhooks`, () => json([{ id: "2", token: "x", type: 1, name: "Someone else" }])),
+      application,
+      on("GET", `${api}/channels/55/webhooks`, () =>
+        json([{ id: "2", token: "x", type: 1, name: "Chatwoot", application_id: "999999999999999999" }]),
+      ),
       on("POST", `${api}/channels/55/webhooks`, () =>
-        json({ id: "900", token: "new-token", type: 1, name: "Chatwoot" }),
+        json({ id: "900", token: "new-token", type: 1, name: "Chatwoot", application_id: "100000000000000001" }),
       ),
       on("POST", `${api}/webhooks/900/new-token`, () => json({ id: "m1", channel_id: "thread-1" })),
     );
@@ -128,7 +137,10 @@ describe("DiscordForum", () => {
   it("opens a post with the tags looked up again when Discord refuses a deleted one", async () => {
     let deleted = false;
     const { requests } = mockFetch(
-      on("GET", `${api}/channels/55/webhooks`, () => json([{ id: "1", token: "abc", type: 1, name: "Chatwoot" }])),
+      application,
+      on("GET", `${api}/channels/55/webhooks`, () =>
+        json([{ id: "1", token: "abc", type: 1, name: "Chatwoot", application_id: "100000000000000001" }]),
+      ),
       on("GET", `${api}/channels/55`, () =>
         json({ id: "55", guild_id: "44", available_tags: deleted ? [] : [{ id: "t-gone", name: "Gone" }] }),
       ),
@@ -151,7 +163,10 @@ describe("DiscordForum", () => {
 
   it("reports a deleted thread as UnknownThreadError", async () => {
     mockFetch(
-      on("GET", `${api}/channels/55/webhooks`, () => json([{ id: "1", token: "abc", type: 1, name: "Chatwoot" }])),
+      application,
+      on("GET", `${api}/channels/55/webhooks`, () =>
+        json([{ id: "1", token: "abc", type: 1, name: "Chatwoot", application_id: "100000000000000001" }]),
+      ),
       on("POST", `${api}/webhooks/1/abc`, () => json({ message: "Unknown Channel", code: 10003 }, { status: 404 })),
     );
     await expect(forum().execute("55", { content: "hi" }, "thread-1")).rejects.toBeInstanceOf(UnknownThreadError);
@@ -159,7 +174,10 @@ describe("DiscordForum", () => {
 
   it("deletes a webhook message in its thread, treating an already deleted one as done", async () => {
     const { requests } = mockFetch(
-      on("GET", `${api}/channels/55/webhooks`, () => json([{ id: "1", token: "abc", type: 1, name: "Chatwoot" }])),
+      application,
+      on("GET", `${api}/channels/55/webhooks`, () =>
+        json([{ id: "1", token: "abc", type: 1, name: "Chatwoot", application_id: "100000000000000001" }]),
+      ),
       on("DELETE", `${api}/webhooks/1/abc/messages/m1`, () => new Response(null, { status: 204 })),
       on("DELETE", `${api}/webhooks/1/abc/messages/m2`, () =>
         json({ message: "Unknown Message", code: 10008 }, { status: 404 }),
@@ -187,6 +205,19 @@ describe("DiscordForum", () => {
 });
 
 describe("DiscordRest", () => {
+  it("fails on a redirect instead of following it with the bot token", async () => {
+    const { requests } = mockFetch(
+      on(
+        "GET",
+        `${api}/channels/55`,
+        () => new Response(null, { status: 302, headers: { location: "https://evil.example/" } }),
+      ),
+    );
+    const rest = new DiscordRest("bot-token", (request) => fetch(request));
+    await expect(rest.get("/channels/55")).rejects.toBeInstanceOf(DiscordHttpError);
+    expect(requests.map((request) => [request.url.hostname, request.redirect])).toEqual([["discord.com", "manual"]]);
+  });
+
   it("waits for retry_after on 429 and retries", async () => {
     let calls = 0;
     mockFetch(

@@ -81,8 +81,9 @@ and a Discord server where you can add an application and a forum channel.
 - **Reliable by construction.** Chatwoot sends each account webhook once, with a short timeout
   and no retry (`lib/webhooks/trigger.rb` at v4.18.0), so webhooks are only triggers. The Worker
   verifies and queues the work durably in one Durable Object and answers at once; the Durable
-  Object reads Chatwoot's API, the source of truth; a sweep every 5 minutes repairs anything
-  missed.
+  Object reads Chatwoot's API, the source of truth, and retries failed work until it succeeds; a
+  sweep every 5 minutes finds conversations whose new messages or state were missed (see
+  [Internals](#internals) for what it does not cover).
 
 To connect an AI agent, see [Connecting an AI agent](docs/ai-agent.md).
 
@@ -95,6 +96,7 @@ To connect an AI agent, see [Connecting an AI agent](docs/ai-agent.md).
 - [Limits and the Workers Free plan](#limits-and-the-workers-free-plan)
 - [Security model](#security-model)
 - [Internals](#internals)
+- [State and recovery](#state-and-recovery)
 - [Installing on an existing Chatwoot](#installing-on-an-existing-chatwoot)
 - [Cutover from an existing relay](#cutover-from-an-existing-relay)
 - [Development](#development)
@@ -109,7 +111,8 @@ To connect an AI agent, see [Connecting an AI agent](docs/ai-agent.md).
    needed.
 2. Invite the bot with the `bot` and `applications.commands` scopes.
 3. Create a **forum channel**. Give the bot *View Channels*, *Manage Threads* (tags, archiving),
-   and *Manage Webhooks* (it creates a webhook named `Chatwoot` that posts the messages).
+   and *Manage Webhooks* (it creates a webhook, named `Chatwoot`, that posts the messages; it only
+   uses a webhook its own application created).
 4. Create the forum tags you want (names up to 20 characters, matched case-insensitively, so
    `Open` matches the `open` status; missing tags are skipped): one per account (its name, or its
    `tag`), one per status (`Open`, `Pending`, `Snoozed`, `Resolved`), `Unassigned`, one per agent
@@ -162,7 +165,8 @@ npm run deploy
 ```
 
 Either way, check the Worker: `curl https://<worker>/healthz` answers `{"ok":true}`, or 503 while
-`CONFIG` or a secret is invalid; the reason is in Workers Logs.
+`CONFIG` or a secret is invalid; the reason is in Workers Logs. It checks the configuration only:
+send a test message to check that Chatwoot, the Worker, and Discord reach each other.
 
 Self-hosting without Cloudflare is possible with the open-source
 [workerd](https://github.com/cloudflare/workerd) runtime (Durable Objects with SQLite and alarms
@@ -258,13 +262,15 @@ while the conversation is resolved.
 - Customer text cannot call a bot or pass for the relay's own lines: mention tokens (`<@…>`,
   `<@&…>`, `<#…>`, `</…>`), `@everyone`, `@here`, and a `-#` at the start of a line get a
   zero-width space.
-- A message deleted in Chatwoot is deleted from the post once Chatwoot's API confirms it. This
-  uses the forum webhook that posted it; if that webhook was deleted in Discord (the relay then
-  creates a new one), its messages stay, because the bot has no permission to delete others'
-  messages.
+- A message deleted in Chatwoot is deleted from the post once Chatwoot's API confirms it, with
+  the response and notice posted about it; when the post's title quotes it, the title keeps only
+  the ticket and the customer. This uses the forum webhook that posted them; if that webhook was
+  deleted in Discord (the relay then creates a new one), its messages stay, because the bot has no
+  permission to delete others' messages.
 - A customer's response to an interactive message (option pick, form, CSAT rating, email
   request) is posted under the customer's name, formatted like Chatwoot's Slack integration. A
-  changed response is posted again; an unchanged one is not.
+  changed response is posted again; an unchanged one is not. A response (or a delivery failure)
+  that exists when its message is first relayed is posted with it.
 - A reply the channel could not deliver (Chatwoot marks it failed, e.g. outside WhatsApp's
   24-hour window) gets one ⚠️ notice in the post with the channel's reason.
 - A conversation deleted in Chatwoot gets a notice in its post, which is archived and forgotten.
@@ -306,7 +312,7 @@ replace:
 | `relay.linkAttribute` | string | `discord_thread` | Conversation custom attribute that receives the post URL (`""` disables it). |
 | `relay.startAfterMessageId` | integer ≥ 0 | `0` | Messages with an id at or below this are never relayed (cutover watermark). |
 | `relay.maxAttempts` | integer ≥ 1 | `5` | Attempts before a message Discord refuses as invalid is skipped with a notice. |
-| `relay.subrequestBudget` | integer 20–1000, and ≥ `relay.maxChunks` + 24 | `45` | Outbound requests per alarm invocation (Free plan limit: 50). The minimum fits a run's setup and one message's worst case (`src/relay/limits.ts`). |
+| `relay.subrequestBudget` | integer 20–1000, and ≥ `relay.maxChunks` + 26 | `45` | Outbound requests per alarm invocation (Free plan limit: 50). The minimum fits a run's setup and one message's worst case (`src/relay/limits.ts`). |
 | `avatars.chatwoot` | https URL | `<publicUrl>/favicon-512x512.png` | Avatar of activity lines, cards, notices, agent bots, and agents with neither a linked Discord user nor an https Chatwoot avatar. |
 | `avatars.contact` | https URL | Gravatar "mystery person" | Avatar of customers without an https avatar in Chatwoot. |
 | `reconcile.lookbackSeconds` | integer ≥ 60 | `3600` | Minimum sweep window (conversations with activity within it are checked). Messages older than this are relayed without notifications. |
@@ -330,7 +336,7 @@ Secrets (Worker secrets, never in config), also validated at startup:
 | Free plan limit | How this service stays within it |
 |---|---|
 | 10 ms CPU per Worker request | The Worker verifies a signature, parses JSON, and makes one Durable Object call. Bodies over 2 MB are rejected; a very large webhook that fails is relayed by the next sweep. |
-| 50 subrequests per invocation | Alarms count requests against `relay.subrequestBudget` and yield to a fresh invocation before it runs out. A conversation run needs 4 requests to set up; it starts a message only while `relay.maxChunks` + 20 requests remain (its parts, 11 for everything else a message may need, and 9 to finish the run), so the budget must be at least `relay.maxChunks` + 24 (`src/relay/limits.ts`). A command starts only with 20 left, a sweep with 10. |
+| 50 subrequests per invocation | Alarms count requests against `relay.subrequestBudget` and yield to a fresh invocation before it runs out. A conversation run needs 4 requests to set up; it starts a message only while `relay.maxChunks` + 22 requests remain (its parts, 13 for everything else a message may need, and 9 to finish the run), so the budget must be at least `relay.maxChunks` + 26 (`src/relay/limits.ts`). A command starts only with 20 left, a sweep with 10. |
 | 128 MB memory | Attachments are capped at 25 MB each / 50 MB per command. |
 | 100,000 Worker requests/day | See the estimate below. |
 | Durable Objects (SQLite): 100,000 requests/day, 100,000 rows written/day | See the estimate below. |
@@ -351,7 +357,12 @@ Cloudflare's current pricing for the Free allowance.
   ±5 minute timestamp window, and the signing account must match the payload. A replayed webhook
   only queues a sync, which changes nothing when the post is up to date.
 - Discord interactions: Ed25519 signature verified (`discord-interactions`) before parsing;
-  unsigned requests get 401.
+  unsigned requests, and requests signed more than 5 minutes ago, get 401. A command is queued
+  once per interaction id, so a replayed request never runs it again.
+- A command runs with the invoker's own Chatwoot token only if that token's user is the Chatwoot
+  user `CONFIG` links them to; a token stored for the wrong Discord user does nothing.
+- Chatwoot and Discord API requests never follow redirects, which could carry a token to another
+  host.
 - Commands act only for linked users; others get an ephemeral refusal. The ticket is resolved
   from the stored post → conversation mapping, never from the post title.
 - Discord messages are sent with `allowed_mentions` locked down; only linked agents can be
@@ -376,10 +387,10 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
   support volumes are far below its throughput. Jobs run by priority (commands first), failures
   retry with exponential backoff (5 s … 30 min), and a run yields before the subrequest limit.
   A job that Discord rate limits waits as long as Discord asks, without counting an attempt.
-  A job that fails 10 times (about 45 minutes of backoff) is dropped: the sweep queues its
-  conversation again while it is behind, and its next webhook starts a new job. Every outbound
-  request times out after 60 seconds, which counts as a failed attempt. While a conversation's
-  job is backing off, new events for it wait for its next attempt.
+  A job is never dropped: after a few failures its log turns into errors, and it keeps retrying
+  at most every 30 minutes, so an outage of any length loses no work. Every outbound request
+  times out after 60 seconds, which counts as a failed attempt. While a conversation's job is
+  backing off, new events for it wait for its next attempt.
 - **Relaying** (`src/relay/`): a webhook only queues "sync conversation N" (conversation events
   wait 10 seconds first, for Chatwoot to create the change's activity message, which sends no
   webhook). The job fetches the conversation and the messages after its cursor, posts them in order, then corrects tags and the
@@ -388,13 +399,23 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
   webhooks cause no duplicate or missing posts. The one remaining way to post twice is a request
   Discord accepted whose response never arrived: Execute Webhook has no idempotency key.
 - **Sweep**: the cron trigger queues a sweep per account that pages through conversations, most
-  recent activity first, back to the last sweep (at least `reconcile.lookbackSeconds`, at most
-  `reconcile.maxCatchUpSeconds`, and at most 10 pages), and queues any conversation whose post is
-  behind or whose tags or state differ. When it stops at 10 pages, the next sweep reaches back
-  to the oldest activity it read. Activity means a new message; a change without one (for
-  example only the topic attribute), deletions, and interactive responses rely on their webhooks.
+  recent activity first, back to the start of the previous sweep (at least
+  `reconcile.lookbackSeconds`, at most `reconcile.maxCatchUpSeconds`), 10 pages per run and
+  continuing where it stopped, and queues any conversation whose post is behind or whose tags or
+  state differ. Activity means a new message. A change without one (for example only the topic
+  attribute) relies on its webhook, and so do deletions, responses, and delivery failures of
+  messages already relayed: the sweep does not re-read relayed messages, so a missed webhook for
+  one is not repaired. Neither does it read the post back from Discord: a title, tag, or archived
+  flag changed by hand in Discord stays until the conversation changes.
+- **Message order**: a run reads the messages after its cursor, and the cursor moves to the
+  highest id relayed. Chatwoot's `after` filter selects by id but orders by creation time
+  (`MessageFinder` at v4.18.0), so an inbox the relay reads must not receive messages with
+  earlier creation times than existing ones (for example an import of history): keep such an
+  import in an inbox the relay does not read (`accounts[].inboxIds`, or one its agent is not a
+  member of).
 - **Commands** (`src/commands/`): deferred commands run at most once, never retried, so a reply is
-  never sent twice; one that cannot start within 12 minutes is dropped, because Discord's
+  never sent twice; a repeated interaction is refused (see [Security model](#security-model)).
+  One that cannot start within 12 minutes is dropped, because Discord's
   interaction token (valid 15 minutes) could soon no longer report its result, and the invoker is
   told that nothing was done.
 - **Clients**: Discord calls use a small fetch-based client (`src/discord/rest.ts`), typed with
@@ -404,10 +425,26 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
   and generated types; messages are validated with zod because the spec's `message` schema does
   not describe the fields the API returns (see `src/chatwoot/api.ts`).
 
+## State and recovery
+
+All state (which post belongs to which conversation, how far each is relayed, the Discord ids
+of posted messages, the job queue) is in the Hub Durable Object's SQLite database. Restore it,
+if it is lost or damaged, with Durable Objects'
+[point-in-time recovery](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#pitr-point-in-time-recovery-api)
+(any point in the last 30 days).
+
+Without that, a new database recovers each post from the conversation's link attribute on the
+conversation's next run, but not how far it was relayed: with `relay.startAfterMessageId` 0 an
+adopted post continues after the conversation's latest message (messages not yet relayed are
+skipped), and with a watermark it relays everything after the watermark again (duplicates).
+The Discord ids of posted messages are gone, so messages deleted in Chatwoot later stay in
+Discord.
+
 ## Installing on an existing Chatwoot
 
-Conversations have no post until their next message; that post then relays the conversation's
-whole history (without notifications, see [Relay details](#relay-details)). To start with new
+Conversations with activity within `reconcile.lookbackSeconds` get a post from the first sweep;
+older ones get a post with their next message. A new post relays the conversation's whole
+history (without notifications, see [Relay details](#relay-details)). To start with new
 messages only, set `relay.startAfterMessageId` to the newest message id in Chatwoot when you
 install (for example the id in the newest conversation's `messages` from
 `GET /api/v1/accounts/<id>/conversations`).

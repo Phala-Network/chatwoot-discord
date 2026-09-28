@@ -1,6 +1,6 @@
 // Brings one conversation's forum post up to date from Chatwoot's API: relays every message
-// after the stored cursor, in order, then links the post from the conversation and corrects its
-// tags, title, and archived flag.
+// after the stored cursor, in order, then corrects the post's tags, title, and archived flag and
+// links the post from the conversation.
 
 import { type Budget, BudgetExhaustedError } from "../budget.ts";
 import {
@@ -20,6 +20,7 @@ import { mentionedUserIds } from "./format.ts";
 import { FINISH_REQUESTS, PAGE_REQUESTS, requestsPerMessage } from "./limits.ts";
 import { type ForumClient, Relay, type RelayStore } from "./relay.ts";
 import type { RelayConversation } from "./types.ts";
+import { relayDerived } from "./updates.ts";
 
 const INBOX_CACHE_MS = 24 * 60 * 60 * 1000;
 const AVATAR_CACHE_MS = 24 * 60 * 60 * 1000;
@@ -106,7 +107,6 @@ export async function processConversation(
   }
 
   let inboxName: string | null | undefined;
-  let notified = false;
   for (;;) {
     if (budget.remaining < perMessage + PAGE_REQUESTS) return "yield";
     const page = await chatwoot.listMessages(accountId, conversationId, cursor);
@@ -123,7 +123,9 @@ export async function processConversation(
         ...(await linkedAgents(context, message)),
       });
       try {
-        notified = (await relay.relay(relayMessage)) || notified;
+        await relay.relay(relayMessage);
+        // With its current state: an update reported before the message was relayed is not lost.
+        await relayDerived(context, accountId, conversation, message);
       } catch (error) {
         if (error instanceof BudgetExhaustedError) return "yield";
         // Only a request Discord refuses as invalid counts towards skipping the message. Anything
@@ -152,12 +154,13 @@ export async function processConversation(
     if (page.length < MESSAGE_PAGE_SIZE) break;
   }
 
-  const threadId = store.conversation(accountId, conversationId)?.threadId;
+  const post = store.conversation(accountId, conversationId);
+  const threadId = post?.threadId;
   if (threadId) {
     if (budget.remaining < FINISH_REQUESTS) return "yield";
-    if (notified) await relay.announceAssignee(accountId, conversation);
-    await linkPost(context, accountId, account.forumChannelId, conversation, threadId);
+    if (post?.announcePending) await relay.announceAssignee(accountId, conversation);
     await relay.sync(accountId, conversation, threadId);
+    await linkPost(context, accountId, account.forumChannelId, conversation, threadId);
   }
   return "done";
 }
@@ -198,8 +201,8 @@ async function recoverThread(
 
 /**
  * Records the post URL in the conversation's link attribute unless it already points to the
- * post, e.g. after the post was created or recreated. The link is a convenience: failing to
- * record it does not stop the relay, and the next sync tries again.
+ * post, e.g. after the post was created or recreated. It runs last: a failure fails the job,
+ * whose retry (the messages and the post's state are already recorded) only links.
  */
 async function linkPost(
   { settings, chatwoot, forum }: ProcessorContext,
@@ -210,18 +213,9 @@ async function linkPost(
 ): Promise<void> {
   const attribute = settings.config.relay.linkAttribute;
   if (!attribute || threadIdFromUrl(conversation.customAttributes[attribute]) === threadId) return;
-  try {
-    const url = await forum.postUrl(forumChannelId, threadId);
-    await chatwoot.setCustomAttribute(accountId, conversation.id, attribute, url);
-    conversation.customAttributes[attribute] = url;
-  } catch (error) {
-    if (error instanceof BudgetExhaustedError) throw error;
-    log.error("could not link post from conversation", {
-      accountId,
-      conversationId: conversation.id,
-      ...errorFields(error),
-    });
-  }
+  const url = await forum.postUrl(forumChannelId, threadId);
+  await chatwoot.setCustomAttribute(accountId, conversation.id, attribute, url);
+  conversation.customAttributes[attribute] = url;
 }
 
 /** The thread id in a https://discord.com/channels/<guild>/<thread> link. */

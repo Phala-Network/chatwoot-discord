@@ -42,6 +42,8 @@ class World {
   };
   messages: FakeMessage[] = [];
   failLinks = 0;
+  /** Assignee announcements Discord fails before accepting them. */
+  failAnnouncements = 0;
   /** Posts deleted in Discord. */
   goneThreads = new Set<string>();
   /** Discord's answer to posting into a thread, while it fails. */
@@ -74,8 +76,9 @@ class World {
         return json({});
       }),
       on("GET", `${base}/inboxes/2`, () => json({ id: 2, name: "Web" })),
+      on("GET", "discord.com/api/v10/applications/@me", () => json({ id: "100000000000000001" })),
       on("GET", `discord.com/api/v10/channels/${FORUM}/webhooks`, () =>
-        json([{ id: "1", token: "tok", type: 1, name: "Chatwoot" }]),
+        json([{ id: "1", token: "tok", type: 1, name: "Chatwoot", application_id: "100000000000000001" }]),
       ),
       on("GET", `discord.com/api/v10/channels/${FORUM}`, () =>
         json({ id: FORUM, guild_id: GUILD, available_tags: [] }),
@@ -99,9 +102,22 @@ class World {
         /^discord\.com\/api\/v10\/channels\/\d+\/thread-members\/\d+$/,
         () => new Response(null, { status: 204 }),
       ),
+      on(
+        "DELETE",
+        /^discord\.com\/api\/v10\/webhooks\/1\/tok\/messages\/.+$/,
+        () => new Response(null, { status: 204 }),
+      ),
       on("POST", "discord.com/api/v10/webhooks/1/tok", (request) => {
         const thread = request.url.searchParams.get("thread_id");
         if (thread && this.threadFailure) return this.threadFailure();
+        if (
+          thread &&
+          this.failAnnouncements > 0 &&
+          String(JSON.parse(request.body).content).startsWith("-# Assigned to")
+        ) {
+          this.failAnnouncements -= 1;
+          return json({ message: "unavailable" }, { status: 503 });
+        }
         if (thread) return json({ id: `m-${this.requests.length}`, channel_id: thread });
         this.threads += 1;
         return json({ id: "card", channel_id: `20000000000000000${this.threads}` });
@@ -307,14 +323,15 @@ describe("processConversation", () => {
     });
   });
 
-  it("links the post from its conversation, and tries again on a later sync when that fails", async () => {
+  it("links the post from its conversation, failing the job for a retry when that fails", async () => {
     const world = new World();
     world.messages = [{ id: 1, content: "hello", message_type: 0 }];
     world.failLinks = 1;
     await withStore(async (store) => {
       const settings = testSettings();
-      await sync(store, settings);
+      await expect(sync(store, settings)).rejects.toThrow();
       expect(world.conversation.custom_attributes).toEqual({});
+      // The retry, with no new message, only links.
       await sync(store, settings);
       const link = `https://discord.com/channels/${GUILD}/${store.conversation(3, 12)?.threadId}`;
       expect(world.conversation.custom_attributes).toEqual({ discord_thread: link });
@@ -365,6 +382,26 @@ describe("processConversation", () => {
       ]);
       // The new assignee is added to the post, once.
       expect(world.sent("PUT", `/thread-members/${BOB}`)).toHaveLength(1);
+    });
+  });
+
+  it("retries a failed assignee announcement without new messages, so the assignee is still pinged", async () => {
+    const world = new World();
+    world.conversation.meta = { ...Object(world.conversation.meta), assignee: { id: 43, name: "Bob" } };
+    world.messages = [{ id: 1, content: "hello", message_type: 0, created_at: now() - 5 }];
+    world.failAnnouncements = 1;
+    await withStore(async (store) => {
+      const settings = testSettings();
+      await expect(sync(store, settings)).rejects.toThrow();
+      await sync(store, settings);
+      // The customer message was posted once; the announcement failed, then its retry succeeded.
+      expect(world.replies()).toEqual([
+        `hello\n-# <@${TRIAGE}>`,
+        `-# Assigned to <@${BOB}>`,
+        `-# Assigned to <@${BOB}>`,
+      ]);
+      expect(world.posts().at(-1)?.body.allowed_mentions).toEqual({ parse: [], users: [BOB] });
+      expect(store.conversation(3, 12)?.announcePending).toBe(0);
     });
   });
 
@@ -605,27 +642,83 @@ describe("agent avatars", () => {
 describe("processMessageUpdate", () => {
   it("says once in the post when an agent's reply could not be delivered", async () => {
     const world = new World();
-    world.messages = [{ id: 1, content: "hello", message_type: 0 }];
+    world.messages = [
+      { id: 1, content: "hello", message_type: 0 },
+      { id: 2, content: "Here is your refund", message_type: 1, status: "sent" },
+    ];
     await withStore(async (store) => {
       const settings = testSettings();
       await sync(store, settings);
-      const failed: FakeMessage = {
-        id: 2,
-        content: "Here is your refund",
-        message_type: 1,
+      // Delivery fails after the reply was relayed.
+      Object.assign(world.messages[1] ?? {}, {
         status: "failed",
         content_attributes: { external_error: "Message outside the 24 hour window" },
-      };
-      world.messages.push(failed);
+      });
       await processMessageUpdate(context(store, settings), 3, 12, 2);
       await processMessageUpdate(context(store, settings), 3, 12, 2);
       const notices = world.replies().filter((content) => content?.startsWith("⚠️"));
       expect(notices).toEqual(["⚠️ A reply could not be delivered to the customer: Message outside the 24 hour window"]);
 
       // A delivered message posts nothing.
-      world.messages.push({ id: 3, content: "ok", message_type: 1, status: "sent" });
-      await processMessageUpdate(context(store, settings), 3, 12, 3);
+      await processMessageUpdate(context(store, settings), 3, 12, 1);
       expect(world.replies().filter((content) => content?.startsWith("⚠️"))).toHaveLength(1);
+    });
+  });
+
+  it("relays a failure and a response reported before their message was relayed, with the message", async () => {
+    const world = new World();
+    world.messages = [
+      { id: 1, content: "hello", message_type: 0 },
+      { id: 2, content: "Here is your refund", message_type: 1, status: "failed", content_attributes: {} },
+      {
+        id: 3,
+        content: "How did we do?",
+        message_type: 3,
+        content_type: "input_csat",
+        content_attributes: { submitted_values: { csat_survey_response: { rating: 5 } } },
+      },
+    ];
+    await withStore(async (store) => {
+      const settings = testSettings();
+      // The updates arrive first: there is no post yet, so the job relays them with the messages.
+      await processMessageUpdate(context(store, settings), 3, 12, 2);
+      await processMessageUpdate(context(store, settings), 3, 12, 3);
+      expect(world.posts()).toEqual([]);
+      await sync(store, settings);
+      expect(world.replies()).toEqual([
+        `hello\n-# <@${TRIAGE}>`,
+        "Here is your refund",
+        "⚠️ A reply could not be delivered to the customer.",
+        "How did we do?\n\n**CSAT:**\n• Rating: 5",
+      ]);
+    });
+  });
+
+  it("removes a deleted message with the response posted about it, and its text from the title", async () => {
+    const world = new World();
+    world.messages = [
+      { id: 1, content: "my password is hunter2", message_type: 0 },
+      {
+        id: 2,
+        content: "How did we do?",
+        message_type: 3,
+        content_type: "input_csat",
+        content_attributes: { submitted_values: { csat_survey_response: { rating: 1, feedback_message: "call me" } } },
+      },
+    ];
+    await withStore(async (store) => {
+      const settings = testSettings();
+      await sync(store, settings);
+      expect(world.replies()).toHaveLength(2); // the message and the response
+      for (const message of world.messages) Object.assign(message, { content_attributes: { deleted: true } });
+      await processMessageUpdate(context(store, settings), 3, 12, 1);
+      await processMessageUpdate(context(store, settings), 3, 12, 2);
+      expect(world.sent("DELETE", "")).toHaveLength(2);
+      const renamed = world
+        .sent("PATCH", "")
+        .map((request) => JSON.parse(request.body).name)
+        .filter(Boolean);
+      expect(renamed.at(-1)).toBe("[Acme #12] Jane Doe");
     });
   });
 });

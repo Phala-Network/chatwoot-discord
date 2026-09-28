@@ -73,12 +73,16 @@ export interface PostFields {
   state: string;
   /** The Chatwoot user id of the assignee the post last announced ("" for none; see assigneeKey). */
   announcedAssignee: string;
+  /** 1 while a live message is posted and the assignee is not announced after it yet (see announceAssignee). */
+  announcePending: number;
   /**
    * The subject the post's title ends with and the title last applied; unset for a post whose
    * title was not recorded (adopted, or created before titles were recorded).
    */
   titleSubject: string;
   title: string;
+  /** The Chatwoot message the title's subject comes from. */
+  titleMessageId: number;
 }
 
 export interface RelayStore {
@@ -94,8 +98,8 @@ export interface RelayStore {
   savePostedPart(accountId: number, conversationId: number, messageId: number, part: number, discordId: string): void;
   /** Forgets the post and everything recorded about it. */
   forgetThread(accountId: number, conversationId: number): void;
-  /** True the first time `name` is seen within the retention window. */
-  firstAttempt(name: string): boolean;
+  /** The value recorded for `name` within the retention window, else `decide()`, which is then recorded. */
+  once(name: string, decide: () => string): string;
   /** Increments an hourly counter and returns the new value. */
   increment(name: string): number;
 }
@@ -144,15 +148,15 @@ export class Relay {
   /**
    * Posts a message into its conversation's post, creating the post if needed. Each Discord
    * message is recorded as soon as it is sent, so a retry resumes after the last one. Templates,
-   * deleted and empty messages, and messages from a blocked contact are not relayed. Returns
-   * whether it posted a message that notifies (see `announceAssignee`).
+   * deleted and empty messages, and messages from a blocked contact are not relayed. A message
+   * that notifies leaves an announcement pending (see `announceAssignee`).
    */
-  async relay(message: RelayMessage): Promise<boolean> {
-    if (!RELAYED_TYPES.has(message.messageType) || message.deleted) return false;
+  async relay(message: RelayMessage): Promise<void> {
+    if (!RELAYED_TYPES.has(message.messageType) || message.deleted) return;
     // A blocked contact's messages are muted in Chatwoot (no notifications); keep them out of Discord too.
-    if (message.messageType === "incoming" && message.conversation.contact.blocked) return false;
+    if (message.messageType === "incoming" && message.conversation.contact.blocked) return;
     const text = body(message);
-    if (text === "") return false;
+    if (text === "") return;
 
     const { store } = this.options;
     const accountId = message.account.id;
@@ -173,14 +177,15 @@ export class Relay {
       await this.post(message, parts, threadId);
     }
     this.unarchived(accountId, conversation);
-    return this.notifier.notifies(message);
+    if (this.notifier.notifies(message)) store.updateConversation(accountId, conversation.id, { announcePending: 1 });
   }
 
   /**
-   * After a run's messages that notify: pings a newly assigned, linked agent in a notice of its
-   * own, so the ping follows the latest assignment line and names the current assignee however
-   * often the conversation was reassigned in between, and adds them to the post. The assignee
-   * counts as announced either way.
+   * After a run's messages, while an announcement is pending: pings a newly assigned, linked
+   * agent in a notice of its own, so the ping follows the latest assignment line and names the
+   * current assignee however often the conversation was reassigned in between, and adds them to
+   * the post. The assignee counts as announced either way. A failed notice stays pending, so the
+   * job's retry posts it even when there are no new messages.
    */
   async announceAssignee(accountId: number, conversation: RelayConversation): Promise<void> {
     const discordId = this.notifier.newAssignee(accountId, conversation);
@@ -190,11 +195,12 @@ export class Relay {
         ...notice,
         allowed_mentions: { parse: [], users: [discordId] },
       });
-      if (!posted) return;
+      if (posted === undefined) return;
       await this.addMember(accountId, conversation.id, discordId);
     }
     this.options.store.updateConversation(accountId, conversation.id, {
       announcedAssignee: assigneeKey(conversation),
+      announcePending: 0,
     });
   }
 
@@ -232,10 +238,19 @@ export class Relay {
   }
 
   /**
+   * The message the post's title quotes was deleted in Chatwoot: the title keeps only the ticket
+   * and the customer.
+   */
+  async dropTitleSubject(accountId: number, conversation: RelayConversation, threadId: string): Promise<void> {
+    this.options.store.updateConversation(accountId, conversation.id, { titleSubject: "", state: OUT_OF_DATE });
+    await this.sync(accountId, conversation, threadId);
+  }
+
+  /**
    * Posts a customer's response to an interactive message into the conversation's post, under
    * the contact's name and avatar (see `postMessage`).
    */
-  postResponse(accountId: number, conversation: RelayConversation, text: string): Promise<boolean> {
+  postResponse(accountId: number, conversation: RelayConversation, text: string): Promise<string | undefined> {
     const { frontendUrl, avatars } = this.options;
     let content = defused(text);
     if (content.length > CONTENT_LIMIT) {
@@ -255,7 +270,7 @@ export class Relay {
    * Posts a notice into the conversation's post, e.g. when one of its messages could not be
    * relayed or delivered (see `postMessage`).
    */
-  notify(accountId: number, conversation: RelayConversation, content: string): Promise<boolean> {
+  notify(accountId: number, conversation: RelayConversation, content: string): Promise<string | undefined> {
     return this.postMessage(accountId, conversation, this.notice(content));
   }
 
@@ -264,7 +279,7 @@ export class Relay {
     const { store, forum } = this.options;
     const threadId = store.conversation(accountId, conversationId)?.threadId;
     const gone = this.notice("This conversation no longer exists in Chatwoot.");
-    if (threadId && (await this.postMessage(accountId, { id: conversationId }, gone))) {
+    if (threadId && (await this.postMessage(accountId, { id: conversationId }, gone)) !== undefined) {
       try {
         await forum.updateThread(this.forumOf(accountId), threadId, { archived: true });
       } catch (error) {
@@ -369,6 +384,7 @@ export class Relay {
       threadId,
       titleSubject: subject,
       title,
+      titleMessageId: message.id,
       state: this.stateOf(conversation),
       // Nothing announced yet: an assignee is announced after the run's messages.
       announcedAssignee: "",
@@ -377,27 +393,28 @@ export class Relay {
   }
 
   /**
-   * Posts one message into the conversation's post. Returns false when there is no post, or it
-   * no longer exists in Discord (it is then forgotten). Like any message, it unarchives the post:
-   * a resolved post needs a sync afterwards.
+   * Posts one message into the conversation's post and returns its Discord id; undefined when
+   * there is no post, or it no longer exists in Discord (it is then forgotten). Like any message,
+   * it unarchives the post: a resolved post needs a sync afterwards.
    */
   private async postMessage(
     accountId: number,
     conversation: Pick<RelayConversation, "id" | "status">,
     message: WebhookMessage,
-  ): Promise<boolean> {
+  ): Promise<string | undefined> {
     const { store, forum } = this.options;
     const threadId = store.conversation(accountId, conversation.id)?.threadId;
-    if (!threadId) return false;
+    if (!threadId) return undefined;
+    let messageId: string;
     try {
-      await forum.execute(this.forumOf(accountId), message, threadId);
+      ({ messageId } = await forum.execute(this.forumOf(accountId), message, threadId));
     } catch (error) {
       if (!(error instanceof UnknownThreadError)) throw error;
       store.forgetThread(accountId, conversation.id);
-      return false;
+      return undefined;
     }
     this.unarchived(accountId, conversation);
-    return true;
+    return messageId;
   }
 
   /**
