@@ -11,8 +11,6 @@ export interface RelayAssignee {
 /** A Chatwoot agent linked to a Discord user (`agents[]`). */
 export interface LinkedAgent {
   discordUserId: string;
-  /** The agent's forum tag, instead of their Chatwoot name. */
-  tag?: string | undefined;
 }
 
 /** A file (its URL, and what it is when Chatwoot says), or a shared contact or location, which has no file. */

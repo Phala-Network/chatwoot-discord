@@ -9,6 +9,13 @@ import { minimumBudget } from "./relay/limits.ts";
 const DEFAULT_CONTACT_AVATAR = "https://gravatar.com/avatar/?d=mp&f=y&s=256";
 
 const snowflake = z.string().regex(/^\d{17,20}$/, "must be a Discord snowflake id");
+/** What a forum tag stands for (see tagKeys in relay/format.ts). */
+const tagKey = z
+  .string()
+  .regex(
+    /^(account:\d+|status:(open|pending|snoozed|resolved)|assignee:(none|\d+)|priority:(urgent|high|medium|low)|topic:.+|label:.+)$/,
+    "must be account:<id>, status:<status>, assignee:<Chatwoot user id or none>, priority:<priority>, topic:<value>, or label:<label>",
+  );
 const unique = <T>(values: T[]) => new Set(values).size === values.length;
 const MB = 1024 * 1024;
 
@@ -27,8 +34,6 @@ export const configSchema = z
           /** Shown in post titles ("[Name #12] ...") and command confirmations. */
           name: z.string().min(1),
           forumChannelId: snowflake,
-          /** Forum tag applied to the account's posts. Defaults to `name`. */
-          tag: z.string().min(1).optional(),
           /** Relay only conversations of these inboxes. Unset: every inbox. */
           inboxIds: z.array(z.number().int().positive()).min(1).optional(),
         }),
@@ -43,8 +48,6 @@ export const configSchema = z
           discordUserId: snowflake,
           /** The Chatwoot agent's user id, which (unlike their email) they cannot change. */
           chatwootUserId: z.number().int().positive(),
-          /** Forum tag of the agent's posts. Default: their Chatwoot name, which they can change. */
-          tag: z.string().min(1).optional(),
         }),
       )
       .refine((agents) => unique(agents.map((agent) => agent.discordUserId)), {
@@ -54,6 +57,8 @@ export const configSchema = z
         message: "chatwootUserId must be unique",
       })
       .default([]),
+    /** Per forum channel id: forum tag id by what it stands for ("status:open": "<tag id>"). */
+    forumTags: z.record(snowflake, z.record(tagKey, snowflake)).default({}),
     triage: z
       .strictObject({
         /** Discord user id of a triage bot to mention on customer messages. Unset: no mention. */

@@ -81,35 +81,22 @@ describe("DiscordForum", () => {
     ).toBe(JSON.stringify({ name: "Chatwoot" }));
   });
 
-  it("matches tags by name, case-insensitively, skipping missing ones", async () => {
-    mockFetch(forumChannel);
+  it("links a post in its forum's guild, looking the guild up once", async () => {
+    const { requests } = mockFetch(forumChannel);
     const client = forum();
-    expect(await client.tagIds("55", ["acme", "resolved"])).toEqual(["t-acme", "t-resolved"]);
-    expect(await client.tagIds("55", ["Globex", "OPEN", undefined])).toEqual(["t-open"]);
     expect(await client.postUrl("55", "123")).toBe("https://discord.com/channels/44/123");
+    expect(await client.postUrl("55", "124")).toBe("https://discord.com/channels/44/124");
+    expect(requests).toHaveLength(1);
   });
 
   it.each([
     ["an invalid form body", 400, 50035],
     ["an unknown tag", 404, 10087],
-  ])("looks the tags up again once when Discord refuses a tag deleted since (%s)", async (_name, status, code) => {
-    let deleted = false;
+  ])("sends a refused update again without the tags the forum no longer has (%s)", async (_name, status, code) => {
     const { requests } = mockFetch(
+      // "t-open" was deleted in Discord.
       on("GET", `${api}/channels/55`, () =>
-        json({
-          id: "55",
-          guild_id: "44",
-          // "Open" was deleted and created again, with a new id.
-          available_tags: deleted
-            ? [
-                { id: "t-acme", name: "Acme" },
-                { id: "t-open-2", name: "Open" },
-              ]
-            : [
-                { id: "t-acme", name: "Acme" },
-                { id: "t-open", name: "Open" },
-              ],
-        }),
+        json({ id: "55", guild_id: "44", available_tags: [{ id: "t-acme", name: "Acme" }] }),
       ),
       on("PATCH", `${api}/channels/111`, (request) =>
         JSON.parse(request.body).applied_tags.includes("t-open")
@@ -119,41 +106,38 @@ describe("DiscordForum", () => {
       on("PATCH", `${api}/channels/222`, () => json({ message: "Invalid Form Body", code: 50035 }, { status: 400 })),
     );
     const client = forum();
-    const tags = await client.tagIds("55", ["acme", "open"]);
-    deleted = true;
-    await client.updateThread("55", "111", { archived: false, applied_tags: tags });
+    await client.updateThread("55", "111", { archived: false, applied_tags: ["t-acme", "t-open"] });
     const patches = requests.filter((request) => request.method === "PATCH").map((request) => JSON.parse(request.body));
     expect(patches).toEqual([
       { archived: false, applied_tags: ["t-acme", "t-open"] },
-      { archived: false, applied_tags: ["t-acme", "t-open-2"] },
+      { archived: false, applied_tags: ["t-acme"] },
     ]);
-    // A refused request without tags is not sent again.
+    // A refused request whose tags all exist, or without tags, is not sent again.
+    await expect(client.updateThread("55", "222", { archived: false, applied_tags: ["t-acme"] })).rejects.toMatchObject(
+      {
+        status: 400,
+      },
+    );
     await expect(client.updateThread("55", "222", { archived: false, name: "x" })).rejects.toMatchObject({
       status: 400,
     });
-    expect(requests.filter((request) => request.url.pathname.endsWith("/222"))).toHaveLength(1);
+    expect(requests.filter((request) => request.url.pathname.endsWith("/222"))).toHaveLength(2);
   });
 
-  it("opens a post with the tags looked up again when Discord refuses a deleted one", async () => {
-    let deleted = false;
+  it("opens a post without a tag the forum no longer has when Discord refuses it", async () => {
     const { requests } = mockFetch(
       application,
       on("GET", `${api}/channels/55/webhooks`, () =>
         json([{ id: "1", token: "abc", type: 1, name: "Chatwoot", application_id: "100000000000000001" }]),
       ),
-      on("GET", `${api}/channels/55`, () =>
-        json({ id: "55", guild_id: "44", available_tags: deleted ? [] : [{ id: "t-gone", name: "Gone" }] }),
-      ),
+      on("GET", `${api}/channels/55`, () => json({ id: "55", guild_id: "44", available_tags: [] })),
       on("POST", `${api}/webhooks/1/abc`, (request) =>
         JSON.parse(request.body).applied_tags?.length
           ? json({ message: "Invalid Form Body", code: 50035 }, { status: 400 })
           : json({ id: "m1", channel_id: "thread-9" }),
       ),
     );
-    const client = forum();
-    const tags = await client.tagIds("55", ["gone"]);
-    deleted = true;
-    expect(await client.execute("55", { content: "card", thread_name: "Ticket", applied_tags: tags })).toEqual({
+    expect(await forum().execute("55", { content: "card", thread_name: "Ticket", applied_tags: ["t-gone"] })).toEqual({
       channelId: "thread-9",
       messageId: "m1",
     });

@@ -6,7 +6,6 @@ import type { RESTPostAPIWebhookWithTokenJSONBody } from "discord-api-types/v10"
 import { errorFields, log } from "../log.ts";
 import {
   type Avatars,
-  assigneeName,
   body,
   CONTENT_LIMIT,
   charLength,
@@ -20,7 +19,7 @@ import {
   senderAvatar,
   senderName,
   split,
-  tagNames,
+  tagKeys,
   threadTitle,
   titleSubject,
   topicTag,
@@ -56,8 +55,6 @@ export interface ForumClient {
   ): Promise<void>;
   /** Deletes a message the forum's webhook posted; a message that is already gone counts as deleted. */
   deleteMessage(forumChannelId: string, threadId: string, messageId: string): Promise<void>;
-  /** Tag ids matched by name, case-insensitively; missing tags are skipped. At most 5. */
-  tagIds(forumChannelId: string, names: ReadonlyArray<string | undefined>): Promise<string[]>;
   /** True if `threadId` is a post that still exists in the forum. */
   threadExists(forumChannelId: string, threadId: string): Promise<boolean>;
   /** Link to a post, e.g. https://discord.com/channels/<guild>/<thread>. */
@@ -108,8 +105,8 @@ interface AccountTarget {
   forumChannelId: string;
   /** Shown in post titles. */
   name: string;
-  /** Forum tag for the account (product/brand). */
-  tag: string;
+  /** The forum's tag ids by what they stand for (see tagKeys). */
+  tags: Readonly<Record<string, string>>;
 }
 
 export interface RelayOptions {
@@ -130,6 +127,8 @@ export interface RelayOptions {
 
 /** A stored state that matches no conversation: the post's archived flag must be applied again. */
 const OUT_OF_DATE = "";
+/** Discord applies at most this many tags to a post. */
+const MAX_TAGS = 5;
 const RELAYED_TYPES = new Set(["incoming", "outgoing", "activity"]);
 
 export class Relay {
@@ -222,7 +221,7 @@ export class Relay {
     try {
       await forum.updateThread(target.forumChannelId, threadId, {
         archived: false,
-        applied_tags: await this.postTags(accountId, conversation),
+        applied_tags: this.postTags(accountId, conversation),
         ...(rename ? { name: rename } : {}),
       });
       if (rename) store.updateConversation(accountId, conversation.id, { title: rename });
@@ -293,7 +292,7 @@ export class Relay {
   stateOf(conversation: RelayConversation): string {
     return JSON.stringify([
       conversation.status ?? "",
-      this.assigneeTag(conversation),
+      conversation.assignee?.id ?? "",
       topicTag(conversation, this.options.topicAttribute) ?? "",
       conversation.priority ?? "",
       conversation.labels.toSorted(),
@@ -377,7 +376,7 @@ export class Relay {
       avatar_url: this.options.avatars.chatwoot,
       allowed_mentions: { parse: [] },
     };
-    const tags = await this.postTags(accountId, conversation);
+    const tags = this.postTags(accountId, conversation);
     if (tags.length > 0) post.applied_tags = tags;
     const { channelId: threadId } = await forum.execute(target.forumChannelId, post);
     store.updateConversation(accountId, conversation.id, {
@@ -442,12 +441,6 @@ export class Relay {
     };
   }
 
-  /** Tag for the assignee so the forum can be filtered by owner: a linked agent's `tag`, else their name. */
-  private assigneeTag(conversation: RelayConversation): string {
-    const assigneeId = conversation.assignee?.id;
-    return (assigneeId ? this.options.linkedAgent?.(assigneeId)?.tag : undefined) ?? assigneeName(conversation);
-  }
-
   private forumOf(accountId: number): string {
     return this.options.target(accountId).forumChannelId;
   }
@@ -459,11 +452,10 @@ export class Relay {
     }
   }
 
-  private postTags(accountId: number, conversation: RelayConversation): Promise<string[]> {
-    const target = this.options.target(accountId);
-    return this.options.forum.tagIds(
-      target.forumChannelId,
-      tagNames(target.tag, this.assigneeTag(conversation), conversation, this.options.topicAttribute),
-    );
+  /** The configured forum tags the conversation has; what has no tag in the forum is skipped. */
+  private postTags(accountId: number, conversation: RelayConversation): string[] {
+    const { tags } = this.options.target(accountId);
+    const ids = tagKeys(accountId, conversation, this.options.topicAttribute).flatMap((key) => tags[key] ?? []);
+    return [...new Set(ids)].slice(0, MAX_TAGS);
   }
 }

@@ -140,8 +140,8 @@ class World {
           type: 15,
           guild_id: GUILD,
           available_tags: [
-            { id: "t-acme", name: "Acme" },
-            { id: "t-open", name: "open" },
+            { id: "100000000000000301", name: "Acme" },
+            { id: "100000000000000302", name: "open" },
           ],
         }),
       ),
@@ -343,7 +343,7 @@ describe("worker", () => {
     expect(posts[0]?.thread).toBeNull();
     expect(posts[0]?.body).toMatchObject({
       thread_name: "[Acme #12] Jane Doe — My agent will not connect",
-      applied_tags: ["t-acme", "t-open"],
+      applied_tags: ["100000000000000301", "100000000000000302"],
       content:
         "-# via Live chat · Acme — Product App\n-# jane@example.com\n[Open in Chatwoot](<https://chatwoot.example.com/app/accounts/3/conversations/12>)",
     });
@@ -511,8 +511,8 @@ describe("worker", () => {
     ]);
     // The first update failed; the retry unarchives with the tags, then archives.
     expect(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).map((request) => JSON.parse(request.body))).toEqual([
-      { archived: false, applied_tags: ["t-acme"] },
-      { archived: false, applied_tags: ["t-acme"] },
+      { archived: false, applied_tags: ["100000000000000301"] },
+      { archived: false, applied_tags: ["100000000000000301"] },
       { archived: true },
     ]);
   });
@@ -769,7 +769,7 @@ describe("worker", () => {
     await drain();
     expect(world.webhookPosts().at(-1)?.body.content).toBe("_Resolved by Sam_");
     expect(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).map((request) => JSON.parse(request.body))).toEqual([
-      { archived: false, applied_tags: ["t-acme"] },
+      { archived: false, applied_tags: ["100000000000000301"] },
       { archived: true },
     ]);
 
@@ -779,7 +779,7 @@ describe("worker", () => {
     await drain();
     expect(JSON.parse(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).at(-1)?.body ?? "")).toEqual({
       archived: false,
-      applied_tags: ["t-acme", "t-open"],
+      applied_tags: ["100000000000000301", "100000000000000302"],
     });
   });
 

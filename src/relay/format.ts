@@ -256,29 +256,26 @@ export function fromCustomer(message: RelayMessage): boolean {
  * The assignee's `name`, which is what Chatwoot's dashboard shows as the assignee and in
  * assignment activity messages: the assignee tag of an agent without a configured tag.
  */
-export function assigneeName(conversation: RelayConversation): string {
-  return filled(conversation.assignee?.name) ?? "unassigned";
-}
-
 /** Tag for the topic the customer picked (a conversation custom attribute), if any. */
 export function topicTag(conversation: RelayConversation, attribute: string): string | undefined {
   return filled(conversation.customAttributes[attribute]);
 }
 
-/** The post's tags by name, most important first (Discord applies at most 5). */
-export function tagNames(
-  accountTag: string,
-  assigneeTag: string,
-  conversation: RelayConversation,
-  topicAttribute: string,
-) {
+/**
+ * What the post's tags stand for, as `forumTags` keys, most important first (Discord applies at
+ * most 5): account, status, assignee (Chatwoot user id), topic, priority, then labels.
+ */
+export function tagKeys(accountId: number, conversation: RelayConversation, topicAttribute: string): string[] {
+  const { assignee } = conversation;
+  const topic = topicTag(conversation, topicAttribute);
+  const priority = filled(conversation.priority);
   return [
-    accountTag,
-    conversation.status,
-    assigneeTag,
-    topicTag(conversation, topicAttribute),
-    filled(conversation.priority),
-    ...conversation.labels,
+    `account:${accountId}`,
+    ...(conversation.status ? [`status:${conversation.status}`] : []),
+    ...(assignee ? (assignee.id ? [`assignee:${assignee.id}`] : []) : ["assignee:none"]),
+    ...(topic ? [`topic:${topic}`] : []),
+    ...(priority ? [`priority:${priority}`] : []),
+    ...conversation.labels.map((label) => `label:${label}`),
   ];
 }
 

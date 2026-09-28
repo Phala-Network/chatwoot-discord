@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading
 
+- **Breaking:** forum tags are bound by id. Remove `accounts[].tag` and `agents[].tag`, and map
+  each forum's tags in `forumTags` by what they stand for, for example
+  `{"<forum channel id>": {"account:1": "<tag id>", "status:open": "<tag id>", "assignee:42": "<tag id>"}}`
+  (see the [configuration reference](README.md#configuration-reference)). List a forum's tag ids
+  with `DISCORD_BOT_TOKEN=... npm run forum-tags -- --forum <forum channel id>`. Tags without an
+  entry are no longer applied; renaming a tag in Discord no longer matters. Active posts get their
+  tags again on their next sync.
+
 - `relay.subrequestBudget` must be at least `relay.maxChunks` + 26 (was + 24); the default 45
   still fits `maxChunks` up to 10.
 - On deploy the database migrates once: it adds a pending-announcement column, interaction
@@ -27,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   text from the post's title when the title quotes it.
 - A response or delivery failure reported before its message was relayed is posted with the
   message instead of being lost.
+
+### Changed
+
+- The assignee tag is bound to the Chatwoot user id, for linked and unlinked agents alike.
 
 ### Security
 

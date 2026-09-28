@@ -113,13 +113,14 @@ To connect an AI agent, see [Connecting an AI agent](docs/ai-agent.md).
 3. Create a **forum channel**. Give the bot *View Channels*, *Manage Threads* (tags, archiving),
    and *Manage Webhooks* (it creates a webhook, named `Chatwoot`, that posts the messages; it only
    uses a webhook its own application created).
-4. Create the forum tags you want (names up to 20 characters, matched case-insensitively, so
-   `Open` matches the `open` status; missing tags are skipped): one per account (its name, or its
-   `tag`), one per status (`Open`, `Pending`, `Snoozed`, `Resolved`), `Unassigned`, one per agent
-   (their `tag` in `agents[]`, else their Chatwoot `name`), one per topic value, and any priorities
-   (`Urgent`, `High`, `Medium`, `Low`) and Chatwoot labels you want to see. A forum has at most 20
-   tags. If the forum's **Require tags** setting is on, make sure every post matches at least one
-   tag (for example the account tag), or Discord rejects the new post.
+4. Create the forum tags you want: one per account, one per status (`Open`, `Pending`,
+   `Snoozed`, `Resolved`), one for unassigned posts, one per agent, one per topic value, and any
+   priorities and Chatwoot labels you want to see. A forum has at most 20 tags. Their names are
+   only shown to people: the relay binds each tag by its id in `forumTags`, so a tag can be
+   renamed freely. List the ids, after `npm ci` in a checkout, with
+   `DISCORD_BOT_TOKEN=... npm run forum-tags -- --forum <forum channel id>`. If the forum's
+   **Require tags** setting is on, make sure every post gets at least one tag (for example the
+   account tag), or Discord rejects the new post.
 
 ### 2. Chatwoot
 
@@ -229,12 +230,12 @@ while the conversation is resolved.
   (`agents[]`), else the agent's https Chatwoot avatar, else `avatars.chatwoot`. The bot looks
   each linked agent up at most once a day (one extra Discord request); if that fails, it uses the
   fallback and tries again an hour later. Agent bots keep `avatars.chatwoot`.
-- Tags are matched by name, case-insensitively. Discord applies at most 5 per post, taken in
-  this order: account, status, assignee, topic, priority, then labels. The assignee tag is the
-  linked agent's `tag` (`agents[]`), else the agent's Chatwoot `name`; the topic tag is the
-  conversation's `topic` custom attribute (`relay.topicAttribute`). A resolved conversation's
-  post is archived; any other status unarchives it. The forum's tags are read at most every 10 minutes; when Discord refuses a
-  request because a tag was deleted since, it is sent again with the tags read anew.
+- Tags are the forum's `forumTags` for what the conversation has; anything without a tag there is
+  skipped. Discord applies at most 5 per post, taken in this order: account, status, assignee
+  (by Chatwoot user id, so a renamed agent keeps their tag), topic (the conversation's
+  `relay.topicAttribute` custom attribute), priority, then labels. A resolved conversation's post
+  is archived; any other status unarchives it. When Discord refuses a request because a tag was
+  deleted in Discord, it is sent again without the missing tags, and a warning names them.
 - The post title follows the contact's name when it changes (on the conversation's next sync);
   posts adopted from another relay or created by earlier versions keep their title.
 - A newly assigned agent who is linked in `agents[]` is pinged once (a change of their Chatwoot
@@ -296,12 +297,11 @@ replace:
 | `accounts[].id` | integer > 0 | required | Chatwoot account id. |
 | `accounts[].name` | non-empty string | required | Shown in post titles (`[<name> #12] …`) and command confirmations. |
 | `accounts[].forumChannelId` | Discord id (17–20 digits) | required | The forum channel of the account's posts. |
-| `accounts[].tag` | non-empty string | `name` | Forum tag of the account's posts. |
 | `accounts[].inboxIds` | non-empty array of integers > 0 | every inbox | Relay only conversations of these inboxes. |
 | `agents[]` | unique `discordUserId`, unique `chatwootUserId` | `[]` | Links Discord users to Chatwoot agents: commands, assignee pings, mentions in private notes, `/assign` targets, and the Discord avatar on the agent's messages. |
 | `agents[].discordUserId` | Discord id (17–20 digits) | required | The agent's Discord user. |
 | `agents[].chatwootUserId` | integer > 0 | required | The agent's Chatwoot user id, the same in every account: the `id` from `GET /api/v1/profile` with the agent's own access token, or from an administrator's `GET /api/v1/accounts/<account id>/agents`. |
-| `agents[].tag` | non-empty string | Chatwoot `name` | Forum tag of the agent's posts; unlike their Chatwoot name, the agent cannot change it. |
+| `forumTags` | object: forum channel id → (key → tag id) | `{}` | The forum tags posts get, by what each tag stands for. Keys: `account:<account id>`, `status:open`, `status:pending`, `status:snoozed`, `status:resolved`, `assignee:<Chatwoot user id>`, `assignee:none`, `topic:<value>`, `priority:urgent`, `priority:high`, `priority:medium`, `priority:low`, `label:<label>`. Tag ids come from `npm run forum-tags`. |
 | `triage.userId` | Discord id (17–20 digits) | unset | Discord user id of an AI agent (triage bot) to mention on customer messages. Unset: no mention. |
 | `triage.name` | 1–100 characters | `Triage bot` | Name used in budget notes. |
 | `triage.perConversationPerHour` | integer ≥ 1 | `5` | Customer messages per conversation that call the triage bot each hour. |

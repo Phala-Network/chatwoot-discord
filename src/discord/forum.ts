@@ -1,5 +1,5 @@
-// The forum channel as seen by the bot: its tags and the webhook used to post messages under
-// each sender's name.
+// The forum channel as seen by the bot: the webhook used to post messages under each sender's
+// name, and its guild (for post links).
 
 import {
   type RESTDeleteAPIWebhookWithTokenMessageQuery,
@@ -18,14 +18,11 @@ import {
   Routes,
   WebhookType,
 } from "discord-api-types/v10";
-import { z } from "zod";
-import { parseJson } from "../json.ts";
+import { log } from "../log.ts";
 import { type ForumClient, UnknownThreadError, type WebhookMessage } from "../relay/relay.ts";
 import { DiscordHttpError, type DiscordRest } from "./rest.ts";
 
 const WEBHOOK_NAME = "Chatwoot";
-const MAX_TAGS = 5;
-const TAG_CACHE_MS = 10 * 60 * 1000;
 const UNKNOWN_WEBHOOK = 10015;
 const UNKNOWN_MESSAGE = 10008;
 const UNKNOWN_TAG = 10087;
@@ -37,9 +34,6 @@ export interface Cache {
   set(key: string, value: string, ttlMs?: number): void;
   delete(key: string): void;
 }
-
-const forumInfoSchema = z.object({ guildId: z.string(), tags: z.record(z.string(), z.string()) });
-type ForumInfo = z.infer<typeof forumInfoSchema>;
 
 export class DiscordForum implements ForumClient {
   constructor(
@@ -114,15 +108,6 @@ export class DiscordForum implements ForumClient {
     }
   }
 
-  async tagIds(forumChannelId: string, names: ReadonlyArray<string | undefined>): Promise<string[]> {
-    const { tags } = await this.channel(forumChannelId);
-    const ids = names.flatMap((name) => {
-      const id = name === undefined ? undefined : tags[name.toLowerCase()];
-      return id ? [id] : [];
-    });
-    return [...new Set(ids)].slice(0, MAX_TAGS);
-  }
-
   async threadExists(forumChannelId: string, threadId: string): Promise<boolean> {
     try {
       const channel = await this.rest.get<RESTGetAPIChannelResult>(Routes.channel(threadId));
@@ -134,7 +119,13 @@ export class DiscordForum implements ForumClient {
   }
 
   async postUrl(forumChannelId: string, threadId: string): Promise<string> {
-    const { guildId } = await this.channel(forumChannelId);
+    const key = `forum:${forumChannelId}:guild`;
+    let guildId = this.cache.get(key);
+    if (!guildId) {
+      const channel = await this.rest.get<RESTGetAPIChannelResult>(Routes.channel(forumChannelId));
+      guildId = "guild_id" in channel ? (channel.guild_id ?? "") : "";
+      if (guildId) this.cache.set(key, guildId); // A channel never changes its guild.
+    }
     return `https://discord.com/channels/${guildId}/${threadId}`;
   }
 
@@ -177,10 +168,10 @@ export class DiscordForum implements ForumClient {
   }
 
   /**
-   * Sends a request that applies forum tags. Tag ids are cached for a while, and a tag deleted
-   * since makes Discord refuse the request: Discord documents JSON code 10087 (Unknown Tag) but
-   * not its HTTP status, and refuses an invalid form body with 400. On either, the request is sent
-   * once more with the tags looked up again by name.
+   * Sends a request that applies configured forum tags. A tag deleted in Discord makes Discord
+   * refuse the request: Discord documents JSON code 10087 (Unknown Tag) but not its HTTP status,
+   * and refuses an invalid form body with 400. On either, the request is sent once more with only
+   * the tags the forum still has, and the missing ones are logged: `forumTags` needs updating.
    */
   private async withTags<T>(
     forumChannelId: string,
@@ -192,35 +183,16 @@ export class DiscordForum implements ForumClient {
     } catch (error) {
       const refused = error instanceof DiscordHttpError && (error.status === 400 || error.code === UNKNOWN_TAG);
       if (!refused || !tags?.length) throw error;
-      const known = (await this.channel(forumChannelId)).tags;
-      const names = Object.keys(known).filter((name) => tags.includes(known[name] ?? ""));
-      this.cache.delete(channelKey(forumChannelId));
-      return send(await this.tagIds(forumChannelId, names));
+      const channel = await this.rest.get<RESTGetAPIChannelResult>(Routes.channel(forumChannelId));
+      const existing = new Set("available_tags" in channel ? channel.available_tags.map((tag) => tag.id) : []);
+      const missing = tags.filter((id) => !existing.has(id));
+      if (missing.length === 0) throw error;
+      log.warn("forumTags has tags the forum no longer has", { forumChannelId, missing: missing.join(",") });
+      return send(tags.filter((id) => existing.has(id)));
     }
-  }
-
-  /**
-   * The forum's guild and its tags by lower-cased name, cached briefly so new tags are picked up
-   * without a deploy.
-   */
-  private async channel(forumChannelId: string): Promise<ForumInfo> {
-    const key = channelKey(forumChannelId);
-    const cached = forumInfoSchema.safeParse(parseJson(this.cache.get(key)));
-    if (cached.success) return cached.data;
-    const channel = await this.rest.get<RESTGetAPIChannelResult>(Routes.channel(forumChannelId));
-    const info: ForumInfo = { guildId: "guild_id" in channel ? (channel.guild_id ?? "") : "", tags: {} };
-    if ("available_tags" in channel) {
-      for (const tag of channel.available_tags) info.tags[tag.name.toLowerCase()] = tag.id;
-    }
-    this.cache.set(key, JSON.stringify(info), TAG_CACHE_MS);
-    return info;
   }
 }
 
 function webhookKey(forumChannelId: string): string {
   return `forum:${forumChannelId}:webhook`;
-}
-
-function channelKey(forumChannelId: string): string {
-  return `forum:${forumChannelId}:channel`;
 }
