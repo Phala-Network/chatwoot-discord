@@ -42,7 +42,7 @@ export class MemoryStore implements RelayStore {
   rows = new Map<string, Partial<PostFields>>();
   parts = new Map<string, string[]>();
   counters = new Map<string, number>();
-  seen = new Set<string>();
+  decisions = new Map<string, string>();
 
   conversation(a: number, c: number) {
     const row = this.rows.get(`${a}:${c}`);
@@ -68,10 +68,10 @@ export class MemoryStore implements RelayStore {
     this.rows.delete(`${a}:${c}`);
     for (const key of this.parts.keys()) if (key.startsWith(`${a}:${c}:`)) this.parts.delete(key);
   }
-  firstAttempt(name: string) {
-    if (this.seen.has(name)) return false;
-    this.seen.add(name);
-    return true;
+  once(name: string, decide: () => string) {
+    const value = this.decisions.get(name) ?? decide();
+    this.decisions.set(name, value);
+    return value;
   }
   increment(name: string) {
     const count = (this.counters.get(name) ?? 0) + 1;

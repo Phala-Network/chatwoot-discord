@@ -281,14 +281,12 @@ export class Store implements RelayStore, Cache {
     );
   }
 
-  firstAttempt(name: string): boolean {
-    const expiresAt = this.now() + COUNTER_TTL_MS;
-    const inserted = this.sql.exec(
-      "INSERT INTO counters (name, count, expires_at) VALUES (?, 1, ?) ON CONFLICT (name) DO NOTHING",
-      name,
-      expiresAt,
-    );
-    return inserted.rowsWritten > 0;
+  once(name: string, decide: () => string): string {
+    const recorded = this.get(name);
+    if (recorded !== undefined) return recorded;
+    const value = decide();
+    this.set(name, value, COUNTER_TTL_MS);
+    return value;
   }
 
   increment(name: string): number {

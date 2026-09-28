@@ -94,8 +94,8 @@ export interface RelayStore {
   savePostedPart(accountId: number, conversationId: number, messageId: number, part: number, discordId: string): void;
   /** Forgets the post and everything recorded about it. */
   forgetThread(accountId: number, conversationId: number): void;
-  /** True the first time `name` is seen within the retention window. */
-  firstAttempt(name: string): boolean;
+  /** The value recorded for `name` within the retention window, else `decide()`, which is then recorded. */
+  once(name: string, decide: () => string): string;
   /** Increments an hourly counter and returns the new value. */
   increment(name: string): number;
 }

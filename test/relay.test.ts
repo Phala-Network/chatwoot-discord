@@ -329,6 +329,18 @@ describe("Relay", () => {
     expect(forum.contents().at(-1)?.endsWith(`<@${TRIAGE}>`)).toBe(true);
   });
 
+  it("keeps a message over the triage budget uncalled when its post is retried", async () => {
+    ({ relay, forum } = relayWith({ triage: { ...triage, perConversationPerHour: 1 } }));
+    await relay.relay(message({ id: 201, content: "first" }));
+    forum.failThreadWith = "error";
+    await expect(relay.relay(message({ id: 202, content: "second" }))).rejects.toThrow();
+    await relay.relay(message({ id: 202, content: "second" }));
+    const second = forum.contents().filter((content) => content.startsWith("second"));
+    expect(second).toHaveLength(1);
+    expect(second[0]).not.toContain(`<@${TRIAGE}>`);
+    expect(second[0]).toMatch(/Triage bot not called: more than 1 customer messages in this conversation/);
+  });
+
   it("caps very long messages with a link to the full text", async () => {
     const text = `${"x".repeat(1900)}\n`.repeat(10);
     await relay.relay(message({ content: text }));
