@@ -100,6 +100,9 @@ export class FakeForum implements ForumClient {
   patches: Array<[string, ThreadPatch]> = [];
   deleted: string[] = [];
   archived = new Set<string>();
+  /** Users added to posts, as [threadId, userId]. */
+  members: Array<[string, string]> = [];
+  failAddMember = false;
   failThreadWith: "gone" | "error" | undefined;
   /** Fails the next execution into a thread after this many succeed. */
   failAfter: number | undefined;
@@ -158,6 +161,13 @@ export class FakeForum implements ForumClient {
 
   async postUrl(_forum: string, threadId: string) {
     return `https://discord.com/channels/${this.guildId}/${threadId}`;
+  }
+
+  async addMember(threadId: string, userId: string) {
+    if (this.failAddMember) throw new Error("Discord HTTP 403: Missing Access");
+    // Like Discord, which requires the post not to be archived.
+    if (this.archived.has(threadId)) throw new Error("Discord HTTP 400: Thread is archived");
+    this.members.push([threadId, userId]);
   }
 
   contents(): string[] {

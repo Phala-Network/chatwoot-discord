@@ -230,11 +230,14 @@ while the conversation is resolved.
   request because a tag was deleted since, it is sent again with the tags read anew.
 - The post title follows the contact's name when it changes (on the conversation's next sync);
   posts adopted from another relay or created by earlier versions keep their title.
-- A newly assigned agent who is linked in `agents[]` is pinged once, in a `-# Assigned to @name`
-  notice after the live messages that came with the assignment (after the last one, when the
-  conversation was reassigned several times in a row). After that, every customer message pings
-  the linked assignee, on the same line as the triage mention. A linked agent @mentioned in a private note is pinged there; other Chatwoot mentions
-  show as `@name`. Nothing else pings anyone.
+- A newly assigned agent who is linked in `agents[]` is pinged once (a change of their Chatwoot
+  name does not count as a new assignment), in a `-# Assigned to @name` notice after the live
+  messages that came with the assignment (after the last one, when the conversation was
+  reassigned several times in a row), and is added to the post, so it shows in their thread list
+  (if Discord refuses, e.g. they left the server, only a warning is logged). After that, every
+  customer message pings the linked assignee, on the same line as the triage mention. A linked
+  agent @mentioned in a private note is pinged there; other Chatwoot mentions show as `@name`.
+  Nothing else pings anyone.
 - Notification lines (the triage mention, pings, budget notes) go on the last Discord message of
   a split message, so a bot they call sees all of it. Only live messages carry them: messages
   created more than `reconcile.lookbackSeconds` ago (the history of an older conversation, or a

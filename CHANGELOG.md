@@ -15,7 +15,9 @@ Upgrading: re-register the commands after deploying (`npm run register-commands`
 `/assign` still queued from before the deploy is dropped as unreadable (its invoker sees no
 result). Setting an agent's `tag` re-tags their posts on each post's next sync. On deploy, the database migrates once: posts gain
 two title columns (empty for existing posts, which keep their titles), and the unused
-`deliveries` table is dropped, so versions before 0.2.0 can no longer run on it. Each existing
+`deliveries` table is dropped, so versions before 0.2.0 can no longer run on it, and each post's
+record of the assignee it announced is cleared (it held a name, now a Chatwoot user id): each
+existing post records its current assignee on its next live message without pinging them. Each existing
 post's stored state no longer matches its new format, so the next sync of each conversation
 (its next event, or the sweep for recent ones) updates its tags once. Other queued jobs keep working.
 `relay.subrequestBudget` must now be at least `relay.maxChunks` + 24 (the default 45 fits
@@ -73,7 +75,9 @@ post's stored state no longer matches its new format, so the next sync of each c
 - An email is relayed without the earlier emails it quotes, as Chatwoot forwards it; an
   automatic reply notifies nobody.
 - A newly assigned agent is pinged in a notice of its own after the assignment's activity line,
-  so two quick reassignments ping the latest assignee after the latest line.
+  so two quick reassignments ping the latest assignee after the latest line. Assignees are told
+  apart by Chatwoot user id, so an agent who changes their name is not pinged again. The new
+  assignee is also added to the post (Discord's Add Thread Member), best effort.
 - Customer text cannot call the triage bot or look like a relay notification: mention tokens,
   `@everyone`, `@here`, and a leading `-#` get a zero-width space.
 - Drafts are read with CommonMark's code fence rules (three or more backticks or tildes, closed

@@ -39,21 +39,13 @@ export const configSchema = z
       }),
     agents: z
       .array(
-        z.strictObject(
-          {
-            discordUserId: snowflake,
-            /** The Chatwoot agent's user id, which (unlike their email) they cannot change. */
-            chatwootUserId: z.number().int().positive(),
-            /** Forum tag of the agent's posts. Default: their Chatwoot name, which they can change. */
-            tag: z.string().min(1).optional(),
-          },
-          {
-            error: (issue) =>
-              issue.code === "unrecognized_keys" && issue.keys.includes("email")
-                ? "email is no longer supported: link the agent with chatwootUserId instead"
-                : undefined,
-          },
-        ),
+        z.strictObject({
+          discordUserId: snowflake,
+          /** The Chatwoot agent's user id, which (unlike their email) they cannot change. */
+          chatwootUserId: z.number().int().positive(),
+          /** Forum tag of the agent's posts. Default: their Chatwoot name, which they can change. */
+          tag: z.string().min(1).optional(),
+        }),
       )
       .refine((agents) => unique(agents.map((agent) => agent.discordUserId)), {
         message: "discordUserId must be unique",

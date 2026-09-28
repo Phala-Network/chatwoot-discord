@@ -94,6 +94,11 @@ class World {
           ? json({ id, username: "agent", ...user })
           : json({ message: "Unknown User", code: 10013 }, { status: 404 });
       }),
+      on(
+        "PUT",
+        /^discord\.com\/api\/v10\/channels\/\d+\/thread-members\/\d+$/,
+        () => new Response(null, { status: 204 }),
+      ),
       on("POST", "discord.com/api/v10/webhooks/1/tok", (request) => {
         const thread = request.url.searchParams.get("thread_id");
         if (thread && this.threadFailure) return this.threadFailure();
@@ -358,6 +363,8 @@ describe("processConversation", () => {
         ["_Assigned to Bob by Sam_", { parse: [] }],
         [`-# Assigned to <@${BOB}>`, { parse: [], users: [BOB] }],
       ]);
+      // The new assignee is added to the post, once.
+      expect(world.sent("PUT", `/thread-members/${BOB}`)).toHaveLength(1);
     });
   });
 

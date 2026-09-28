@@ -4,7 +4,7 @@
 // live messages notify; history relayed later (the first sync of an older conversation, a
 // catch-up after downtime) and automatic email replies are posted without them.
 
-import { assigneeName, fromCustomer } from "./format.ts";
+import { fromCustomer } from "./format.ts";
 import type { RelayStore } from "./relay.ts";
 import type { LinkedAgent, RelayConversation, RelayMessage } from "./types.ts";
 
@@ -29,6 +29,12 @@ interface Notification {
   lines: string[];
   /** Users the lines may ping. */
   users: string[];
+}
+
+/** Who a post announces as its assignee: their Chatwoot user id, which a rename does not change; "" for none. */
+export function assigneeKey(conversation: RelayConversation): string {
+  const assigneeId = conversation.assignee?.id;
+  return assigneeId ? String(assigneeId) : "";
 }
 
 /** The longest user mention (snowflakes have at most 20 digits). */
@@ -78,10 +84,11 @@ export class Notifier {
    */
   newAssignee(accountId: number, conversation: RelayConversation): string | undefined {
     const recorded = this.options.store.conversation(accountId, conversation.id);
-    // A post adopted from the link attribute has no recorded state, so an unchanged assignee
-    // cannot be told apart from a new one: do not ping (its tags are still brought up to date).
-    if (recorded?.threadId !== undefined && recorded.state === undefined) return undefined;
-    if (recorded?.announcedAssignee === assigneeName(conversation)) return undefined;
+    // A post without a recorded announcement (adopted from the link attribute, or its record was
+    // cleared) cannot tell an unchanged assignee from a new one: do not ping. Its next
+    // announcement records the current assignee.
+    if (recorded?.threadId !== undefined && recorded.announcedAssignee === undefined) return undefined;
+    if (recorded?.announcedAssignee === assigneeKey(conversation)) return undefined;
     return this.linkedAssignee(conversation);
   }
 

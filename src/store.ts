@@ -64,6 +64,10 @@ export const MIGRATIONS: string[] = [
   `ALTER TABLE conversations ADD COLUMN title_subject TEXT;
    ALTER TABLE conversations ADD COLUMN title TEXT;
    DROP TABLE IF EXISTS deliveries;`,
+  // announced_assignee holds the announced assignee's Chatwoot user id instead of their name.
+  // Names cannot be turned into ids, so every record is cleared: a post without one records its
+  // current assignee without pinging them (see Notifier#newAssignee).
+  `UPDATE conversations SET announced_assignee = NULL;`,
 ];
 
 const COUNTER_TTL_MS = 2 * 60 * 60 * 1000;
@@ -195,7 +199,7 @@ export class Store implements RelayStore, Cache {
     this.sql.exec(
       `INSERT INTO conversations (account_id, conversation_id, thread_id) VALUES (?, ?, ?)
        ON CONFLICT (account_id, conversation_id) DO UPDATE SET thread_id = excluded.thread_id, state = NULL,
-         title_subject = NULL, title = NULL`,
+         announced_assignee = NULL, title_subject = NULL, title = NULL`,
       accountId,
       conversationId,
       threadId,

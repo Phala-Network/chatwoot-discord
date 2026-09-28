@@ -398,7 +398,7 @@ describe("Relay", () => {
     expect(notice).toMatchObject({ content: "-# Assigned to <@592>", allowed_mentions: { parse: [], users: ["592"] } });
   });
 
-  it("does not announce the assignee of an adopted post without a recorded state", async () => {
+  it("does not announce the assignee of an adopted post, but records them", async () => {
     const adopted = relayWith({ linkedAgent: () => ({ discordUserId: "592" }) });
     adopted.store.updateConversation(3, 12, { threadId: "adopted-thread" });
     const reply = message({
@@ -415,7 +415,70 @@ describe("Relay", () => {
         { content: "On it", username: "Sam · Acme", avatar_url: AVATARS.chatwoot, allowed_mentions: { parse: [] } },
       ],
     ]);
-    expect(adopted.store.conversation(3, 12)?.announcedAssignee).toBe("Kim");
+    expect(adopted.store.conversation(3, 12)?.announcedAssignee).toBe("7");
+  });
+
+  it("tells assignees apart by Chatwoot user id: a rename does not ping, a reassignment does", async () => {
+    const agents: Record<number, LinkedAgent> = { 7: { discordUserId: "592" }, 8: { discordUserId: "593" } };
+    ({ relay, forum } = relayWith({ linkedAgent: (id) => agents[id] }));
+    const run = async (relayed: RelayMessage) => {
+      if (await relay.relay(relayed)) await relay.announceAssignee(3, relayed.conversation);
+    };
+    const kim = { assignee: { id: 7, name: "Kim" } };
+    await run(message({ messageType: "activity", content: "Assigned to Kim", conversation: kim }));
+    const posted = forum.calls.length;
+    const renamed = { assignee: { id: 7, name: "Kim Lee" } };
+    await run(message({ id: 102, messageType: "outgoing", content: "On it", conversation: renamed }));
+    const lee = { assignee: { id: 8, name: "Kim" } };
+    await run(message({ id: 103, messageType: "activity", content: "Assigned to Kim", conversation: lee }));
+    expect(forum.contents().slice(posted)).toEqual(["On it", "_Assigned to Kim_", "-# Assigned to <@593>"]);
+    // Each new assignee is added to the post once; a rename adds no one.
+    expect(forum.members).toEqual([
+      ["thread-1", "592"],
+      ["thread-1", "593"],
+    ]);
+  });
+
+  it("adds a new assignee to a resolved post only after the announcement unarchived it", async () => {
+    ({ relay, forum } = relayWith({ linkedAgent: () => ({ discordUserId: "592" }) }));
+    const resolved = { status: "resolved", assignee: null };
+    await relay.relay(message({ conversation: resolved }));
+    await relay.sync(3, message({ conversation: resolved }).conversation, "thread-1");
+    expect(forum.archived.has("thread-1")).toBe(true);
+    const assigned = message({ id: 102, conversation: { status: "resolved", assignee: { id: 7, name: "Kim" } } });
+    await relay.relay(assigned);
+    forum.archived.add("thread-1"); // Archived again between the run's messages and its announcement.
+    await relay.announceAssignee(3, assigned.conversation);
+    expect(forum.contents().at(-1)).toBe("-# Assigned to <@592>");
+    expect(forum.members).toEqual([["thread-1", "592"]]);
+  });
+
+  it("still records the announcement when the assignee cannot be added to the post", async () => {
+    ({ relay, forum, store } = relayWith({ linkedAgent: () => ({ discordUserId: "592" }) }));
+    forum.failAddMember = true;
+    const assigned = message({ conversation: { assignee: { id: 7, name: "Kim" } } });
+    await relay.relay(assigned);
+    await expect(relay.announceAssignee(3, assigned.conversation)).resolves.toBeUndefined();
+    expect(forum.contents().at(-1)).toBe("-# Assigned to <@592>");
+    expect(store.conversation(3, 12)?.announcedAssignee).toBe("7");
+    expect(forum.members).toEqual([]);
+  });
+
+  it("records the assignee of a post without an announcement record without pinging, then pings a reassignment", async () => {
+    const agents: Record<number, LinkedAgent> = { 7: { discordUserId: "592" }, 8: { discordUserId: "593" } };
+    ({ relay, forum, store } = relayWith({ linkedAgent: (id) => agents[id] }));
+    // A post whose record was cleared, as the migration to Chatwoot user ids does.
+    store.updateConversation(3, 12, { threadId: "thread-9", state: "recorded" });
+    const run = async (relayed: RelayMessage) => {
+      if (await relay.relay(relayed)) await relay.announceAssignee(3, relayed.conversation);
+    };
+    const kim = { assignee: { id: 7, name: "Kim" } };
+    await run(message({ id: 102, messageType: "outgoing", content: "On it", conversation: kim }));
+    expect(store.conversation(3, 12)?.announcedAssignee).toBe("7");
+    const lee = { assignee: { id: 8, name: "Lee" } };
+    await run(message({ id: 103, messageType: "activity", content: "Assigned to Lee", conversation: lee }));
+    expect(forum.contents()).toEqual(["On it", "_Assigned to Lee_", "-# Assigned to <@593>"]);
+    expect(forum.members).toEqual([["thread-9", "593"]]);
   });
 
   it("pings the linked assignee on every customer message", async () => {

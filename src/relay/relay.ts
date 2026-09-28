@@ -3,6 +3,7 @@
 // archived flag in step with the conversation.
 
 import type { RESTPostAPIWebhookWithTokenJSONBody } from "discord-api-types/v10";
+import { errorFields, log } from "../log.ts";
 import {
   type Avatars,
   assigneeName,
@@ -24,7 +25,7 @@ import {
   titleSubject,
   topicTag,
 } from "./format.ts";
-import { assignedLine, Notifier, type TriageOptions } from "./notify.ts";
+import { assignedLine, assigneeKey, Notifier, type TriageOptions } from "./notify.ts";
 import type { LinkedAgent, RelayConversation, RelayMessage } from "./types.ts";
 
 export type WebhookMessage = RESTPostAPIWebhookWithTokenJSONBody;
@@ -61,6 +62,8 @@ export interface ForumClient {
   threadExists(forumChannelId: string, threadId: string): Promise<boolean>;
   /** Link to a post, e.g. https://discord.com/channels/<guild>/<thread>. */
   postUrl(forumChannelId: string, threadId: string): Promise<string>;
+  /** Adds a user to a post, which must not be archived; adding a member again changes nothing. */
+  addMember(threadId: string, userId: string): Promise<void>;
 }
 
 /** What is recorded about a conversation's post. */
@@ -68,7 +71,7 @@ export interface PostFields {
   threadId: string;
   /** The tags and archived flag last applied to the post (see Relay.stateOf). */
   state: string;
-  /** The assignee tag the post last announced. */
+  /** The Chatwoot user id of the assignee the post last announced ("" for none; see assigneeKey). */
   announcedAssignee: string;
   /**
    * The subject the post's title ends with and the title last applied; unset for a post whose
@@ -176,7 +179,8 @@ export class Relay {
   /**
    * After a run's messages that notify: pings a newly assigned, linked agent in a notice of its own, so
    * the ping follows the latest assignment line and names the current assignee however often the
-   * conversation was reassigned in between. The assignee counts as announced either way.
+   * conversation was reassigned in between, and adds them to the post. The assignee counts as
+   * announced either way.
    */
   async announceAssignee(accountId: number, conversation: RelayConversation): Promise<void> {
     const discordId = this.notifier.newAssignee(accountId, conversation);
@@ -187,9 +191,10 @@ export class Relay {
         allowed_mentions: { parse: [], users: [discordId] },
       });
       if (!posted) return;
+      await this.addMember(accountId, conversation.id, discordId);
     }
     this.options.store.updateConversation(accountId, conversation.id, {
-      announcedAssignee: assigneeName(conversation),
+      announcedAssignee: assigneeKey(conversation),
     });
   }
 
@@ -365,6 +370,8 @@ export class Relay {
       titleSubject: subject,
       title,
       state: this.stateOf(conversation),
+      // Nothing announced yet: an assignee is announced after the run's messages.
+      announcedAssignee: "",
     });
     return threadId;
   }
@@ -391,6 +398,21 @@ export class Relay {
     }
     this.unarchived(accountId, conversation);
     return true;
+  }
+
+  /**
+   * Adds a new assignee to the post, right after a message was posted into it (which unarchived
+   * it, as Discord requires). Best effort: the announcement is already posted and must not be
+   * posted again, so a failure (the user left the server, a missing permission) is only logged.
+   */
+  private async addMember(accountId: number, conversationId: number, userId: string): Promise<void> {
+    const threadId = this.options.store.conversation(accountId, conversationId)?.threadId;
+    if (!threadId) return;
+    try {
+      await this.options.forum.addMember(threadId, userId);
+    } catch (error) {
+      log.warn("assignee not added to the post", { accountId, conversationId, threadId, ...errorFields(error) });
+    }
   }
 
   /** A message from Chatwoot itself. */

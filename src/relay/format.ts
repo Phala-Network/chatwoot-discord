@@ -254,7 +254,7 @@ export function fromCustomer(message: RelayMessage): boolean {
 
 /**
  * The assignee's `name`, which is what Chatwoot's dashboard shows as the assignee and in
- * assignment activity messages; the assignee tag of an agent without a configured tag.
+ * assignment activity messages: the assignee tag of an agent without a configured tag.
  */
 export function assigneeName(conversation: RelayConversation): string {
   return filled(conversation.assignee?.name) ?? "unassigned";

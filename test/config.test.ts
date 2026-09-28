@@ -33,9 +33,7 @@ describe("configuration", () => {
     const alice = { discordUserId: "100000000000000011", chatwootUserId: 42 };
     const bob = { discordUserId: "100000000000000012", chatwootUserId: 43, tag: "Bob" };
     expect(issues([alice, bob])).toBeUndefined();
-    expect(issues([{ ...alice, email: "alice@example.com" }])).toEqual([
-      "email is no longer supported: link the agent with chatwootUserId instead",
-    ]);
+    expect(issues([{ ...alice, email: "alice@example.com" }])).toHaveLength(1);
     expect(issues([{ discordUserId: alice.discordUserId, email: "alice@example.com" }])).toHaveLength(2);
     expect(issues([{ discordUserId: alice.discordUserId }])).toHaveLength(1);
     expect(issues([alice, { ...alice, discordUserId: bob.discordUserId }])).toEqual(["chatwootUserId must be unique"]);
