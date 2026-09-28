@@ -25,15 +25,17 @@ messages in posts (threads).
 
 ## When the agent is called
 
-Each new customer message relayed into a post ends with a line that mentions the agent:
+Each new customer message relayed into a post ends with a line that mentions the agent. When
+the conversation's assignee is a linked agent, the same line also pings them:
 
 ```text
 -# <@AGENT_USER_ID>
+-# <@AGENT_USER_ID> <@ASSIGNEE_USER_ID>
 ```
 
-A customer message longer than one Discord message is split into several; the mention is on the
-last of them (before a "Message truncated" note, if any), so when the agent sees it, the whole
-message is already in the post.
+The line is the last line of the message. A customer message longer than one Discord message is
+split into several; the line ends the last of them (a "Message truncated" note may follow as a
+separate message), so when the agent sees it, the whole message is already in the post.
 
 The mention is a literal token in the message content; Discord sends no notification for it
 (the relay's `allowed_mentions` leaves it out), so nobody is pinged by it. Only customer
@@ -44,14 +46,19 @@ created more than `reconcile.lookbackSeconds` (an hour by default) before they a
 history posted when an older conversation gets its post, or messages caught up after downtime.
 
 When a conversation has had more than `perConversationPerHour` customer messages in the current
-hour, or all conversations together more than `perHour`, the mention is replaced by a note such
-as `-# Triage bot not called: more than 30 customer messages this hour. Ask it here if needed.`
+hour (UTC clock hour), or all conversations together more than `perHour`, the mention is replaced
+by a note such as
+`-# Triage bot not called: more than 30 customer messages this hour. Ask it here if needed.`
+A message counts once, however often its posting is retried.
 
 The agent must:
 
-1. React only to messages in the forum's posts whose content contains its own mention token.
+1. React only to messages in the forum's posts whose content contains its own mention token
+   (look for the token anywhere in the message; the line may carry other mentions).
    These messages are posted by the relay's webhook (named `Chatwoot`) under the customer's
    name, so the agent must not ignore messages from webhooks or bots when they mention it.
+   Customer text cannot contain a working mention token or a `-#` line (the relay inserts a
+   zero-width space), so the token always comes from the relay.
 2. Ignore everything else in the post unless a human asks it directly.
 
 ## What the agent posts

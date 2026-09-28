@@ -1,8 +1,9 @@
 <!doctype html>
 <!--
   Illustration of one ticket post: the ticket card, a customer message that mentions a triage
-  bot, an activity line, a private note, the bot's draft, and the reply an agent sent with
-  "Reply with this". Every name, address, and ticket is fictional. Regenerate
+  bot, an activity line with the new assignee's ping, the bot's draft, a private note, the reply
+  an agent sent with "Reply with this" (agents show their own avatars), and a customer follow-up
+  that mentions the bot and pings the assignee. Every name, address, and ticket is fictional. Regenerate
   docs/assets/ticket.png with docs/assets/render.sh.
 -->
 <html lang="en">
@@ -174,7 +175,7 @@
     <header>
       <h1>[Acme #142] Dana Whitfield — Webhook deliveries fail after rotating the signing key</h1>
       <div class="tags">
-        <span class="tag"><i class="brand"></i>Acme</span><span class="tag">🔥 open</span
+        <span class="tag"><i class="brand"></i>Acme</span><span class="tag">🔥 Open</span
         ><span class="tag">👤 Sam Carter</span><span class="tag">🛠️ Technical support</span>
       </div>
     </header>
@@ -239,7 +240,7 @@ Hi Dana, thanks for the details! After a key rotation, deliveries can be signed 
       </div>
 
       <div class="msg">
-        <div class="avatar" style="background: #1f93ff">💬</div>
+        <div class="avatar" style="background: #e67e22">PR</div>
         <div class="body">
           <span class="name">Priya Raman · Acme</span><span class="badge">APP</span
           ><span class="time">Today at 9:05 AM</span>
@@ -249,7 +250,7 @@ Hi Dana, thanks for the details! After a key rotation, deliveries can be signed 
       </div>
 
       <div class="msg">
-        <div class="avatar" style="background: #1f93ff">💬</div>
+        <div class="avatar" style="background: #2e86c1">SC</div>
         <div class="body">
           <span class="name">Sam Carter · Acme</span><span class="badge">APP</span
           ><span class="time">Today at 9:06 AM</span>
@@ -257,6 +258,16 @@ Hi Dana, thanks for the details! After a key rotation, deliveries can be signed 
             Hi Dana, thanks for the details! After a key rotation, deliveries can be signed with the previous key for
             up to 10 minutes. Could you retry now and let us know if the 401s continue?
           </p>
+        </div>
+      </div>
+
+      <div class="msg">
+        <div class="avatar" style="background: #3ba55c">DW</div>
+        <div class="body">
+          <span class="name">Dana Whitfield</span><span class="badge">APP</span
+          ><span class="time">Today at 9:14 AM</span>
+          <p>Retried just now and deliveries go through again. Thanks!</p>
+          <p class="small"><span class="mention">@Triage bot</span> <span class="mention">@Sam Carter</span></p>
         </div>
       </div>
 

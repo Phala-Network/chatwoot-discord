@@ -33,7 +33,8 @@ compatibility date. The README illustrations are rendered from `docs/assets/*.ht
 ## Guidelines
 
 - Keep the Worker request path fast (the Free plan allows 10 ms CPU); do slow work in the Hub
-  Durable Object and keep each alarm run under the subrequest budget.
+  Durable Object and keep each alarm run under the subrequest budget. When a conversation run
+  makes more requests in the worst case, update `src/relay/limits.ts`.
 - Treat Chatwoot's REST API as the source of truth; webhooks only trigger work.
 - Use the generated Chatwoot types (`npm run gen:chatwoot`) and `discord-api-types`. If Chatwoot's
   published spec lacks a route, verify it in Chatwoot's source for the pinned version and add a

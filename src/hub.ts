@@ -44,7 +44,7 @@ const MIN_BUDGET = 2;
 const SWEEP_PAGES = 10;
 const MAX_BACKOFF_MS = 30 * 60 * 1000;
 /**
- * A job that fails this often is dropped (after about 70 minutes of backoff), so a persistent
+ * A job that fails this often is dropped (after about 45 minutes of backoff), so a persistent
  * failure stops holding the queue. The sweep queues conversations that are still behind again,
  * and the next webhook for one starts a new job without backoff.
  */
