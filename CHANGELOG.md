@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrading
+
+- `relay.subrequestBudget` must be at least `relay.maxChunks` + 26 (was + 24); the default 45
+  still fits `maxChunks` up to 10.
+- On deploy the database migrates once: it adds a pending-announcement column, interaction
+  receipts, the Discord ids of responses and notices, and the message a title quotes.
+
+### Fixed
+
+- A customer message over the triage budget no longer calls the triage bot when its post is
+  retried.
+- A failed assignee announcement is retried until it is posted, even without new messages.
+- A sweep longer than 10 pages continues where it stopped instead of rereading the first 10.
+- A failing job is no longer dropped after 10 attempts; it keeps retrying at most every 30
+  minutes, so a long outage loses no work.
+- A failed write of the post URL to the conversation is retried.
+- Deleting a message in Chatwoot also removes the response and notice posted about it, and its
+  text from the post's title when the title quotes it.
+- A response or delivery failure reported before its message was relayed is posted with the
+  message instead of being lost.
+
+### Security
+
+- Discord interactions signed more than 5 minutes ago are refused, and a command is queued once
+  per interaction id, so a replayed request never runs it again.
+- A command runs only with a token that belongs to the Chatwoot user the invoker is linked to.
+- Chatwoot and Discord API requests no longer follow redirects, which could carry a token to
+  another host.
+- The forum's webhook is recognized by the application that created it, not by its name.
+
 ## [0.3.0] - 2026-09-28
 
 ### Upgrading
