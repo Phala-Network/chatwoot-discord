@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { configSchema } from "../src/config.ts";
+import { buildSettings, configSchema, secretsSchema } from "../src/config.ts";
 
 const minimal = {
   chatwoot: { baseUrl: "https://chatwoot.example.com" },
@@ -60,6 +60,28 @@ describe("configuration", () => {
     expect(forumTags({ "status:closed": tag })).toBe(false);
     expect(forumTags({ Open: tag })).toBe(false);
     expect(forumTags({ "status:open": "Open" })).toBe(false);
+  });
+
+  it("routes only configured accounts, and only with a TypeSafe key", () => {
+    const owners = { cloud: { assignee: 6, covers: "Cloud support." } };
+    const routing = (accounts: Record<string, unknown>) =>
+      configSchema.safeParse({ ...minimal, routing: { accounts } });
+    expect(routing({ "1": owners }).data?.routing?.minConfidence).toBe(0.7);
+    expect(routing({ "2": owners }).error?.issues.map((issue) => issue.path.join("."))).toEqual(["routing.accounts"]);
+    expect(routing({ "1": { unclear: owners.cloud } }).success).toBe(false);
+    expect(routing({ "1": {} }).success).toBe(false);
+
+    const secrets = (extra: Record<string, string> = {}) =>
+      secretsSchema.parse({
+        DISCORD_BOT_TOKEN: "bot",
+        DISCORD_PUBLIC_KEY: "0".repeat(64),
+        CHATWOOT_RELAY_TOKEN: "relay",
+        CHATWOOT_WEBHOOK_SECRETS: "{}",
+        ...extra,
+      });
+    const config = configSchema.parse({ ...minimal, routing: { accounts: { "1": owners } } });
+    expect(() => buildSettings(config, secrets())).toThrow(/TYPESAFE_API_KEY/);
+    expect(buildSettings(config, secrets({ TYPESAFE_API_KEY: "key" })).config.routing?.accounts["1"]).toEqual(owners);
   });
 
   it("bounds the triage bot's name, which its budget notes repeat", () => {

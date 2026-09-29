@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Routing: with the new `routing` setting and the `TYPESAFE_API_KEY` secret, each new ticket of a
+  routed account is assigned to its owner and given a topic by TypeSafe Jev when Jev is confident
+  enough, once, with identifiers removed from the text it sees. See
+  [routing](README.md#routing).
+
+### Fixed
+
+- The example `wrangler.jsonc` no longer has the `tag` keys that 0.4.0 removed, which made its
+  `CONFIG` invalid.
+
 ## [0.4.0] - 2026-09-28
 
 ### Upgrading

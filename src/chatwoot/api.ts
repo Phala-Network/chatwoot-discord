@@ -445,7 +445,7 @@ export function toRelayMessage(
  * What Chatwoot itself shows and forwards (Message#ensure_processed_message_content, used by its
  * Slack integration at v4.18.0): for an email, the reply without its quoted history.
  */
-function messageContent(message: ChatwootMessage): string {
+export function messageContent(message: ChatwootMessage): string {
   const email = message.content_attributes?.email;
   return email?.text_content?.quoted ?? email?.html_content?.quoted ?? message.content ?? "";
 }

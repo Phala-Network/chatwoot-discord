@@ -165,7 +165,10 @@ export class FakeForum implements ForumClient {
   }
 }
 
-export function testSettings(overrides: Record<string, unknown> = {}): Settings {
+export function testSettings(
+  overrides: Record<string, unknown> = {},
+  secretOverrides: Record<string, string> = {},
+): Settings {
   const config = configSchema.parse({
     chatwoot: { baseUrl: "https://chatwoot.example.com" },
     accounts: [
@@ -186,6 +189,7 @@ export function testSettings(overrides: Record<string, unknown> = {}): Settings 
     CHATWOOT_RELAY_TOKEN: "relay-token",
     CHATWOOT_WEBHOOK_SECRETS: JSON.stringify({ "3": "secret-acme" }),
     CHATWOOT_AGENT_TOKENS: JSON.stringify({ [ALICE]: "token-alice", [BOB]: "token-bob" }),
+    ...secretOverrides,
   });
   return buildSettings(config, secrets);
 }

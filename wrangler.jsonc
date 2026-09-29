@@ -20,10 +20,10 @@
       "chatwoot": { "baseUrl": "https://chatwoot.example.com" },
       "accounts": [
         { "id": 1, "name": "Acme", "forumChannelId": "100000000000000002" },
-        { "id": 2, "name": "Globex", "forumChannelId": "100000000000000002", "tag": "Globex" }
+        { "id": 2, "name": "Globex", "forumChannelId": "100000000000000002" }
       ],
       "agents": [
-        { "discordUserId": "100000000000000011", "chatwootUserId": 1, "tag": "Alice" },
+        { "discordUserId": "100000000000000011", "chatwootUserId": 1 },
         { "discordUserId": "100000000000000012", "chatwootUserId": 2 }
       ],
       "triage": { "userId": "100000000000000021", "name": "Triage bot", "draftLabels": ["Draft"] },

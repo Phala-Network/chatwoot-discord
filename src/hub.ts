@@ -24,6 +24,7 @@ import { DiscordHttpError, DiscordRest } from "./discord/rest.ts";
 import { errorFields, log } from "./log.ts";
 import { latestMessageId, type ProcessorContext, processConversation, relayFor } from "./relay/processor.ts";
 import { processMessageUpdate } from "./relay/updates.ts";
+import { awaitsRouting, routeConversation, routesAccount } from "./routing.ts";
 import { type Job, Store } from "./store.ts";
 
 export const HUB_NAME = "global";
@@ -34,13 +35,16 @@ const payloadSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("sweep"), accountId: id }),
   z.object({ type: z.literal("conversation"), accountId: id, conversationId: id }),
   z.object({ type: z.literal("message-updated"), accountId: id, conversationId: id, messageId: id }),
+  z.object({ type: z.literal("route"), accountId: id, conversationId: id }),
 ]);
 type JobPayload = z.infer<typeof payloadSchema>;
 
-const PRIORITY = { command: 0, sweep: 1, conversation: 2, "message-updated": 3 } as const;
+const PRIORITY = { command: 0, sweep: 1, conversation: 2, route: 2, "message-updated": 3 } as const;
 /** Requests a job may need before it can start without being cut short. */
 const COMMAND_BUDGET = 20;
 const MIN_BUDGET = 2;
+/** Reading the conversation and its messages, asking Jev, assigning, and setting the topic. */
+const ROUTE_BUDGET = 5;
 /** Pages of conversations (25 each by default) a sweep run reads; a longer pass continues in the next run. */
 const SWEEP_PAGES = 10;
 /** A sweep pass left unfinished this long (e.g. its account was removed) is started over. */
@@ -71,9 +75,13 @@ export class Hub extends DurableObject<Env> {
     ctx.blockConcurrencyWhile(async () => this.store.migrate());
   }
 
-  /** Queues a conversation for syncing, at the earliest after `delayMs`. */
+  /**
+   * Queues a conversation for syncing, at the earliest after `delayMs`, and, if its account is
+   * routed, for routing (which does nothing once the conversation is routed).
+   */
   async enqueueConversation(accountId: number, conversationId: number, delayMs = 0): Promise<void> {
     this.enqueue({ type: "conversation", accountId, conversationId }, Date.now() + delayMs);
+    if (routesAccount(loadSettings(this.env), accountId)) this.enqueue({ type: "route", accountId, conversationId });
     await this.schedule();
   }
 
@@ -170,6 +178,14 @@ export class Hub extends DurableObject<Env> {
           await processMessageUpdate(services, payload.accountId, payload.conversationId, payload.messageId);
           this.store.completeJob(job);
           return "done";
+        case "route":
+          await routeConversation(
+            { ...services, fetch: services.budget.fetch },
+            payload.accountId,
+            payload.conversationId,
+          );
+          this.store.completeJob(job);
+          return "done";
       }
     } catch (error) {
       if (error instanceof BudgetExhaustedError) return "yield";
@@ -210,7 +226,8 @@ export class Hub extends DurableObject<Env> {
    * previous pass started, at least `lookbackSeconds`, at most `maxCatchUpSeconds`), SWEEP_PAGES
    * pages per run, continuing where it stopped until it is done. Activity means a new message
    * (Chatwoot's `last_activity_at`); a change that creates none, such as only a custom
-   * attribute, relies on its webhook.
+   * attribute, relies on its webhook. It also queues routing for open, unassigned conversations
+   * of a routed account that are not routed yet.
    */
   private async sweep(accountId: number, { settings, chatwoot, relay }: ProcessorContext): Promise<void> {
     const lastKey = `sweep:${accountId}:last`;
@@ -232,6 +249,9 @@ export class Hub extends DurableObject<Env> {
           break;
         }
         const conversationId = conversation.id;
+        if (conversationId !== undefined && awaitsRouting(settings, this.store, accountId, conversation)) {
+          this.enqueue({ type: "route", accountId, conversationId });
+        }
         if (conversationId === undefined || !account || !relaysInbox(account, conversation.inbox_id)) continue;
         seen += 1;
         const row = this.store.conversation(accountId, conversationId);
@@ -299,8 +319,8 @@ export class Hub extends DurableObject<Env> {
         ? `command:${payload.job.interactionId}`
         : payload.type === "sweep"
           ? `sweep:${payload.accountId}`
-          : payload.type === "conversation"
-            ? `conversation:${payload.accountId}:${payload.conversationId}`
+          : payload.type === "conversation" || payload.type === "route"
+            ? `${payload.type}:${payload.accountId}:${payload.conversationId}`
             : `${payload.type}:${payload.accountId}:${payload.conversationId}:${payload.messageId}`;
     this.store.enqueue(key, PRIORITY[payload.type], JSON.stringify(payload), notBefore);
   }
@@ -328,6 +348,7 @@ async function respond(rest: DiscordRest, job: CommandJob, content: string): Pro
 
 function requiredBudget(payload: JobPayload): number {
   if (payload.type === "command") return COMMAND_BUDGET;
+  if (payload.type === "route") return ROUTE_BUDGET;
   return payload.type === "sweep" ? SWEEP_PAGES : MIN_BUDGET;
 }
 
