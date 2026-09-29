@@ -2,12 +2,13 @@
 // its topic set by TypeSafe Jev (https://docs.typesafe.ai), a classifier that answers a multiple
 // choice question with a probability per option.
 //
-// A ticket is routed once: when it is open, unassigned, and has a customer message. Jev sees the
-// subject and the first customer messages, with identifiers (emails, URLs, addresses, keys, phone
-// numbers, IP addresses, handles, and the contact's name) removed. An answer below
-// `minConfidence`, or "unclear", changes nothing: the ticket stays for a person. Jev's decision
-// is recorded before it is applied, so a retry applies the same decision and asks Jev only once;
-// once applied, the ticket is never routed again, even if someone unassigns it.
+// A ticket is routed when it is open, unassigned, and has a customer message. Jev sees the subject
+// and the first customer messages (up to MAX_MESSAGES), with identifiers (emails, URLs, addresses,
+// keys, phone numbers, IP addresses, handles, and the contact's name) removed. An owner below
+// `minConfidence`, or "unclear", is not assigned: Jev is asked again when the customer adds a
+// message, until an owner is found or MAX_MESSAGES were seen; then the ticket stays for a person.
+// Jev's decision is recorded before it is applied, so a retry applies the same decision without
+// asking Jev again. A ticket someone assigned is never routed again, even if unassigned later.
 
 import { z } from "zod";
 import { type ChatwootClient, type Fetch, messageContent, toRelayConversation } from "./chatwoot/api.ts";
@@ -48,13 +49,27 @@ export interface RoutingContext {
   fetch: Fetch;
 }
 
-const decisionSchema = z.object({
-  owner: z.string().nullable(),
-  ownerConfidence: z.number(),
-  topic: z.string().nullable(),
-  topicConfidence: z.number(),
-  applied: z.boolean(),
-});
+/**
+ * `pending`: decided, not applied yet. `waiting`: applied without an owner; Jev is asked again on a
+ * new customer message. `done`: final.
+ */
+type RoutingState = "pending" | "waiting" | "done";
+const decisionSchema = z
+  .object({
+    owner: z.string().nullable(),
+    ownerConfidence: z.number(),
+    topic: z.string().nullable(),
+    topicConfidence: z.number(),
+    /** Customer messages the decision was made on; 0.5.0 recorded none, and its decisions are final. */
+    messages: z.number().int().default(MAX_MESSAGES),
+    state: z.enum(["pending", "waiting", "done"]).optional(),
+    /** 0.5.0's state: applied or pending. */
+    applied: z.boolean().optional(),
+  })
+  .transform(({ applied, state, ...decision }) => ({
+    ...decision,
+    state: state ?? ((applied ? "done" : "pending") satisfies RoutingState),
+  }));
 type Decision = z.infer<typeof decisionSchema>;
 
 const jevResponseSchema = z.object({
@@ -96,7 +111,7 @@ export function awaitsRouting(
     conversation.id !== undefined &&
     conversation.status === "open" &&
     !conversation.meta?.assignee &&
-    !readDecision(store.get(routingKey(accountId, conversation.id)))?.applied
+    readDecision(store.get(routingKey(accountId, conversation.id)))?.state !== "done"
   );
 }
 
@@ -107,25 +122,26 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
   if (!routing || !owners) return;
   const key = routingKey(accountId, conversationId);
   const recorded = readDecision(store.get(key));
-  if (recorded?.applied) return;
+  if (recorded?.state === "done") return;
 
   const raw = await chatwoot.getConversation(accountId, conversationId);
   if (!raw) return;
   const conversation = toRelayConversation(conversationId, raw);
-  let decision = recorded;
+  if (conversation.assignee && recorded?.state !== "pending") {
+    // Assigned by a person or an automation rule: nothing to decide, ever.
+    store.set(key, JSON.stringify({ ...(recorded ?? unassignable()), state: "done" }), DECISION_TTL_MS);
+    return;
+  }
+  let decision = recorded?.state === "pending" ? recorded : undefined;
   if (!decision) {
-    if (conversation.assignee) {
-      // Assigned by a person or an automation rule first: nothing to decide, ever.
-      store.set(key, JSON.stringify(skipped()), DECISION_TTL_MS);
-      return;
-    }
     if (conversation.status !== "open") return; // Routed if it opens again unassigned.
-    const text = await customerText(chatwoot, accountId, conversationId, [
+    const { text, messages } = await customerText(chatwoot, accountId, conversationId, [
       conversation.contact?.name,
       conversation.contact?.email,
     ]);
-    if (!text) return; // No customer message yet: its message_created webhook routes it.
-    decision = await decide(ctx, owners, text);
+    // Nothing new since the last answer (or no customer message yet): a later message routes it.
+    if (messages <= (recorded?.messages ?? 0)) return;
+    decision = await decide(ctx, owners, text, messages);
     store.set(key, JSON.stringify(decision), DECISION_TTL_MS);
   }
 
@@ -141,7 +157,8 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
       : null;
   if (topic !== null) await chatwoot.setCustomAttribute(accountId, conversationId, topicAttribute, topic);
 
-  store.set(key, JSON.stringify({ ...decision, applied: true }), DECISION_TTL_MS);
+  const state: RoutingState = owner !== undefined || decision.messages >= MAX_MESSAGES ? "done" : "waiting";
+  store.set(key, JSON.stringify({ ...decision, state }), DECISION_TTL_MS);
   log.info("ticket routed", {
     accountId,
     conversationId,
@@ -149,24 +166,26 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     ownerConfidence: decision.ownerConfidence,
     topic: decision.topic,
     topicConfidence: decision.topicConfidence,
+    messages: decision.messages,
     assigned: assign,
     topicSet: topic !== null,
+    state,
   });
 }
 
-/** The ticket's subject and first customer messages, with identifiers removed; "" when there are none. */
+/** The ticket's subject and first customer messages, with identifiers removed, and how many messages that is. */
 async function customerText(
   chatwoot: ChatwootClient,
   accountId: number,
   conversationId: number,
   identities: Array<string | null | undefined>,
-): Promise<string> {
+): Promise<{ text: string; messages: number }> {
   const messages = (await chatwoot.listMessages(accountId, conversationId))
     .filter((message) => message.message_type === 0 && !message.private)
     .slice(0, MAX_MESSAGES);
   const subject = messages.map((message) => message.content_attributes?.email?.subject).find(Boolean) ?? "";
   const text = [subject, ...messages.map(messageContent)].filter((part) => part.trim()).join("\n");
-  return sanitize(text, identities);
+  return { text: sanitize(text, identities), messages: messages.length };
 }
 
 export function sanitize(text: string, identities: Array<string | null | undefined>): string {
@@ -182,7 +201,7 @@ export function sanitize(text: string, identities: Array<string | null | undefin
 
 type Owners = NonNullable<Settings["config"]["routing"]>["accounts"][string];
 
-async function decide(ctx: RoutingContext, owners: Owners, text: string): Promise<Decision> {
+async function decide(ctx: RoutingContext, owners: Owners, text: string, messages: number): Promise<Decision> {
   const routing = ctx.settings.config.routing;
   const apiKey = ctx.settings.secrets.TYPESAFE_API_KEY;
   if (!routing || !apiKey) throw new JevError("routing is not configured");
@@ -232,12 +251,13 @@ async function decide(ctx: RoutingContext, owners: Owners, text: string): Promis
     ownerConfidence: owner.confidence,
     topic: topic.choice,
     topicConfidence: topic.confidence,
-    applied: false,
+    messages,
+    state: "pending",
   };
 }
 
-function skipped(): Decision {
-  return { owner: null, ownerConfidence: 0, topic: null, topicConfidence: 0, applied: true };
+function unassignable(): Decision {
+  return { owner: null, ownerConfidence: 0, topic: null, topicConfidence: 0, messages: 0, state: "done" };
 }
 
 function readDecision(stored: string | undefined): Decision | undefined {

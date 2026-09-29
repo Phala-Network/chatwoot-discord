@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Routing asks Jev again when the customer adds a message to a ticket without a clear owner, up to
+  the first three customer messages, instead of leaving it after the first answer. Decisions
+  recorded by 0.5.0 stay final.
+
 ## [0.5.0] - 2026-09-29
 
 ### Added
