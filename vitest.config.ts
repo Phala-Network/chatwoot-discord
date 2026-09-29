@@ -24,6 +24,7 @@ export default defineConfig({
           DISCORD_BOT_TOKEN: "test-bot-token",
           DISCORD_PUBLIC_KEY: publicHex,
           CHATWOOT_RELAY_TOKEN: "relay-token",
+          TYPESAFE_API_KEY: "ts-key",
           CHATWOOT_WEBHOOK_SECRETS: JSON.stringify({ "3": "secret-acme", "1": "secret-globex" }),
           CHATWOOT_AGENT_TOKENS: JSON.stringify({
             "100000000000000011": "token-alice",

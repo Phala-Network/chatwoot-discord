@@ -866,6 +866,58 @@ describe("worker", () => {
     expect(cache.map((row) => row.key)).toEqual(["sweep:3:last"]);
   });
 
+  it("routes a new ticket of a routed account once, with Jev", async () => {
+    const globex = "chatwoot.example.com/api/v1/accounts/1";
+    let assignee: { id: number; name: string } | null = null;
+    world = new World([
+      on("GET", `${globex}/conversations/7`, () =>
+        json({
+          id: 7,
+          status: "open",
+          inbox_id: 2,
+          custom_attributes: {},
+          meta: { sender: { name: "Jane Doe" }, assignee, channel: "Channel::Email" },
+          messages: [{ id: 70 }],
+          last_activity_at: Math.floor(Date.now() / 1000),
+        }),
+      ),
+      on("GET", `${globex}/conversations/7/messages`, () =>
+        json({ payload: [{ id: 70, content: "I was charged twice", message_type: 0 }] }),
+      ),
+      on("GET", `${globex}/inboxes/2`, () => json({ id: 2, name: "Globex — Email" })),
+      on("POST", `${globex}/conversations/7/assignments`, (request) => {
+        assignee = { id: JSON.parse(request.body).assignee_id, name: "Cloud" };
+        return json({});
+      }),
+      on("POST", `${globex}/conversations/7/custom_attributes`, () => json({})),
+      on("POST", "api.typesafe.ai/v1/systemone", () =>
+        json({
+          answers: {
+            owner: { type: "choice", choice: "cloud", probabilities: { cloud: 0.9, unclear: 0.1 } },
+            topic: { type: "choice", choice: "Billing", probabilities: { Billing: 1 } },
+          },
+        }),
+      ),
+    ]);
+    const event = { event: "message_created", id: 1, account: { id: 1, name: "Globex" }, conversation: { id: 7 } };
+
+    expect((await chatwootWebhook(event, { secret: "secret-globex" })).status).toBe(200);
+    await drain();
+    expect((await chatwootWebhook(event, { secret: "secret-globex" })).status).toBe(200);
+    await drain();
+
+    expect(world.sent("POST", /^\/v1\/systemone$/)).toHaveLength(1);
+    expect(world.sent("POST", /\/accounts\/1\/conversations\/7\/assignments$/).map((r) => JSON.parse(r.body))).toEqual([
+      { assignee_id: 6 },
+    ]);
+    // The relay also writes its link attribute; routing writes only the topic.
+    const topics = world
+      .sent("POST", /\/accounts\/1\/conversations\/7\/custom_attributes$/)
+      .map((r) => JSON.parse(r.body))
+      .filter((body) => "topic" in body.custom_attributes);
+    expect(topics).toEqual([{ custom_attributes: { topic: "Billing" }, merge: true }]);
+  });
+
   it("closes the post when a command finds its conversation deleted", async () => {
     world.conversation(33, [{ id: 3301, content: "spam", message_type: 0 }]);
     await chatwootWebhook(created(33));

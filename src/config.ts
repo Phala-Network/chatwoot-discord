@@ -107,6 +107,37 @@ export const configSchema = z
           .default(7 * 24 * 3600),
       })
       .prefault({}),
+    /**
+     * Assigns new tickets and sets their topic with TypeSafe Jev (see src/routing.ts). Unset: off.
+     * Needs the TYPESAFE_API_KEY secret.
+     */
+    routing: z
+      .strictObject({
+        model: z.string().min(1).default("jev-1.13.0"),
+        /** Jev's probability an answer needs before it is applied. */
+        minConfidence: z.number().min(0.5).max(1).default(0.7),
+        /** Per Chatwoot account id: the owners Jev chooses from, by a short name. */
+        accounts: z.record(
+          z.string().regex(/^\d+$/, "must be a Chatwoot account id"),
+          z
+            .record(
+              z
+                .string()
+                .regex(/^[a-z0-9_]{1,40}$/, "must be a short lower-case name")
+                .refine((name) => name !== "unclear", "unclear is reserved"),
+              z.strictObject({
+                /** Chatwoot user id to assign. */
+                assignee: z.number().int().positive(),
+                /** What the owner handles, as Jev's criterion for choosing them. */
+                covers: z.string().min(1).max(1000),
+              }),
+            )
+            .refine((owners) => Object.keys(owners).length > 0, "needs at least one owner"),
+        ),
+        /** Values of the topic attribute (relay.topicAttribute) and what each covers. Unset: no topic. */
+        topics: z.record(z.string().min(1), z.string().min(1).max(1000)).optional(),
+      })
+      .optional(),
     attachments: z
       .strictObject({
         maxFiles: z.number().int().min(0).max(10).default(10),
@@ -128,7 +159,14 @@ export const configSchema = z
   .refine((config) => config.relay.subrequestBudget >= minimumBudget(config.relay.maxChunks), {
     path: ["relay", "subrequestBudget"],
     message: "must fit a run's setup and one message of relay.maxChunks parts (see src/relay/limits.ts)",
-  });
+  })
+  .refine(
+    (config) =>
+      Object.keys(config.routing?.accounts ?? {}).every((id) =>
+        config.accounts.some((account) => account.id === Number(id)),
+      ),
+    { path: ["routing", "accounts"], message: "must only name configured accounts" },
+  );
 
 type Config = z.infer<typeof configSchema>;
 type AccountConfig = Config["accounts"][number];
@@ -160,6 +198,8 @@ export const secretsSchema = z.object({
   CHATWOOT_WEBHOOK_SECRETS: jsonRecord,
   /** JSON: {"<Discord user id>": "<that agent's Chatwoot access token>"} */
   CHATWOOT_AGENT_TOKENS: jsonRecord.default({}),
+  /** TypeSafe API key; required when `routing` is configured. */
+  TYPESAFE_API_KEY: z.string().min(1).optional(),
 });
 
 type Secrets = z.infer<typeof secretsSchema>;
@@ -200,6 +240,7 @@ export function loadSettings(env: Env): Settings {
     CHATWOOT_RELAY_TOKEN: env.CHATWOOT_RELAY_TOKEN,
     CHATWOOT_WEBHOOK_SECRETS: env.CHATWOOT_WEBHOOK_SECRETS,
     CHATWOOT_AGENT_TOKENS: env.CHATWOOT_AGENT_TOKENS,
+    TYPESAFE_API_KEY: env.TYPESAFE_API_KEY,
   });
   if (!secrets.success) throw new ConfigError(`Invalid secrets: ${describe(secrets.error)}`);
 
@@ -209,6 +250,9 @@ export function loadSettings(env: Env): Settings {
 }
 
 export function buildSettings(config: Config, secrets: Secrets): Settings {
+  if (config.routing && !secrets.TYPESAFE_API_KEY) {
+    throw new ConfigError("Invalid secrets: TYPESAFE_API_KEY: required when routing is configured");
+  }
   const accounts = new Map(config.accounts.map((account) => [account.id, account]));
   const chatwootUsers = new Map(config.agents.map((agent) => [agent.discordUserId, agent.chatwootUserId]));
   const linkedAgents = new Map(config.agents.map((agent) => [agent.chatwootUserId, agent]));

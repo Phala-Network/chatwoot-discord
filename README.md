@@ -44,6 +44,9 @@ Cron (every 5 min) ─▶ Worker ──▶ Hub Durable Object ──▶ sweep: r
   [other commands](#commands). Each runs in Chatwoot as the agent who used it.
 - Customer messages ping the linked assignee, and an optional AI agent (a Discord bot) is called
   on each of them and posts a draft; a human sends it with **Apps → Reply with this**.
+- Optionally, a new ticket is assigned to its owner and given a topic by
+  [TypeSafe Jev](https://docs.typesafe.ai), a classifier, when it is confident enough
+  ([routing](#routing)).
 
 ## Deploy
 
@@ -162,6 +165,7 @@ npx wrangler secret put DISCORD_PUBLIC_KEY
 npx wrangler secret put CHATWOOT_RELAY_TOKEN
 npx wrangler secret put CHATWOOT_WEBHOOK_SECRETS   # {} for now; filled in step 4
 npx wrangler secret put CHATWOOT_AGENT_TOKENS      # {"<discord user id>":"<chatwoot token>"}
+npx wrangler secret put TYPESAFE_API_KEY           # only with routing
 npm run deploy
 ```
 
@@ -315,6 +319,13 @@ replace:
 | `relay.subrequestBudget` | integer 20–1000, and ≥ `relay.maxChunks` + 26 | `45` | Outbound requests per alarm invocation (Free plan limit: 50). The minimum fits a run's setup and one message's worst case (`src/relay/limits.ts`). |
 | `avatars.chatwoot` | https URL | `<publicUrl>/favicon-512x512.png` | Avatar of activity lines, cards, notices, agent bots, and agents with neither a linked Discord user nor an https Chatwoot avatar. |
 | `avatars.contact` | https URL | Gravatar "mystery person" | Avatar of customers without an https avatar in Chatwoot. |
+| `routing` | object | unset | Assigns new tickets and sets their topic with TypeSafe Jev ([routing](#routing)). Requires the `TYPESAFE_API_KEY` secret. Unset: off. |
+| `routing.model` | non-empty string | `jev-1.13.0` | TypeSafe model. |
+| `routing.minConfidence` | number 0.5–1 | `0.7` | Probability an answer needs before it is applied. |
+| `routing.accounts` | object: account id → (owner name → owner) | required | Routed accounts (configured in `accounts[]`) and the owners Jev chooses from. Owner names are 1–40 lower-case letters, digits, or `_`; `unclear` is reserved. |
+| `routing.accounts.<id>.<name>.assignee` | integer > 0 | required | Chatwoot user id to assign. |
+| `routing.accounts.<id>.<name>.covers` | 1–1000 characters | required | What the owner handles: Jev's criterion for choosing them. |
+| `routing.topics` | object: topic value → what it covers | unset | Values of `relay.topicAttribute` Jev chooses from, set when a ticket has none. Unset: no topic. |
 | `reconcile.lookbackSeconds` | integer ≥ 60 | `3600` | Minimum sweep window (conversations with activity within it are checked). Messages older than this are relayed without notifications. |
 | `reconcile.maxCatchUpSeconds` | integer ≥ 60 | `604800` (7 days) | Maximum sweep window after downtime. |
 | `attachments.maxFiles` | integer 0–10 | `10` | Files per `/reply` or `/note` (0 hides the editor's upload field). |
@@ -330,6 +341,35 @@ Secrets (Worker secrets, never in config), also validated at startup:
 | `CHATWOOT_RELAY_TOKEN` | non-empty | Access token of the Chatwoot user the relay reads as (an agent in every relayed inbox, or an administrator). |
 | `CHATWOOT_WEBHOOK_SECRETS` | JSON object, `{"<account id>":"<secret>"}` | Each account's webhook secret. |
 | `CHATWOOT_AGENT_TOKENS` | JSON object, `{"<Discord user id>":"<token>"}`; optional, default `{}` | Each linked agent's own Chatwoot access token; commands act with it. |
+| `TYPESAFE_API_KEY` | non-empty; required with `routing` | TypeSafe API key for routing. |
+
+### Routing
+
+With `routing`, each new ticket of a routed account is routed once: when it is open, has no
+assignee, and has a customer message. The Worker asks Jev two multiple-choice questions, who owns
+the ticket (one of the account's owners, or `unclear`) and its topic, using the email subject and
+the first three customer messages. Before they leave the Worker, emails, URLs, hex and base58
+addresses, long tokens, phone numbers, IP addresses, @handles, and the contact's name are
+replaced with `[REDACTED]`. An owner at `minConfidence` or above is assigned, and a topic at or
+above it is set when the ticket has none; anything else stays for a person. A ticket assigned
+before its turn (by a person or a Chatwoot automation rule) is left alone, and a routed ticket is
+never routed again, even if someone unassigns it. The decision is recorded before it is applied,
+so a retry applies the same one without asking Jev again. Routing acts with
+`CHATWOOT_RELAY_TOKEN`, whose user must be an agent in the routed inboxes; Chatwoot records the
+assignment as made by that user. The sweep queues routing for open, unassigned tickets in its
+window, so a missed webhook only delays it.
+
+```jsonc
+"routing": {
+  "accounts": {
+    "1": {
+      "cloud": { "assignee": 6, "covers": "Cloud support and billing: deployments, invoices, account access." },
+      "sales": { "assignee": 7, "covers": "Sales and partnerships: pricing, capacity, volume deals." }
+    }
+  },
+  "topics": { "Technical support": "Something does not work.", "Billing": "Payments, invoices, refunds." }
+}
+```
 
 ## Limits and the Workers Free plan
 

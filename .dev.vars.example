@@ -15,3 +15,6 @@ CHATWOOT_WEBHOOK_SECRETS={"1":"replace-with-webhook-secret"}
 # Each linked agent's own Chatwoot access token, keyed by Discord user id. Commands act as them.
 CHATWOOT_AGENT_TOKENS={"100000000000000011":"replace-with-agent-token"}
 
+# TypeSafe API key, required only when CONFIG has `routing`.
+# TYPESAFE_API_KEY=replace-with-typesafe-key
+

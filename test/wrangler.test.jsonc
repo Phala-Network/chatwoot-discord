@@ -23,7 +23,11 @@
         { "discordUserId": "100000000000000013", "chatwootUserId": 45 }
       ],
       "forumTags": { "100000000000000055": { "account:3": "100000000000000301", "status:open": "100000000000000302" } },
-      "triage": { "userId": "100000000000000777", "draftLabels": ["Draft", "Brouillon"] }
+      "triage": { "userId": "100000000000000777", "draftLabels": ["Draft", "Brouillon"] },
+      "routing": {
+        "accounts": { "1": { "cloud": { "assignee": 6, "covers": "Cloud support." } } },
+        "topics": { "Billing": "Payments." }
+      }
     }
   }
 }

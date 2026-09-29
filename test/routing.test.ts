@@ -1,0 +1,166 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { chatwootClient } from "../src/chatwoot/api.ts";
+import { type RoutingStore, routeConversation, sanitize } from "../src/routing.ts";
+import { json, mockFetch, on, type Recorded, testSettings } from "./helpers.ts";
+
+const ROUTING = {
+  accounts: {
+    "1": {
+      cloud: { assignee: 6, covers: "Cloud support and billing." },
+      sales: { assignee: 7, covers: "Sales and GPUs." },
+    },
+  },
+  topics: { "Technical support": "Something does not work.", Billing: "Payments and invoices." },
+};
+const CW = "chatwoot.example.com/api/v1/accounts/1/conversations/5";
+
+class MapStore implements RoutingStore {
+  values = new Map<string, string>();
+  get(key: string) {
+    return this.values.get(key);
+  }
+  set(key: string, value: string) {
+    this.values.set(key, value);
+  }
+}
+
+interface Ticket {
+  assignee?: { id: number; name: string } | null;
+  status?: string;
+  topic?: string;
+  messages?: Array<{ id: number; content: string; message_type: number; private?: boolean }>;
+}
+
+/** Chatwoot conversation 5 of account 1 and Jev, faked at the fetch boundary. */
+function world(ticket: Ticket, jev: { owner: [string, number]; topic: [string, number] }, failAssign = 0) {
+  let failures = failAssign;
+  const conversation = () => ({
+    id: 5,
+    status: ticket.status ?? "open",
+    inbox_id: 2,
+    custom_attributes: ticket.topic ? { topic: ticket.topic } : {},
+    meta: { sender: { name: "Jane Doe", email: "jane@example.com" }, assignee: ticket.assignee ?? null },
+  });
+  const mock = mockFetch(
+    on("GET", CW, () => json(conversation())),
+    on("GET", `${CW}/messages`, () =>
+      json({
+        payload: ticket.messages ?? [
+          { id: 1, content: "My CVM will not start, says Jane Doe (jane@example.com)", message_type: 0 },
+          { id: 2, content: "Looking into it", message_type: 1 },
+        ],
+      }),
+    ),
+    on("POST", `${CW}/assignments`, () => {
+      if (failures > 0) {
+        failures -= 1;
+        return json({ error: "unavailable" }, { status: 503 });
+      }
+      return json({});
+    }),
+    on("POST", `${CW}/custom_attributes`, () => json({})),
+    on("POST", "api.typesafe.ai/v1/systemone", () =>
+      json({
+        model: "jev-1.13.0",
+        answers: {
+          owner: { type: "choice", choice: jev.owner[0], probabilities: { [jev.owner[0]]: jev.owner[1] } },
+          topic: { type: "choice", choice: jev.topic[0], probabilities: { [jev.topic[0]]: jev.topic[1] } },
+        },
+      }),
+    ),
+  );
+  return mock;
+}
+
+function context(store = new MapStore()) {
+  const settings = testSettings({ routing: ROUTING }, { TYPESAFE_API_KEY: "ts-key" });
+  const fetch = (request: Request) => globalThis.fetch(request);
+  return { settings, store, chatwoot: chatwootClient(settings.config.chatwoot.baseUrl, "relay-token", fetch), fetch };
+}
+
+const sent = (requests: Recorded[], method: string, path: string) =>
+  requests.filter((request) => request.method === method && `${request.url.hostname}${request.url.pathname}` === path);
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe("routeConversation", () => {
+  it("assigns the owner and sets the topic Jev is confident about, sending the text without identifiers", async () => {
+    const { requests } = world({}, { owner: ["cloud", 0.93], topic: ["Technical support", 0.88] });
+
+    await routeConversation(context(), 1, 5);
+
+    expect(sent(requests, "POST", `${CW}/assignments`).map((r) => JSON.parse(r.body))).toEqual([{ assignee_id: 6 }]);
+    expect(sent(requests, "POST", `${CW}/custom_attributes`).map((r) => JSON.parse(r.body))).toEqual([
+      { custom_attributes: { topic: "Technical support" }, merge: true },
+    ]);
+    const [jev] = sent(requests, "POST", "api.typesafe.ai/v1/systemone");
+    expect(jev?.headers.get("authorization")).toBe("Bearer ts-key");
+    expect(jev?.redirect).toBe("manual");
+    const body = JSON.parse(jev?.body ?? "{}");
+    expect(body.state.ticket).toBe("My CVM will not start, says [REDACTED] ([REDACTED])");
+    expect(Object.keys(body.questions.owner.criteria)).toEqual(["cloud", "sales", "unclear"]);
+  });
+
+  it("leaves an unclear or doubtful ticket for a person, and does not ask again", async () => {
+    const store = new MapStore();
+    const { requests } = world({}, { owner: ["unclear", 0.9], topic: ["Billing", 0.6] });
+
+    await routeConversation(context(store), 1, 5);
+    await routeConversation(context(store), 1, 5);
+
+    expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
+    expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
+    expect(sent(requests, "POST", `${CW}/custom_attributes`)).toEqual([]);
+  });
+
+  it("never routes a ticket someone assigned first, nor overwrites a topic", async () => {
+    const assigned = world({ assignee: { id: 9, name: "Doyle" } }, { owner: ["sales", 1], topic: ["Billing", 1] });
+    await routeConversation(context(), 1, 5);
+    expect(sent(assigned.requests, "POST", "api.typesafe.ai/v1/systemone")).toEqual([]);
+    vi.restoreAllMocks();
+
+    const withTopic = world({ topic: "Billing" }, { owner: ["sales", 1], topic: ["Technical support", 1] });
+    await routeConversation(context(), 1, 5);
+    expect(sent(withTopic.requests, "POST", `${CW}/assignments`)).toHaveLength(1);
+    expect(sent(withTopic.requests, "POST", `${CW}/custom_attributes`)).toEqual([]);
+  });
+
+  it("waits for a customer message before asking", async () => {
+    const store = new MapStore();
+    const { requests } = world({ messages: [] }, { owner: ["cloud", 1], topic: ["Billing", 1] });
+
+    await routeConversation(context(store), 1, 5);
+
+    expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toEqual([]);
+    expect(store.values.size).toBe(0);
+  });
+
+  it("applies the recorded decision on a retry instead of asking Jev again", async () => {
+    const store = new MapStore();
+    const { requests } = world({}, { owner: ["sales", 0.95], topic: ["Billing", 0.95] }, 1);
+
+    await expect(routeConversation(context(store), 1, 5)).rejects.toThrow();
+    await routeConversation(context(store), 1, 5);
+
+    expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
+    expect(sent(requests, "POST", `${CW}/assignments`).map((r) => JSON.parse(r.body))).toEqual([
+      { assignee_id: 7 },
+      { assignee_id: 7 },
+    ]);
+  });
+});
+
+describe("sanitize", () => {
+  it("removes identifiers", () => {
+    const text =
+      "Hi, I'm Alice Chen (alice.chen@example.com, +1 415-555-0199). See https://cloud.example.com/x; " +
+      "wallet 0x52908400098527886E0F7030069857D2E4169EE7 and 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY, " +
+      "key Zq9x_abcdefghijklmnopqrstuvwxyz0123456789ABCD, ip 10.1.2.3, ping @alicec. Thanks, Alice";
+    expect(sanitize(text, ["Alice Chen", "alice.chen@example.com"])).toBe(
+      "Hi, I'm [REDACTED] ([REDACTED], [REDACTED]). See [REDACTED] wallet [REDACTED] and [REDACTED], " +
+        "key [REDACTED], ip [REDACTED], ping [REDACTED] Thanks, [REDACTED]",
+    );
+  });
+});
