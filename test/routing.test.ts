@@ -103,7 +103,7 @@ describe("routeConversation", () => {
     expect(Object.keys(body.questions.owner.criteria)).toEqual(["cloud", "sales", "unclear"]);
   });
 
-  it("leaves an unclear or doubtful ticket for a person, and does not ask again", async () => {
+  it("leaves an unclear or doubtful ticket unassigned, and asks again only when the customer adds a message", async () => {
     const store = new MapStore();
     const { requests } = world({}, { owner: ["unclear", 0.9], topic: ["Billing", 0.6] });
 
@@ -125,6 +125,52 @@ describe("routeConversation", () => {
     await routeConversation(context(), 1, 5);
     expect(sent(withTopic.requests, "POST", `${CW}/assignments`)).toHaveLength(1);
     expect(sent(withTopic.requests, "POST", `${CW}/custom_attributes`)).toEqual([]);
+  });
+
+  it("routes on a later customer message when the first one is unclear, and stops once routed", async () => {
+    const store = new MapStore();
+    const ticket: Ticket = { messages: [{ id: 1, content: "Hello", message_type: 0 }] };
+    const jev: { owner: [string, number]; topic: [string, number] } = {
+      owner: ["unclear", 1],
+      topic: ["Billing", 0.5],
+    };
+    const { requests } = world(ticket, jev);
+
+    await routeConversation(context(store), 1, 5);
+    ticket.messages = [...(ticket.messages ?? []), { id: 2, content: "My invoice is wrong", message_type: 0 }];
+    jev.owner = ["cloud", 0.9];
+    await routeConversation(context(store), 1, 5);
+    ticket.messages = [...(ticket.messages ?? []), { id: 3, content: "Any news?", message_type: 0 }];
+    await routeConversation(context(store), 1, 5);
+
+    const asked = sent(requests, "POST", "api.typesafe.ai/v1/systemone").map((r) => JSON.parse(r.body).state.ticket);
+    expect(asked).toEqual(["Hello", "Hello My invoice is wrong"]);
+    expect(sent(requests, "POST", `${CW}/assignments`).map((r) => JSON.parse(r.body))).toEqual([{ assignee_id: 6 }]);
+  });
+
+  it("gives up after three customer messages without a clear owner", async () => {
+    const store = new MapStore();
+    const message = (id: number) => ({ id, content: `Message ${id}`, message_type: 0 });
+    const ticket: Ticket = { messages: [message(1), message(2), message(3)] };
+    const { requests } = world(ticket, { owner: ["cloud", 0.5], topic: ["Billing", 0.5] });
+
+    await routeConversation(context(store), 1, 5);
+    ticket.messages = [...(ticket.messages ?? []), message(4)];
+    await routeConversation(context(store), 1, 5);
+
+    expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
+    expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
+  });
+
+  it("keeps a decision recorded by 0.5.0 final", async () => {
+    const store = new MapStore();
+    const legacy = { owner: null, ownerConfidence: 1, topic: null, topicConfidence: 0, applied: true };
+    store.set("route:1:5", JSON.stringify(legacy));
+    const { requests } = world({}, { owner: ["cloud", 1], topic: ["Billing", 1] });
+
+    await routeConversation(context(store), 1, 5);
+
+    expect(requests).toEqual([]);
   });
 
   it("waits for a customer message before asking", async () => {
