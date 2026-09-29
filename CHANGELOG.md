@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-29
+
 ### Added
 
 - Routing: with the new `routing` setting and the `TYPESAFE_API_KEY` secret, each new ticket of a
@@ -224,7 +226,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-invocation subrequest budget, and a cron reconciliation sweep for missed webhooks.
 - Verification of Chatwoot webhook HMAC signatures and Discord Ed25519 interaction signatures.
 
-[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.1.0...v0.2.0
