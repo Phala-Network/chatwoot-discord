@@ -291,6 +291,20 @@ export class Store implements RelayStore, Cache {
       .map((row) => row.discord_message_id);
   }
 
+  firstPart(accountId: number, conversationId: number, discordId: string): string | undefined {
+    return this.sql
+      .exec<{ discord_message_id: string }>(
+        `SELECT first.discord_message_id FROM posted_messages part
+           JOIN posted_messages first ON first.account_id = part.account_id
+             AND first.conversation_id = part.conversation_id AND first.message_id = part.message_id AND first.part = 0
+           WHERE part.account_id = ? AND part.conversation_id = ? AND part.discord_message_id = ?`,
+        accountId,
+        conversationId,
+        discordId,
+      )
+      .toArray()[0]?.discord_message_id;
+  }
+
   savePostedPart(accountId: number, conversationId: number, messageId: number, part: number, discordId: string): void {
     this.sql.exec(
       "INSERT OR REPLACE INTO posted_messages (account_id, conversation_id, message_id, part, discord_message_id) VALUES (?, ?, ?, ?, ?)",

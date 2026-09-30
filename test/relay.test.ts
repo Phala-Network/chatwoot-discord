@@ -896,4 +896,29 @@ describe("the card", () => {
     expect(forum.deleted).toEqual([orphan]);
     expect((await cardsAfter(FORUM, "thread-1", "0")).cards).toEqual([store.conversation(3, 12)?.cardId]);
   });
+
+  it("keeps drafts to a customer message's parts right when a part fails", async () => {
+    const { relay, forum, store } = relayWith({ card: ticketCard });
+    const conversation = message().conversation;
+    const draftOffered = () => shown(forum.calls.at(-1)?.[1])[1]?.[0];
+    const long = `${"x".repeat(1900)}\n`.repeat(2);
+    await relay.relay(message());
+    const first = store.conversation(3, 12)?.customerMessageId ?? "";
+    relay.answered(3, 12, snowflake(), first);
+    await relay.sync(3, conversation, "thread-1");
+
+    // C2's first part is posted, its second fails: the answer to C1 is behind the customer now.
+    forum.failAfter = 1;
+    await expect(relay.relay(message({ id: 2, content: long }))).rejects.toThrow();
+    await relay.sync(3, conversation, "thread-1");
+    expect(draftOffered()).toBe("ticket:reply");
+
+    // A response comes, then C2's last part: an answer to that part answers C2, before the response.
+    await relay.postResponse(3, conversation, "• Rating: 5");
+    await relay.relay(message({ id: 2, content: long }));
+    const lastPart = store.postedParts(3, 12, 2).at(-1) ?? "";
+    relay.answered(3, 12, snowflake(), lastPart);
+    await relay.sync(3, conversation, "thread-1");
+    expect(draftOffered()).toBe("ticket:reply");
+  });
 });

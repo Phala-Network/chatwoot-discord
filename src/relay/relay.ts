@@ -113,6 +113,8 @@ export interface RelayStore {
   updateConversation(accountId: number, conversationId: number, patch: Partial<PostFields>): void;
   /** Ids of the Discord messages posted so far for a Chatwoot message, in order. */
   postedParts(accountId: number, conversationId: number, messageId: number): string[];
+  /** The first Discord message of the Chatwoot message that Discord message `discordId` is part of. */
+  firstPart(accountId: number, conversationId: number, discordId: string): string | undefined;
   savePostedPart(accountId: number, conversationId: number, messageId: number, part: number, discordId: string): void;
   /** Forgets the post and everything recorded about it. */
   forgetThread(accountId: number, conversationId: number): void;
@@ -217,9 +219,6 @@ export class Relay {
     }
     this.unarchived(accountId, conversation);
     if (this.notifier.notifies(message)) store.updateConversation(accountId, conversation.id, { announcePending: 1 });
-    // The customer wrote again: the triage bot's answers to earlier messages are behind.
-    const first = store.postedParts(accountId, conversation.id, message.id)[0];
-    if (message.messageType === "incoming" && first) this.customerWrote(accountId, conversation.id, first);
   }
 
   /**
@@ -231,10 +230,12 @@ export class Relay {
   answered(accountId: number, conversationId: number, answerId: string, sourceId: string): void {
     const { store } = this.options;
     const post = store.conversation(accountId, conversationId);
-    if (!post?.threadId || !isAfter(answerId, post.answerId) || !answersLatest(sourceId, post.customerMessageId)) {
+    // A part of a customer message stands for the whole message: its first part.
+    const source = store.firstPart(accountId, conversationId, sourceId) ?? sourceId;
+    if (!post?.threadId || !isAfter(answerId, post.answerId) || !answersLatest(source, post.customerMessageId)) {
       return;
     }
-    store.updateConversation(accountId, conversationId, { answerId, answerSourceId: sourceId, cardCovered: 1 });
+    store.updateConversation(accountId, conversationId, { answerId, answerSourceId: source, cardCovered: 1 });
   }
 
   /**
@@ -419,18 +420,25 @@ export class Relay {
     return parts;
   }
 
-  /** Posts the parts not yet posted, recording each one. */
+  /**
+   * Posts the parts not yet posted, recording each one. A customer's message is their latest from
+   * its first part on, so a later part that fails leaves no earlier draft offered.
+   */
   private async post(message: RelayMessage, parts: WebhookMessage[], threadId: string): Promise<void> {
     const { store, forum } = this.options;
     const accountId = message.account.id;
     const conversationId = message.conversation.id;
     const forumChannelId = this.forumOf(accountId);
-    for (let part = store.postedParts(accountId, conversationId, message.id).length; part < parts.length; part += 1) {
+    const fromCustomer = message.messageType === "incoming";
+    const posted = store.postedParts(accountId, conversationId, message.id);
+    if (fromCustomer && posted[0]) this.customerWrote(accountId, conversationId, posted[0]);
+    for (let part = posted.length; part < parts.length; part += 1) {
       const payload = parts[part];
       if (!payload) break;
       const { messageId } = await forum.execute(forumChannelId, payload, threadId);
       store.savePostedPart(accountId, conversationId, message.id, part, messageId);
       store.updateConversation(accountId, conversationId, { cardCovered: 1 });
+      if (fromCustomer && part === 0) this.customerWrote(accountId, conversationId, messageId);
     }
   }
 

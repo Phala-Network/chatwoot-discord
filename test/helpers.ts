@@ -82,6 +82,12 @@ export class MemoryStore implements RelayStore {
   postedParts(a: number, c: number, messageId: number) {
     return this.parts.get(`${a}:${c}:${messageId}`) ?? [];
   }
+  firstPart(a: number, c: number, discordId: string) {
+    for (const [key, parts] of this.parts) {
+      if (key.startsWith(`${a}:${c}:`) && parts.includes(discordId)) return parts[0];
+    }
+    return undefined;
+  }
   savePostedPart(a: number, c: number, messageId: number, part: number, discordId: string) {
     const parts = this.postedParts(a, c, messageId);
     parts[part] = discordId;
