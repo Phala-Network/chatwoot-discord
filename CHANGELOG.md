@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Ticket buttons: the ticket card has **Reply**, **Reply with draft**, **Take**, **Resolve**, and
+  **Manage**; each customer message has **Reply**, **Reply with draft**, and **Manage**.
+- **Reply with draft** opens the reply editor with the triage bot's latest draft in the post. It
+  reads the post's messages: turn on the bot's **Message Content** intent, and give it *Read
+  Message History* in the forum.
+- **Manage** opens a private panel with the ticket's assignee, labels, priority, and status as
+  menus. Each change applies at once and redraws the panel with the ticket's state.
+
 ## [0.12.0] - 2026-09-30
 
 ### Added

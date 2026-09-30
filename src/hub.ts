@@ -17,6 +17,7 @@ import { z } from "zod";
 import { Budget, BudgetExhaustedError } from "./budget.ts";
 import { chatwootClient, toRelayConversation } from "./chatwoot/api.ts";
 import { executeCommand } from "./commands/actions.ts";
+import type { ActionRow } from "./commands/components.ts";
 import { type CommandJob, commandJobSchema } from "./commands/job.ts";
 import { loadSettings, relaysInbox, type Settings } from "./config.ts";
 import { DiscordForum } from "./discord/forum.ts";
@@ -226,11 +227,15 @@ export class Hub extends DurableObject<Env> {
   }
 
   private async runCommand(job: CommandJob, services: ProcessorContext): Promise<void> {
-    const { content, conversationGone } = await executeCommand(job, services.settings, services.budget.fetch);
+    const { content, components, conversationGone } = await executeCommand(
+      job,
+      services.settings,
+      services.budget.fetch,
+    );
     // Chatwoot sends no webhook when a conversation is deleted: let its job close the post.
     if (conversationGone)
       this.enqueue({ type: "conversation", accountId: job.accountId, conversationId: job.conversationId });
-    await respond(services.rest, job, content);
+    await respond(services.rest, job, content, components);
   }
 
   /**
@@ -340,12 +345,15 @@ export class Hub extends DurableObject<Env> {
   }
 }
 
-/** Replaces the invoker's "thinking…" with `content`. */
-async function respond(rest: DiscordRest, job: CommandJob, content: string): Promise<void> {
+/**
+ * Replaces the invoker's "thinking…" with `content`, or the Manage panel the job came from with
+ * the panel drawn again. Without `components`, a panel keeps its menus (e.g. after an error).
+ */
+async function respond(rest: DiscordRest, job: CommandJob, content: string, components?: ActionRow[]): Promise<void> {
   try {
     await rest.patch<RESTPatchAPIWebhookWithTokenMessageResult, RESTPatchAPIWebhookWithTokenMessageJSONBody>(
       Routes.webhookMessage(job.applicationId, job.token, "@original"),
-      { body: { content, allowed_mentions: { parse: [] } }, auth: false },
+      { body: { content, allowed_mentions: { parse: [] }, ...(components ? { components } : {}) }, auth: false },
     );
   } catch (error) {
     log.error("command follow-up failed", { interactionId: job.interactionId, ...errorFields(error) });

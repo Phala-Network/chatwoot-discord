@@ -6,6 +6,7 @@ import {
   type APIAttachment,
   type APIInteraction,
   type APIInteractionResponse,
+  type APIMessageComponentInteraction,
   type APIModalInteractionResponse,
   type APIModalSubmitInteraction,
   ApplicationCommandOptionType,
@@ -19,6 +20,7 @@ import {
 import type { Settings } from "../config.ts";
 import { draftFromMessage, lastCodeBlock } from "../relay/format.ts";
 import { filesTooLarge, fileTooLarge, isDiscordAttachmentUrl, NOT_LINKED, UserError } from "./common.ts";
+import { BUTTONS, NONE, PANEL } from "./components.ts";
 import { CONTENT_MAX, REPLY_WITH_THIS } from "./definitions.ts";
 import { type AttachmentRef, type CommandAction, type CommandJob, prioritySchema } from "./job.ts";
 
@@ -31,6 +33,8 @@ interface HandlerDeps {
   settings: Settings;
   /** The conversation the relay mapped to this forum post, if any. */
   ticketForThread(threadId: string): Promise<Ticket | undefined>;
+  /** The draft (last code block) of the triage bot's latest message in the post that has one. */
+  latestDraft(threadId: string): Promise<string | undefined>;
 }
 
 export interface HandlerResult {
@@ -40,7 +44,11 @@ export interface HandlerResult {
 
 export async function handleInteraction(interaction: APIInteraction, deps: HandlerDeps): Promise<HandlerResult> {
   if (interaction.type === InteractionType.Ping) return { response: { type: InteractionResponseType.Pong } };
-  if (interaction.type !== InteractionType.ApplicationCommand && interaction.type !== InteractionType.ModalSubmit) {
+  if (
+    interaction.type !== InteractionType.ApplicationCommand &&
+    interaction.type !== InteractionType.ModalSubmit &&
+    interaction.type !== InteractionType.MessageComponent
+  ) {
     return privately("Unsupported interaction.");
   }
 
@@ -48,7 +56,8 @@ export async function handleInteraction(interaction: APIInteraction, deps: Handl
     const threadId = interaction.channel?.id ?? interaction.channel_id;
     const ticket = threadId ? await deps.ticketForThread(threadId) : undefined;
     const account = ticket && deps.settings.account(ticket.accountId);
-    if (!ticket || !account) return privately("Use this command inside a ticket post in the Chatwoot forum.");
+    if (!threadId || !ticket || !account)
+      return privately("Use this command inside a ticket post in the Chatwoot forum.");
 
     const userId = invokerId(interaction);
     if (!userId || !deps.settings.chatwootUserFor(userId) || !deps.settings.agentToken(userId))
@@ -58,12 +67,19 @@ export async function handleInteraction(interaction: APIInteraction, deps: Handl
       deps,
       interaction,
       userId,
+      threadId,
       ticket,
       title: `${account.name} #${ticket.conversationId}`,
+      panel: interaction.type === InteractionType.MessageComponent && interaction.data.custom_id.startsWith("panel:"),
     };
-    return interaction.type === InteractionType.ModalSubmit
-      ? submit(context, interaction)
-      : command(context, interaction);
+    switch (interaction.type) {
+      case InteractionType.ModalSubmit:
+        return submit(context, interaction);
+      case InteractionType.MessageComponent:
+        return await component(context, interaction);
+      default:
+        return command(context, interaction);
+    }
   } catch (error) {
     if (error instanceof UserError) return privately(`❌ ${error.message}`);
     throw error;
@@ -72,10 +88,13 @@ export async function handleInteraction(interaction: APIInteraction, deps: Handl
 
 interface Context {
   deps: HandlerDeps;
-  interaction: APIApplicationCommandInteraction | APIModalSubmitInteraction;
+  interaction: APIApplicationCommandInteraction | APIModalSubmitInteraction | APIMessageComponentInteraction;
   userId: string;
+  threadId: string;
   ticket: Ticket;
   title: string;
+  /** From the Manage panel: the job draws the panel again in place of a confirmation. */
+  panel: boolean;
 }
 
 function command(context: Context, interaction: APIApplicationCommandInteraction): HandlerResult {
@@ -332,10 +351,10 @@ function editor(context: Context, kind: "reply" | "note", value: string | undefi
 function defer(context: Context, action: CommandAction): HandlerResult {
   const { interaction } = context;
   return {
-    response: {
-      type: InteractionResponseType.DeferredChannelMessageWithSource,
-      data: { flags: MessageFlags.Ephemeral },
-    },
+    // A panel change updates the panel itself; anything else answers with a new private message.
+    response: context.panel
+      ? { type: InteractionResponseType.DeferredMessageUpdate }
+      : { type: InteractionResponseType.DeferredChannelMessageWithSource, data: { flags: MessageFlags.Ephemeral } },
     job: {
       interactionId: interaction.id,
       applicationId: interaction.application_id,
@@ -344,8 +363,79 @@ function defer(context: Context, action: CommandAction): HandlerResult {
       accountId: context.ticket.accountId,
       conversationId: context.ticket.conversationId,
       action,
+      ...(context.panel ? { panel: true } : {}),
     },
   };
+}
+
+/** A ticket button, or a change in the Manage panel. */
+async function component(context: Context, interaction: APIMessageComponentInteraction): Promise<HandlerResult> {
+  const { data } = interaction;
+  switch (data.custom_id) {
+    case BUTTONS.reply:
+      return { response: editor(context, "reply", undefined) };
+    case BUTTONS.draft: {
+      const draft = await context.deps.latestDraft(context.threadId);
+      if (!draft) return privately("The triage bot has not written a draft in this post yet.");
+      return { response: editor(context, "reply", draft) };
+    }
+    case BUTTONS.take: {
+      const chatwootUserId = context.deps.settings.chatwootUserFor(context.userId);
+      if (chatwootUserId === undefined) return privately(NOT_LINKED);
+      return defer(context, { type: "assign", chatwootUserId });
+    }
+    case BUTTONS.resolve:
+      return defer(context, { type: "status", status: "resolved" });
+    case BUTTONS.manage:
+      return defer(context, { type: "panel" });
+  }
+  if (data.component_type !== ComponentType.StringSelect) return privately("Unknown button.");
+  const values = data.values;
+  const [value = ""] = values;
+  switch (data.custom_id) {
+    case PANEL.assignee:
+      return value === NONE ? defer(context, { type: "unassign" }) : defer(context, assignee(value));
+    case PANEL.labels: {
+      // The panel was drawn with the ticket's labels selected: the change is what differs.
+      const shown = shownLabels(interaction);
+      const add = values.filter((label) => !shown.includes(label));
+      const remove = shown.filter((label) => !values.includes(label));
+      return defer(context, { type: "labels", add, remove });
+    }
+    case PANEL.priority: {
+      if (value === NONE) return defer(context, { type: "priority", priority: null });
+      const priority = prioritySchema.safeParse(value);
+      if (!priority.success) throw new UserError("Choose a priority from the list.");
+      return defer(context, { type: "priority", priority: priority.data });
+    }
+    case PANEL.status:
+      if (value === "open" || value === "pending" || value === "resolved") {
+        return defer(context, { type: "status", status: value });
+      }
+      return snooze(context, value, Date.now());
+    default:
+      return privately("Unknown menu.");
+  }
+}
+
+function assignee(value: string): CommandAction {
+  const chatwootUserId = Number(value);
+  if (!Number.isSafeInteger(chatwootUserId) || chatwootUserId <= 0)
+    throw new UserError("Choose an agent from the list.");
+  return { type: "assign", chatwootUserId };
+}
+
+/** The labels the panel's label menu was drawn with (its default options). */
+function shownLabels(interaction: APIMessageComponentInteraction): string[] {
+  for (const row of interaction.message.components ?? []) {
+    if (row.type !== ComponentType.ActionRow) continue;
+    for (const menu of row.components) {
+      if (menu.type === ComponentType.StringSelect && menu.custom_id === PANEL.labels) {
+        return menu.options.filter((option) => option.default).map((option) => option.value);
+      }
+    }
+  }
+  return [];
 }
 
 export function privately(content: string): HandlerResult {

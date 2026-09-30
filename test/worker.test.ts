@@ -347,9 +347,21 @@ describe("worker", () => {
       content:
         "-# via Live chat · Acme — Product App\n-# jane@example.com\n[Open in Chatwoot](<https://chatwoot.example.com/app/accounts/3/conversations/12>)",
     });
+    // The card carries every ticket button; the customer's message, the ones to answer it.
+    const buttons = (body: unknown) =>
+      (body as { components?: Array<{ components: Array<{ custom_id: string }> }> }).components?.flatMap((row) =>
+        row.components.map((button) => button.custom_id),
+      );
+    expect(buttons(posts[0]?.body)).toEqual([
+      "ticket:reply",
+      "ticket:draft",
+      "ticket:take",
+      "ticket:resolve",
+      "ticket:manage",
+    ]);
     const thread = posts[1]?.thread ?? "";
     expect(thread).toMatch(/^\d{18}$/);
-    expect(posts[1]).toEqual({
+    expect(posts[1]).toMatchObject({
       thread,
       body: {
         allowed_mentions: { parse: [] },
@@ -358,6 +370,7 @@ describe("worker", () => {
         avatar_url: "https://gravatar.com/avatar/?d=mp&f=y&s=256",
       },
     });
+    expect(buttons(posts[1]?.body)).toEqual(["ticket:reply", "ticket:draft", "ticket:manage"]);
 
     // The post URL is merged into the conversation's attributes; other attributes survive.
     const link = world.requests.find((request) => request.url.pathname.endsWith("/custom_attributes"));

@@ -1,17 +1,20 @@
 // Runs a deferred command against Chatwoot as the invoking agent, using that agent's own access
 // token, so Chatwoot applies its normal permissions and records who did it.
 
-import { ChatwootError, chatwootClient, type Fetch, type StatusChange } from "../chatwoot/api.ts";
+import { type ChatwootClient, ChatwootError, chatwootClient, type Fetch, type StatusChange } from "../chatwoot/api.ts";
 import type { Settings } from "../config.ts";
 import { errorFields, log } from "../log.ts";
 import { downloadAttachment } from "./attachments.ts";
 import { FAILED, filesTooLarge, NOT_LINKED, UserError } from "./common.ts";
+import { type ActionRow, panelRows } from "./components.ts";
 import { PRIORITY_NAMES } from "./definitions.ts";
 import type { CommandJob } from "./job.ts";
 
 interface CommandResult {
   /** The confirmation shown to the invoker (only they see it). */
   content: string;
+  /** The Manage panel, drawn with the ticket as it is now (panel jobs that succeeded). */
+  components?: ActionRow[];
   /** Chatwoot could not find the conversation: it may have been deleted. */
   conversationGone: boolean;
 }
@@ -36,8 +39,21 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
     // The token works, but its user was removed from the account (or never was in it).
     if (!profile.accounts?.some((account) => account.id === accountId)) throw new UserError(NOT_IN_ACCOUNT);
 
-    let message: string;
+    let message = "";
     switch (action.type) {
+      case "panel":
+        break;
+      case "labels": {
+        // Relative to what the panel showed, so labels someone changed meanwhile are kept.
+        const current = await chatwoot.conversationLabels(accountId, conversationId);
+        const known = await chatwoot.listLabels(accountId);
+        const unknown = action.add.find((label) => !known.includes(label));
+        if (unknown !== undefined) throw new UserError(`There is no label "${unknown}" in this Chatwoot account.`);
+        const labels = [...new Set([...current, ...action.add])].filter((label) => !action.remove.includes(label));
+        await chatwoot.setLabels(accountId, conversationId, labels);
+        message = labelsMessage(action.add, action.remove);
+        break;
+      }
       case "status": {
         const { status, snoozedUntil } = action;
         await chatwoot.setStatus(
@@ -135,6 +151,14 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
       }
     }
     log.info("command done", { action: action.type, discordUserId: job.discordUserId, accountId, conversationId });
+    if (job.panel || action.type === "panel") {
+      const title = `⚙️ **${settings.account(accountId)?.name ?? "Ticket"} #${conversationId}**`;
+      return {
+        content: message ? `${title}\n✅ ${message}` : title,
+        components: await panel(chatwoot, accountId, conversationId),
+        conversationGone: false,
+      };
+    }
     return { content: `✅ ${message}`, conversationGone: false };
   } catch (error) {
     const gone = error instanceof ConversationGoneError || (error instanceof ChatwootError && error.status === 404);
@@ -158,6 +182,31 @@ function failure(error: unknown, { action, accountId, conversationId }: CommandJ
 
 const TIMED_OUT =
   "❌ Chatwoot or Discord did not answer in time. Check in Chatwoot whether it was done before trying again.";
+
+/** The Manage panel for the conversation as it is now. */
+async function panel(chatwoot: ChatwootClient, accountId: number, conversationId: number): Promise<ActionRow[]> {
+  const conversation = await existing(chatwoot.getConversation(accountId, conversationId));
+  const agents = await chatwoot.listAgents(accountId);
+  const labels = await chatwoot.listLabels(accountId);
+  return panelRows(
+    {
+      assigneeId: conversation.meta?.assignee?.id ?? null,
+      labels: conversation.labels ?? [],
+      priority: conversation.priority ?? null,
+      status: conversation.status ?? "open",
+    },
+    agents.flatMap((agent) => (agent.id === undefined ? [] : [{ id: agent.id, name: agent.name ?? `#${agent.id}` }])),
+    labels,
+  );
+}
+
+function labelsMessage(added: string[], removed: string[]): string {
+  const parts = [
+    ...(added.length > 0 ? [`added ${added.join(", ")}`] : []),
+    ...(removed.length > 0 ? [`removed ${removed.join(", ")}`] : []),
+  ];
+  return parts.length > 0 ? `Labels ${parts.join("; ")}.` : "Labels unchanged.";
+}
 
 function statusMessage(status: StatusChange["status"], snoozedUntil: number | undefined): string {
   switch (status) {

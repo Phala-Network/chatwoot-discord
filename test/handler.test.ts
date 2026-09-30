@@ -13,10 +13,32 @@ import { ALICE, BOB, CAROL, TRIAGE, testSettings } from "./helpers.ts";
 
 const THREAD = "100000000000001500";
 const settings = testSettings();
+const DRAFTS = new Map([[THREAD, "Hi, restart the CVM from the dashboard."]]);
 const deps = {
   settings,
   ticketForThread: async (threadId: string) => (threadId === THREAD ? { accountId: 3, conversationId: 15 } : undefined),
+  latestDraft: async (threadId: string) => DRAFTS.get(threadId),
 };
+
+/** A ticket button pressed, or a panel menu changed, in the post. */
+function press(customId: string, values?: string[], message: Record<string, unknown> = {}) {
+  return handleInteraction(
+    JSON.parse(
+      JSON.stringify({
+        id: "777001",
+        application_id: "100000000000000001",
+        token: "interaction-token",
+        type: 3,
+        channel_id: THREAD,
+        channel: { id: THREAD, type: 11 },
+        member: { user: { id: ALICE } },
+        message: { id: "900", components: [], ...message },
+        data: values ? { custom_id: customId, component_type: 3, values } : { custom_id: customId, component_type: 2 },
+      }),
+    ),
+    deps,
+  );
+}
 
 function interaction(fields: {
   type?: number;
@@ -383,5 +405,76 @@ describe("interaction handler", () => {
 
   it("exposes a generic failure message", () => {
     expect(FAILED).toBe("❌ That did not work. Please do it in Chatwoot.");
+  });
+});
+
+describe("ticket buttons and the Manage panel", () => {
+  it("Reply opens the editor; Reply with draft opens it with the triage bot's latest draft", async () => {
+    const reply = await press("ticket:reply");
+    expect(reply.response.type === InteractionResponseType.Modal && reply.response.data.custom_id).toBe("reply:777001");
+    expect(editorField(reply.response, "content")).not.toHaveProperty("value");
+
+    const draft = await press("ticket:draft");
+    expect(editorField(draft.response, "content")?.value).toBe("Hi, restart the CVM from the dashboard.");
+
+    DRAFTS.delete(THREAD);
+    expect(privateText(await press("ticket:draft"))).toMatch(/has not written a draft/);
+    DRAFTS.set(THREAD, "Hi, restart the CVM from the dashboard.");
+  });
+
+  it("Take assigns the invoker, Resolve resolves, Manage draws the panel, each answered privately", async () => {
+    const deferred = {
+      type: InteractionResponseType.DeferredChannelMessageWithSource,
+      data: { flags: MessageFlags.Ephemeral },
+    };
+    const take = await press("ticket:take");
+    expect(take.response).toEqual(deferred);
+    expect(take.job?.action).toEqual({ type: "assign", chatwootUserId: 42 });
+    expect((await press("ticket:resolve")).job?.action).toEqual({ type: "status", status: "resolved" });
+    const manage = await press("ticket:manage");
+    expect(manage.job?.action).toEqual({ type: "panel" });
+    expect(manage.job).not.toHaveProperty("panel");
+  });
+
+  it("a panel change updates the panel in place", async () => {
+    const assign = await press("panel:assignee", ["43"]);
+    expect(assign.response).toEqual({ type: InteractionResponseType.DeferredMessageUpdate });
+    expect(assign.job).toMatchObject({ action: { type: "assign", chatwootUserId: 43 }, panel: true });
+    expect((await press("panel:assignee", ["none"])).job?.action).toEqual({ type: "unassign" });
+    expect((await press("panel:priority", ["none"])).job?.action).toEqual({ type: "priority", priority: null });
+    expect((await press("panel:priority", ["high"])).job?.action).toEqual({ type: "priority", priority: "high" });
+    expect((await press("panel:status", ["pending"])).job?.action).toEqual({ type: "status", status: "pending" });
+    expect((await press("panel:status", ["until_next_reply"])).job?.action).toEqual({
+      type: "status",
+      status: "snoozed",
+    });
+  });
+
+  it("changes labels relative to the ones the panel showed", async () => {
+    const shown = {
+      components: [
+        {
+          type: 1,
+          components: [
+            {
+              type: 3,
+              custom_id: "panel:labels",
+              options: [
+                { label: "web3", value: "web3", default: true },
+                { label: "billing", value: "billing", default: false },
+                { label: "vip", value: "vip", default: true },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const { job } = await press("panel:labels", ["web3", "billing"], shown);
+    expect(job?.action).toEqual({ type: "labels", add: ["billing"], remove: ["vip"] });
+  });
+
+  it("refuses a menu value that is not in it", async () => {
+    expect(privateText(await press("panel:assignee", ["everyone"]))).toMatch(/Choose an agent/);
+    expect(privateText(await press("panel:priority", ["critical"]))).toMatch(/Choose a priority/);
   });
 });
