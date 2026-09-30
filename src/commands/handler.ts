@@ -197,7 +197,7 @@ function message(
     private: kind === "note",
     content,
     files,
-    ...(sendAsAgent && kind === "reply" ? { sendAsAgent } : {}),
+    ...(sendAsAgent ? { sendAsAgent } : {}),
   });
 }
 
