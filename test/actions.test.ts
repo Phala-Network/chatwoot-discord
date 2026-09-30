@@ -375,24 +375,31 @@ describe("executeCommand", () => {
       }),
     );
     type Menu = { custom_id: string; options: Array<{ value: string; default: boolean }> };
-    const selected = (rows: unknown) =>
-      Object.fromEntries(
-        (rows as Array<{ components: Menu[] }>).map(({ components: [menu] }) => [
-          menu?.custom_id,
-          menu?.options.filter((option) => option.default).map((option) => option.value),
-        ]),
+    type Part = { type: number; content?: string; components?: Menu[] };
+    // Each menu under its heading: "<heading>: <selected values>".
+    const layout = (components: unknown) =>
+      (components as Part[]).map((part) =>
+        part.type === 10
+          ? part.content
+          : (part.components ?? []).map((menu) =>
+              menu.options.filter((option) => option.default).map((option) => option.value),
+            )[0],
       );
 
     it("draws the ticket as it is: assignee, labels, priority, and status selected", async () => {
       const { outcome } = run({ type: "panel" }, state, agents, labels);
-      const { content, components } = await outcome;
-      expect(content).toBe("⚙️ **Acme #15**");
-      expect(selected(components)).toEqual({
-        "panel:assignee": ["43"],
-        "panel:labels": ["vip"],
-        "panel:priority": ["high"],
-        "panel:status": ["open"],
-      });
+      const { components } = await outcome;
+      expect(layout(components)).toEqual([
+        "### ⚙️ Acme #15",
+        "**Assignee**",
+        ["43"],
+        "**Labels**",
+        ["vip"],
+        "**Priority**",
+        ["high"],
+        "**Status**",
+        ["open"],
+      ]);
     });
 
     it("draws it again after a change from the panel, with what was done", async () => {
@@ -402,14 +409,20 @@ describe("executeCommand", () => {
         settings,
         (request) => fetch(request),
       );
-      expect(content).toBe("⚙️ **Acme #15**\n✅ Assigned to Bob Example.");
-      expect(components).toHaveLength(4);
+      expect(content).toBe("### ⚙️ Acme #15\n✅ Assigned to Bob Example.");
+      expect(layout(components)[0]).toBe(content);
+      expect(components).toHaveLength(9);
       expect(mock.requests.some((request) => request.url.pathname.endsWith("/assignments"))).toBe(true);
     });
 
-    it("keeps the panel's menus when the change fails", async () => {
-      const { outcome } = run({ type: "assign", chatwootUserId: 99 }, agents);
-      expect((await outcome).components).toBeUndefined();
+    it("shows why a change failed in place of the panel", async () => {
+      mockFetch(profile, agents);
+      const failed = await executeCommand(
+        { ...job({ type: "assign", chatwootUserId: 99 }), panel: true },
+        settings,
+        (request) => fetch(request),
+      );
+      expect(layout(failed.components)).toEqual(["❌ That agent is not in this Chatwoot account."]);
     });
   });
 

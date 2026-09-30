@@ -201,13 +201,13 @@ are supported); you provide TLS, the cron trigger, and storage persistence.
 Used inside a ticket post, by Discord users linked in `agents[]` who have a token in
 `CHATWOOT_AGENT_TOKENS`. The same actions are buttons, which need no typing:
 
-- The ticket card, at the top of the post: **Reply**, **Take**, **Resolve**, and **Manage**. Under
-  each customer message: **Reply** and **Manage**.
+- **Reply**, **Take**, **Resolve**, and **Manage** are on the ticket card, at the top of the post,
+  and under every message (not activity lines), so they are always close at hand.
 - **Reply** opens the `/reply` editor; to start from the triage bot's draft, use **Reply with
   this** on its message (a button cannot read another bot's message without the privileged
   Message Content intent). **Take** assigns the ticket to you; **Resolve** resolves it.
-- **Manage** opens a panel only you see, drawn with the ticket as it is: menus for its assignee,
-  labels, priority, and status (snooze included). A change is made at once, and the panel is drawn
+- **Manage** opens a panel only you see, drawn with the ticket as it is: a menu under a heading
+  for each of its assignee, labels, priority, and status (snooze included). A change is made at once, and the panel is drawn
   again with the result, so it always shows the ticket's state. A label change adds and removes
   what you changed in the menu, keeping labels someone else changed meanwhile.
 

@@ -1,20 +1,24 @@
 // Runs a deferred command against Chatwoot as the invoking agent, using that agent's own access
 // token, so Chatwoot applies its normal permissions and records who did it.
 
+import type { APIMessageTopLevelComponent } from "discord-api-types/v10";
 import { type ChatwootClient, ChatwootError, chatwootClient, type Fetch, type StatusChange } from "../chatwoot/api.ts";
 import type { Settings } from "../config.ts";
 import { errorFields, log } from "../log.ts";
 import { downloadAttachment } from "./attachments.ts";
 import { FAILED, filesTooLarge, NOT_LINKED, UserError } from "./common.ts";
-import { type ActionRow, panelRows } from "./components.ts";
+import { panel, text } from "./components.ts";
 import { PRIORITY_NAMES } from "./definitions.ts";
 import type { CommandJob } from "./job.ts";
 
 interface CommandResult {
   /** The confirmation shown to the invoker (only they see it). */
   content: string;
-  /** The Manage panel, drawn with the ticket as it is now (panel jobs that succeeded). */
-  components?: ActionRow[];
+  /**
+   * For the Manage panel, what replaces it (a Components V2 message, which has no `content`): the
+   * panel drawn again with the ticket as it is now, or the error.
+   */
+  components?: APIMessageTopLevelComponent[];
   /** Chatwoot could not find the conversation: it may have been deleted. */
   conversationGone: boolean;
 }
@@ -151,18 +155,20 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
       }
     }
     log.info("command done", { action: action.type, discordUserId: job.discordUserId, accountId, conversationId });
-    if (job.panel || action.type === "panel") {
-      const title = `⚙️ **${settings.account(accountId)?.name ?? "Ticket"} #${conversationId}**`;
+    if (isPanel(job)) {
+      const title = `### ⚙️ ${settings.account(accountId)?.name ?? "Ticket"} #${conversationId}`;
+      const heading = message ? `${title}\n✅ ${message}` : title;
       return {
-        content: message ? `${title}\n✅ ${message}` : title,
-        components: await panel(chatwoot, accountId, conversationId),
+        content: heading,
+        components: await drawPanel(chatwoot, accountId, conversationId, heading),
         conversationGone: false,
       };
     }
     return { content: `✅ ${message}`, conversationGone: false };
   } catch (error) {
     const gone = error instanceof ConversationGoneError || (error instanceof ChatwootError && error.status === 404);
-    return { content: failure(error, job), conversationGone: gone };
+    const content = failure(error, job);
+    return { content, ...(isPanel(job) ? { components: [text(content)] } : {}), conversationGone: gone };
   }
 }
 
@@ -183,12 +189,23 @@ function failure(error: unknown, { action, accountId, conversationId }: CommandJ
 const TIMED_OUT =
   "❌ Chatwoot or Discord did not answer in time. Check in Chatwoot whether it was done before trying again.";
 
+/** Whether the job's response is the Manage panel. */
+function isPanel(job: CommandJob): boolean {
+  return job.panel === true || job.action.type === "panel";
+}
+
 /** The Manage panel for the conversation as it is now. */
-async function panel(chatwoot: ChatwootClient, accountId: number, conversationId: number): Promise<ActionRow[]> {
+async function drawPanel(
+  chatwoot: ChatwootClient,
+  accountId: number,
+  conversationId: number,
+  heading: string,
+): Promise<APIMessageTopLevelComponent[]> {
   const conversation = await existing(chatwoot.getConversation(accountId, conversationId));
   const agents = await chatwoot.listAgents(accountId);
   const labels = await chatwoot.listLabels(accountId);
-  return panelRows(
+  return panel(
+    heading,
     {
       assigneeId: conversation.meta?.assignee?.id ?? null,
       labels: conversation.labels ?? [],
