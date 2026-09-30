@@ -346,22 +346,22 @@ Secrets (Worker secrets, never in config), also validated at startup:
 ### Routing
 
 With `routing`, each new ticket of a routed account is routed when it is open, has no assignee,
-and has a customer message. The Worker asks Jev two multiple-choice questions, who owns
-the ticket (one of the account's owners, or `unclear`) and its topic, using the email subject and
-the first three customer messages. Before they leave the Worker, emails, URLs, hex and base58
-addresses, long tokens, phone numbers, IP addresses, @handles, and the contact's name are
-replaced with `[REDACTED]`. This is best-effort redaction of common identifiers, not
-anonymization: other personal details in the text still reach TypeSafe, so check that its data
-policy suits you. An owner at `minConfidence` or above is assigned, and a topic at or
-above it is set when the ticket has none. When no owner is clear, Jev is asked again each time the
-customer adds a message, until one is or three customer messages were seen; the ticket then stays
-for a person. A ticket assigned before its turn (by a person or a Chatwoot automation rule) is
-left alone, and a routed ticket is never routed again, even if someone unassigns it. The decision is recorded, without expiry, before it
-is applied, so a retry applies the same one without asking Jev again. It is applied to the ticket
-as it is after Jev answered: an assignee or topic someone set meanwhile is kept. Routing acts with
-`CHATWOOT_RELAY_TOKEN`, whose user must be an agent in the routed inboxes; Chatwoot records the
-assignment as made by that user. The sweep queues routing for open, unassigned tickets in its
-window, so a missed webhook only delays it.
+and has a customer message. The Worker asks Jev two multiple-choice questions, who owns the ticket
+(one of the account's owners, or `unclear`) and its topic, using the email subject and the first
+three customer messages. Before they leave the Worker, emails, URLs, hex and base58 addresses,
+long tokens, phone numbers, IP addresses, @handles, and the contact's name are replaced with
+`[REDACTED]`. This is best-effort redaction of common identifiers, not anonymization: other
+personal details in the text still reach TypeSafe, so check that its data policy suits you. An
+owner at `minConfidence` or above is assigned, and a topic at or above it is set when the ticket
+has none. When no owner is clear, Jev is asked again each time the customer adds a message, until
+one is or three customer messages were seen; the ticket then stays for a person. A ticket assigned
+before its turn (by a person or a Chatwoot automation rule) is left alone, and a routed ticket is
+never routed again, even if someone unassigns it. The decision is recorded, without expiry, before
+it is applied, so a retry applies the same one without asking Jev again. It is applied to the
+ticket as it is after Jev answered: an assignee or topic someone set meanwhile is kept. Routing
+acts with `CHATWOOT_RELAY_TOKEN`, whose user must be an agent in the routed inboxes; Chatwoot
+records the assignment as made by that user. The sweep queues routing for open, unassigned tickets
+in its window, so a missed webhook only delays it.
 
 ```jsonc
 "routing": {
