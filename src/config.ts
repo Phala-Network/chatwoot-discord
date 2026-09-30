@@ -149,8 +149,12 @@ export const configSchema = z
       .strictObject({
         /** Discord channel or forum post the queue is posted in. */
         channelId: snowflake,
-        /** Role pinged when an unassigned ticket's customer has waited long (see src/queue.ts). Unset: none. */
+        /** Role or user pinged when an unassigned ticket's customer has waited long (see src/queue.ts). Unset: none. */
         escalationRoleId: snowflake.optional(),
+        escalationUserId: snowflake.optional(),
+      })
+      .refine((queue) => !(queue.escalationRoleId && queue.escalationUserId), {
+        message: "set escalationRoleId or escalationUserId, not both",
       })
       .optional(),
     attachments: z

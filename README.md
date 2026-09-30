@@ -323,6 +323,7 @@ replace:
 | `queue` | object | unset | The hourly [support queue](#support-queue). Unset: off. Requires `relay.subrequestBudget` ≥ 4 × accounts + 4. |
 | `queue.channelId` | Discord id (17–20 digits) | required | Channel or forum post the queue is posted in. The bot needs *Send Messages* there (*Send Messages in Threads* for a post). |
 | `queue.escalationRoleId` | Discord id (17–20 digits) | unset | Role pinged for tickets unassigned too long. To ping a role that is not mentionable, the bot needs *Mention @everyone, @here, and All Roles* in the channel. Unset: no escalation. |
+| `queue.escalationUserId` | Discord id (17–20 digits) | unset | A user pinged instead of a role (set one of the two). |
 | `routing` | object | unset | Assigns new tickets and adds their topic label with TypeSafe Jev ([routing](#routing)). Requires the `TYPESAFE_API_KEY` secret. Unset: off. |
 | `routing.model` | non-empty string | `jev-1.13.0` | TypeSafe model. |
 | `routing.minConfidence` | number 0.5–1 | `0.7` | Probability an answer needs before it is applied. |
@@ -349,16 +350,16 @@ Secrets (Worker secrets, never in config), also validated at startup:
 
 ### Support queue
 
-With `queue`, the cron run at minute 0 of every hour posts a message in `queue.channelId` that
-lists the open tickets of every account whose customer waits for a reply (Chatwoot's
-`waiting_since`) or that have no assignee, longest wait first: each line is the ticket's post (or
-its dashboard link), how long the customer has waited, and its assignee, whom it pings when they
-are a linked agent. A ticket with no assignee pings `queue.escalationRoleId` after its customer has
-waited 1, 2, 4, 8, and 16 hours, and every 24 hours after that, once per step, until someone takes
-it or replies. Nothing is posted when there is no such ticket. A line holds no customer text, and
-mentions are allowed from the tickets' fields only, never from text. The queue reads up to four
-pages (100 tickets) per account and takes at most four messages; tickets beyond that are counted
-at the end.
+With `queue`, the cron run at minute 0 of every hour posts a message in `queue.channelId` that lists
+the open tickets of every account whose customer waits for a reply (Chatwoot's `waiting_since`) or
+that have no assignee, longest wait first: each line is the ticket's post (or its dashboard link),
+how long the customer has waited, and its assignee, whom it pings when they are a linked agent. A
+ticket with no assignee pings `queue.escalationRoleId` (or `escalationUserId`) after its customer
+has waited 1, 2, 4, 8, and 16 hours, and every 24 hours after that, once per step, until someone
+takes it or replies. Nothing is posted when there is no such ticket. A line holds no customer text,
+and mentions are allowed from the tickets' fields only, never from text. The queue reads up to four
+pages (100 tickets) per account and takes at most four messages; tickets beyond that are counted at
+the end.
 
 ### Routing
 

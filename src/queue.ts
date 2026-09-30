@@ -1,9 +1,9 @@
 // The support queue: every hour (the cron run at minute 0), a message in `queue.channelId` lists
 // the open tickets that wait for a reply or have no assignee, longest wait first, and pings their
 // linked assignees. An unassigned ticket whose customer has waited 1, 2, 4, 8, and 16 hours, and
-// every 24 hours after that, also pings `queue.escalationRoleId`, once per step, until someone takes
-// it or replies (a new customer message after a reply starts over). Nothing is posted when the
-// queue is empty.
+// every 24 hours after that, also pings `queue.escalationRoleId` (or `escalationUserId`), once per
+// step, until someone takes it or replies (a new customer message after a reply starts over).
+// Nothing is posted when the queue is empty.
 //
 // A line shows only the ticket's post (or dashboard link), its wait, and its assignee: no customer
 // text. Mentions are allowed from the tickets' fields (linked assignees, the escalation), never
@@ -91,7 +91,7 @@ export async function postQueue(ctx: QueueContext, now = Date.now()): Promise<vo
         const waitingSince = conversation.waiting_since ?? 0;
         if (assignee && !waitingSince) continue;
         let escalate = false;
-        if (!assignee && waitingSince && queue.escalationRoleId) {
+        if (!assignee && waitingSince && (queue.escalationRoleId ?? queue.escalationUserId)) {
           const key = `${account.id}:${conversationId}`;
           const level = escalationLevel((nowSeconds - waitingSince) / 3600);
           const reached = previous[key]?.since === waitingSince ? previous[key].level : 0;
@@ -133,11 +133,15 @@ export async function postQueue(ctx: QueueContext, now = Date.now()): Promise<vo
 }
 
 function messages(ctx: QueueContext, tickets: Ticket[], nowSeconds: number, unread: boolean): Chunk[] {
-  const roleId = ctx.settings.config.queue?.escalationRoleId;
-  const escalate = roleId !== undefined && tickets.some((ticket) => ticket.escalate);
+  const { escalationRoleId: roleId, escalationUserId: userId } = ctx.settings.config.queue ?? {};
+  const escalate = tickets.some((ticket) => ticket.escalate);
   let header = `📋 Support queue <t:${Math.floor(nowSeconds)}:t>`;
-  if (escalate) header += `\n<@&${roleId}> 🔔 tickets have waited with no assignee: please \`/assign\` one.`;
-  const chunks: Chunk[] = [{ content: header, users: new Set(), role: escalate }];
+  if (escalate) {
+    const mention = roleId ? `<@&${roleId}>` : `<@${userId}>`;
+    header += `\n${mention} 🔔 tickets have waited with no assignee: please \`/assign\` one.`;
+  }
+  const users = new Set(escalate && userId ? [userId] : []);
+  const chunks: Chunk[] = [{ content: header, users, role: escalate && roleId !== undefined }];
   let shown = 0;
   for (const ticket of tickets) {
     const text = line(ctx, ticket, nowSeconds);
