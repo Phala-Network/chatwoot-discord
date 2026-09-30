@@ -70,6 +70,30 @@ app.post("/chatwoot/webhook", bodyLimit({ maxSize: 2 * 1024 * 1024 }), async (c)
   return c.json({ ok: true });
 });
 
+// The triage bot's hook, signed like Chatwoot's webhooks: the bot answered in a ticket post, so
+// the ticket buttons follow its answer.
+app.post("/triage/answered", bodyLimit({ maxSize: 1024 }), async (c) => {
+  const secret = loadSettings(c.env).secrets.TRIAGE_HOOK_SECRET;
+  if (!secret) return c.text("not found", 404);
+  const timestamp = c.req.header("x-timestamp");
+  if (!timestamp || !isFreshTimestamp(timestamp, Math.floor(Date.now() / 1000))) {
+    return c.text("invalid or stale timestamp", 401);
+  }
+  const body = new Uint8Array(await c.req.arrayBuffer());
+  if (!(await verifyChatwootSignature(secret, timestamp, body, c.req.header("x-signature")))) {
+    return c.text("invalid signature", 401);
+  }
+  let threadId: unknown;
+  try {
+    threadId = (JSON.parse(new TextDecoder().decode(body)) as { threadId?: unknown }).threadId;
+  } catch {
+    return c.text("bad request", 400);
+  }
+  if (typeof threadId !== "string" || !/^\d{17,20}$/.test(threadId)) return c.text("bad request", 400);
+  await hub(c.env).triageAnswered(threadId);
+  return c.json({ ok: true });
+});
+
 app.post("/discord/interactions", bodyLimit({ maxSize: 1024 * 1024 }), async (c) => {
   const settings = loadSettings(c.env);
   const signature = c.req.header("x-signature-ed25519");

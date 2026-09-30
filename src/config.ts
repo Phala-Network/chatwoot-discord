@@ -225,6 +225,8 @@ export const secretsSchema = z.object({
   CHATWOOT_AGENT_TOKENS: jsonRecord.default({}),
   /** TypeSafe API key; required when `routing` is configured. */
   TYPESAFE_API_KEY: z.string().min(1).optional(),
+  /** Shared with the triage bot's hook, which signs POST /triage/answered. Unset: the route is off. */
+  TRIAGE_HOOK_SECRET: z.string().min(32).optional(),
 });
 
 type Secrets = z.infer<typeof secretsSchema>;
@@ -266,6 +268,7 @@ export function loadSettings(env: Env): Settings {
     CHATWOOT_WEBHOOK_SECRETS: env.CHATWOOT_WEBHOOK_SECRETS,
     CHATWOOT_AGENT_TOKENS: env.CHATWOOT_AGENT_TOKENS,
     TYPESAFE_API_KEY: env.TYPESAFE_API_KEY,
+    TRIAGE_HOOK_SECRET: env.TRIAGE_HOOK_SECRET,
   });
   if (!secrets.success) throw new ConfigError(`Invalid secrets: ${describe(secrets.error)}`);
 

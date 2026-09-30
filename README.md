@@ -170,6 +170,7 @@ npx wrangler secret put CHATWOOT_RELAY_TOKEN
 npx wrangler secret put CHATWOOT_WEBHOOK_SECRETS   # {} for now; filled in step 4
 npx wrangler secret put CHATWOOT_AGENT_TOKENS      # {"<discord user id>":"<chatwoot token>"}
 npx wrangler secret put TYPESAFE_API_KEY           # only with routing
+npx wrangler secret put TRIAGE_HOOK_SECRET         # only with a triage bot hook (see Triage bot hook)
 npm run deploy
 ```
 
@@ -366,6 +367,7 @@ Secrets (Worker secrets, never in config), also validated at startup:
 | `CHATWOOT_WEBHOOK_SECRETS` | JSON object, `{"<account id>":"<secret>"}` | Each account's webhook secret. |
 | `CHATWOOT_AGENT_TOKENS` | JSON object, `{"<Discord user id>":"<token>"}`; optional, default `{}` | Each linked agent's own Chatwoot access token; commands act with it. |
 | `TYPESAFE_API_KEY` | non-empty; required with `routing` | TypeSafe API key for routing. |
+| `TRIAGE_HOOK_SECRET` | 32+ characters; optional | Signs the triage bot's hook ([triage bot hook](#triage-bot-hook)). Unset: the route is off. |
 
 ### Support queue
 
@@ -391,17 +393,18 @@ tokens, phone numbers, IP addresses, @handles, and the contact's name are replac
 `[REDACTED]`. This is best-effort redaction of common identifiers, not anonymization: other personal
 details in the text still reach TypeSafe, so check that its data policy suits you. An owner at
 `minConfidence` or above is assigned, and a topic at or above it is added as a label when the ticket
-has none of the topic labels. When no owner is clear, Jev is asked again each time the customer adds
-a message, until one is or three customer messages were seen; the ticket then stays for a person.
-With `snoozeUnclear`, a ticket without a clear owner is snoozed until the customer's next message,
-which reopens it and asks Jev again, so it waits for detail instead of escalating; after the third
-message it stays open. A ticket assigned before its turn (by a person or a Chatwoot automation rule)
-is left alone, and a routed ticket is never routed again, even if someone unassigns it. The decision
-is recorded, without expiry, before it is applied, so a retry applies the same one without asking
-Jev again. It is applied to the ticket as it is after Jev answered: an assignee or topic label
-someone set meanwhile is kept. Routing acts with `CHATWOOT_RELAY_TOKEN`, whose user must be an agent
-in the routed inboxes; Chatwoot records the assignment as made by that user. The sweep queues
-routing for open, unassigned tickets in its window, so a missed webhook only delays it.
+has no label yet (a ticket has one label, so one an automation rule set stays alone). When no owner
+is clear, Jev is asked again each time the customer adds a message, until one is or three customer
+messages were seen; the ticket then stays for a person. With `snoozeUnclear`, a ticket without a
+clear owner is snoozed until the customer's next message, which reopens it and asks Jev again, so it
+waits for detail instead of escalating; after the third message it stays open. A ticket assigned
+before its turn (by a person or a Chatwoot automation rule) is left alone, and a routed ticket is
+never routed again, even if someone unassigns it. The decision is recorded, without expiry, before
+it is applied, so a retry applies the same one without asking Jev again. It is applied to the ticket
+as it is after Jev answered: an assignee or topic label someone set meanwhile is kept. Routing acts
+with `CHATWOOT_RELAY_TOKEN`, whose user must be an agent in the routed inboxes; Chatwoot records the
+assignment as made by that user. The sweep queues routing for open, unassigned tickets in its
+window, so a missed webhook only delays it.
 
 ```jsonc
 "routing": {
@@ -414,6 +417,17 @@ routing for open, unassigned tickets in its window, so a missed webhook only del
   "topics": { "technical-support": "Something does not work.", "billing": "Payments, invoices, refunds." }
 }
 ```
+
+### Triage bot hook
+
+A customer message that calls the triage bot has no buttons of its own: the ticket buttons follow
+the bot's answer instead, so **Use draft** sits under the draft. The Worker cannot see Discord
+messages, so the bot's side says when it has answered: `POST /triage/answered` with the body
+`{"threadId":"<post id>"}` and the headers `x-timestamp` (Unix seconds) and `x-signature`
+(`sha256=` and the hex HMAC-SHA256 of `<timestamp>.<body>` with `TRIAGE_HOOK_SECRET`, as Chatwoot
+signs its webhooks). The Worker posts the buttons in that post 3 seconds later, since a hook that
+fires as the answer is finished runs just before the answer is sent. For Hermes, an `agent:end`
+gateway hook in the triage profile does this.
 
 ## Limits and the Workers Free plan
 

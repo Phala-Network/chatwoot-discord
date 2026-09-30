@@ -97,13 +97,13 @@ afterEach(() => {
 
 describe("routeConversation", () => {
   it("assigns the owner and adds the topic label Jev is confident about, sending the text without identifiers", async () => {
-    const { requests } = world({ labels: ["web3"] }, { owner: ["cloud", 0.93], topic: ["technical-support", 0.88] });
+    const { requests } = world({}, { owner: ["cloud", 0.93], topic: ["technical-support", 0.88] });
 
     await routeConversation(context(), 1, 5);
 
     expect(sent(requests, "POST", `${CW}/assignments`).map((r) => JSON.parse(r.body))).toEqual([{ assignee_id: 6 }]);
     expect(sent(requests, "POST", `${CW}/labels`).map((r) => JSON.parse(r.body))).toEqual([
-      { labels: ["web3", "technical-support"] },
+      { labels: ["technical-support"] },
     ]);
     const [jev] = sent(requests, "POST", "api.typesafe.ai/v1/systemone");
     expect(jev?.headers.get("authorization")).toBe("Bearer ts-key");
@@ -125,16 +125,20 @@ describe("routeConversation", () => {
     expect(sent(requests, "POST", `${CW}/labels`)).toEqual([]);
   });
 
-  it("never routes a ticket someone assigned first, nor adds a second topic label", async () => {
+  it("never routes a ticket someone assigned first, nor adds a second label", async () => {
     const assigned = world({ assignee: { id: 9, name: "Doyle" } }, { owner: ["sales", 1], topic: ["billing", 1] });
     await routeConversation(context(), 1, 5);
     expect(sent(assigned.requests, "POST", "api.typesafe.ai/v1/systemone")).toEqual([]);
     vi.restoreAllMocks();
 
-    const withTopic = world({ labels: ["billing"] }, { owner: ["sales", 1], topic: ["technical-support", 1] });
-    await routeConversation(context(), 1, 5);
-    expect(sent(withTopic.requests, "POST", `${CW}/assignments`)).toHaveLength(1);
-    expect(sent(withTopic.requests, "POST", `${CW}/labels`)).toEqual([]);
+    // A ticket has one label: one set before (a topic, or an automation rule's label) is kept alone.
+    for (const label of ["billing", "web3"]) {
+      vi.restoreAllMocks();
+      const labelled = world({ labels: [label] }, { owner: ["sales", 1], topic: ["technical-support", 1] });
+      await routeConversation(context(), 1, 5);
+      expect(sent(labelled.requests, "POST", `${CW}/assignments`)).toHaveLength(1);
+      expect(sent(labelled.requests, "POST", `${CW}/labels`)).toEqual([]);
+    }
   });
 
   it("routes on a later customer message when the first one is unclear, and stops once routed", async () => {

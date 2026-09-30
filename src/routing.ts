@@ -153,13 +153,13 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
   const assign = owner !== undefined && !current.assignee;
   if (assign) await chatwoot.assign(accountId, conversationId, owner.assignee);
 
-  // The topic is a label: added when Jev is confident and the ticket has no topic label yet.
-  const topics = Object.keys(routing.topics ?? {});
+  // The topic is a label, and a ticket has one label: added when Jev is confident and the ticket
+  // has no label yet (an automation rule's label, such as an inbox's, is kept alone).
   const topic =
     decision.topic !== null &&
-    topics.includes(decision.topic) &&
+    Object.hasOwn(routing.topics ?? {}, decision.topic) &&
     decision.topicConfidence >= routing.minConfidence &&
-    !current.labels.some((label) => topics.includes(label))
+    current.labels.length === 0
       ? decision.topic
       : null;
   if (topic !== null) await chatwoot.setLabels(accountId, conversationId, [...current.labels, topic]);
