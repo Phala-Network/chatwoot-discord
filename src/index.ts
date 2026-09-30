@@ -70,8 +70,8 @@ app.post("/chatwoot/webhook", bodyLimit({ maxSize: 2 * 1024 * 1024 }), async (c)
   return c.json({ ok: true });
 });
 
-// The triage bot's hook, signed like Chatwoot's webhooks: the bot answered in a ticket post, so
-// the ticket buttons follow its answer.
+// The triage bot's hook, signed like Chatwoot's webhooks: the bot answered in a ticket post
+// (`{"threadId", "draft"}`: whether the answer has a draft), so the ticket buttons follow it.
 app.post("/triage/answered", bodyLimit({ maxSize: 1024 }), async (c) => {
   const secret = loadSettings(c.env).secrets.TRIAGE_HOOK_SECRET;
   if (!secret) return c.text("not found", 404);
@@ -83,14 +83,17 @@ app.post("/triage/answered", bodyLimit({ maxSize: 1024 }), async (c) => {
   if (!(await verifyChatwootSignature(secret, timestamp, body, c.req.header("x-signature")))) {
     return c.text("invalid signature", 401);
   }
-  let threadId: unknown;
+  let answer: { threadId?: unknown; draft?: unknown };
   try {
-    threadId = (JSON.parse(new TextDecoder().decode(body)) as { threadId?: unknown }).threadId;
+    answer = JSON.parse(new TextDecoder().decode(body));
   } catch {
     return c.text("bad request", 400);
   }
-  if (typeof threadId !== "string" || !/^\d{17,20}$/.test(threadId)) return c.text("bad request", 400);
-  await hub(c.env).triageAnswered(threadId);
+  const { threadId, draft } = answer;
+  if (typeof threadId !== "string" || !/^\d{17,20}$/.test(threadId) || typeof draft !== "boolean") {
+    return c.text("bad request", 400);
+  }
+  await hub(c.env).triageAnswered(threadId, draft);
   return c.json({ ok: true });
 });
 

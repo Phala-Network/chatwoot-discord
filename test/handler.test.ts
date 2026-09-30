@@ -439,6 +439,22 @@ describe("ticket buttons and the Manage panel", () => {
     const manage = await press("ticket:manage");
     expect(manage.job?.action).toEqual({ type: "panel" });
     expect(manage.job).not.toHaveProperty("panel");
+    expect((await press("ticket:snooze")).job?.action).toEqual({ type: "status", status: "snoozed" });
+  });
+
+  it("Block asks first; confirming turns the question into the result", async () => {
+    const asked = await press("ticket:block");
+    expect(asked.job).toBeUndefined();
+    expect(asked.response).toMatchObject({
+      type: InteractionResponseType.ChannelMessageWithSource,
+      data: { flags: MessageFlags.Ephemeral, components: [{ components: [{ custom_id: "ticket:block-confirmed" }] }] },
+    });
+    const confirmed = await press("ticket:block-confirmed");
+    expect(confirmed.response).toEqual({
+      type: InteractionResponseType.UpdateMessage,
+      data: { content: "⏳ Blocking…", components: [] },
+    });
+    expect(confirmed.job?.action).toEqual({ type: "block" });
   });
 
   it("a panel change updates the panel in place", async () => {

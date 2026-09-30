@@ -19,6 +19,10 @@ export const BUTTONS = {
   draft: "ticket:draft",
   take: "ticket:take",
   resolve: "ticket:resolve",
+  snooze: "ticket:snooze",
+  block: "ticket:block",
+  /** On the confirmation Block asks for. */
+  blockConfirmed: "ticket:block-confirmed",
   manage: "ticket:manage",
 } as const;
 
@@ -38,27 +42,52 @@ export const NONE = "none";
 const MAX_OPTIONS = 25;
 const MAX_OPTION_TEXT = 100;
 
+type Style = ButtonStyle.Primary | ButtonStyle.Secondary | ButtonStyle.Success | ButtonStyle.Danger;
+
 function button(
   customId: string,
   label: string,
   emoji: string,
-  style: ButtonStyle.Primary | ButtonStyle.Secondary | ButtonStyle.Success = ButtonStyle.Secondary,
+  style: Style = ButtonStyle.Secondary,
 ): APIButtonComponent {
-  return { type: ComponentType.Button, custom_id: customId, label, emoji: { name: emoji }, style };
+  return {
+    type: ComponentType.Button,
+    custom_id: customId,
+    emoji: { name: emoji },
+    style,
+    ...(label ? { label } : {}),
+  };
 }
 
-/** The buttons on the ticket card and under each message; "Use draft" needs a triage bot. */
+/**
+ * The ticket buttons, in two rows: answering (Use draft, highlighted, when the message above is
+ * the triage bot's answer with a draft; Reply) and acting on the ticket (Take, Resolve, Snooze
+ * until the next reply, Block, and ⚙️ for the Manage panel).
+ */
 export function ticketButtons(draft: boolean): ActionRow[] {
+  const row = (components: APIButtonComponent[]): ActionRow => ({ type: ComponentType.ActionRow, components });
+  return [
+    row(
+      draft
+        ? [button(BUTTONS.draft, "Use draft", "🤖", ButtonStyle.Primary), button(BUTTONS.reply, "Reply", "✏️")]
+        : [button(BUTTONS.reply, "Reply", "✏️", ButtonStyle.Primary)],
+    ),
+    row([
+      button(BUTTONS.take, "Take", "🙋"),
+      button(BUTTONS.resolve, "Resolve", "✅", ButtonStyle.Success),
+      button(BUTTONS.snooze, "Snooze", "💤"),
+      button(BUTTONS.block, "Block", "🚫", ButtonStyle.Danger),
+      button(BUTTONS.manage, "", "⚙️"),
+    ]),
+  ];
+}
+
+/** Block asks first: it resolves the ticket and mutes the contact. */
+export function blockConfirmation(): ActionRow[] {
   return [
     {
       type: ComponentType.ActionRow,
-      components: [
-        button(BUTTONS.reply, "Reply", "✏️", ButtonStyle.Primary),
-        ...(draft ? [button(BUTTONS.draft, "Use draft", "🤖")] : []),
-        button(BUTTONS.take, "Take", "🙋"),
-        button(BUTTONS.resolve, "Resolve", "✅", ButtonStyle.Success),
-        button(BUTTONS.manage, "Manage", "⚙️"),
-      ],
+      components: [button(BUTTONS.blockConfirmed, "Block contact", "🚫", ButtonStyle.Danger)],
     },
   ];
 }

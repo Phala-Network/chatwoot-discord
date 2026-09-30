@@ -204,13 +204,15 @@ are supported); you provide TLS, the cron trigger, and storage persistence.
 Used inside a ticket post, by Discord users linked in `agents[]` who have a token in
 `CHATWOOT_AGENT_TOKENS`. The same actions are buttons, which need no typing:
 
-- **Reply**, **Use draft** (with a triage bot), **Take**, **Resolve**, and **Manage** are on the
-  ticket card, at the top of the post, and under every message (not activity lines), so they are
-  always close at hand.
+- The ticket card (at the top of the post) and every message (not activity lines) end with two
+  rows of buttons: **Reply**, then **Take**, **Resolve**, **Snooze** (until the next reply),
+  **Block**, and **⚙️** (the Manage card). Under the triage bot's answer the first row starts with
+  **Use draft**, highlighted, when the answer has a draft (see [Triage bot hook](#triage-bot-hook)).
 - **Reply** opens the `/reply` editor. **Use draft** opens it with the draft of the triage bot's
   newest message in the post that has one (its last code block, as **Reply with this** takes it);
   it reads the post's messages, which needs the Message Content intent, and says so when the bot
-  lacks it. **Take** assigns the ticket to you; **Resolve** resolves it.
+  lacks it. **Take** assigns the ticket to you; **Resolve** resolves it. **Block** asks you to
+  confirm first (only you see the question), then blocks the contact as `/block` does.
 - **Manage** opens a card only you see, drawn with the ticket as it is and coloured by its status:
   menus for its assignee and its label (one per ticket: choosing one replaces its labels), and
   **Open**, **Resolve**, and **Snooze** (until the next reply) buttons with the current status
@@ -423,11 +425,12 @@ window, so a missed webhook only delays it.
 A customer message that calls the triage bot has no buttons of its own: the ticket buttons follow
 the bot's answer instead, so **Use draft** sits under the draft. The Worker cannot see Discord
 messages, so the bot's side says when it has answered: `POST /triage/answered` with the body
-`{"threadId":"<post id>"}` and the headers `x-timestamp` (Unix seconds) and `x-signature`
-(`sha256=` and the hex HMAC-SHA256 of `<timestamp>.<body>` with `TRIAGE_HOOK_SECRET`, as Chatwoot
-signs its webhooks). The Worker posts the buttons in that post 3 seconds later, since a hook that
-fires as the answer is finished runs just before the answer is sent. For Hermes, an `agent:end`
-gateway hook in the triage profile does this.
+`{"threadId":"<post id>","draft":<whether the answer has a draft>}` and the headers `x-timestamp`
+(Unix seconds) and `x-signature` (`sha256=` and the hex HMAC-SHA256 of `<timestamp>.<body>` with
+`TRIAGE_HOOK_SECRET`, as Chatwoot signs its webhooks). The Worker posts the buttons (with **Use
+draft** when there is a draft) in that post 3 seconds later, since a hook that fires as the answer
+is finished runs just before the answer is sent. For Hermes, an `agent:end` gateway hook in the
+triage profile does this.
 
 ## Limits and the Workers Free plan
 

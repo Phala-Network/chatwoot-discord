@@ -41,7 +41,7 @@ const payloadSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("message-updated"), accountId: id, conversationId: id, messageId: id }),
   z.object({ type: z.literal("route"), accountId: id, conversationId: id }),
   z.object({ type: z.literal("queue") }),
-  z.object({ type: z.literal("buttons"), accountId: id, conversationId: id }),
+  z.object({ type: z.literal("buttons"), accountId: id, conversationId: id, draft: z.boolean() }),
 ]);
 type JobPayload = z.infer<typeof payloadSchema>;
 
@@ -137,11 +137,14 @@ export class Hub extends DurableObject<Env> {
     await this.schedule();
   }
 
-  /** The triage bot answered in a post: its ticket's buttons follow the answer (see Relay.postButtons). */
-  async triageAnswered(threadId: string): Promise<void> {
+  /**
+   * The triage bot answered in a post, with a draft or without: its ticket's buttons follow the
+   * answer (see Relay.postButtons).
+   */
+  async triageAnswered(threadId: string, draft: boolean): Promise<void> {
     const ticket = this.store.ticketForThread(threadId);
     if (!ticket) return;
-    this.enqueue({ type: "buttons", ...ticket }, Date.now() + BUTTONS_DELAY_MS);
+    this.enqueue({ type: "buttons", ...ticket, draft }, Date.now() + BUTTONS_DELAY_MS);
     await this.schedule();
   }
 
@@ -217,7 +220,7 @@ export class Hub extends DurableObject<Env> {
           this.store.completeJob(job);
           return "done";
         case "buttons":
-          await services.relay.postButtons(payload.accountId, payload.conversationId);
+          await services.relay.postButtons(payload.accountId, payload.conversationId, payload.draft);
           this.store.completeJob(job);
           return "done";
         case "route":

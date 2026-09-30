@@ -20,7 +20,7 @@ import {
 import type { Settings } from "../config.ts";
 import { draftFromMessage, lastCodeBlock } from "../relay/format.ts";
 import { filesTooLarge, fileTooLarge, isDiscordAttachmentUrl, NOT_LINKED, UserError } from "./common.ts";
-import { BUTTONS, NONE, PANEL } from "./components.ts";
+import { BUTTONS, blockConfirmation, NONE, PANEL } from "./components.ts";
 import { CONTENT_MAX, REPLY_WITH_THIS } from "./definitions.ts";
 import type { Draft } from "./draft.ts";
 import { type AttachmentRef, type CommandAction, type CommandJob, prioritySchema } from "./job.ts";
@@ -390,6 +390,27 @@ async function component(context: Context, interaction: APIMessageComponentInter
     }
     case BUTTONS.resolve:
       return defer(context, { type: "status", status: "resolved" });
+    case BUTTONS.snooze:
+      return snooze(context, "until_next_reply", Date.now());
+    case BUTTONS.block:
+      return {
+        response: {
+          type: InteractionResponseType.ChannelMessageWithSource,
+          data: {
+            content:
+              "Block this contact? The ticket is resolved, and their new messages are muted (`/unblock` undoes it).",
+            components: blockConfirmation(),
+            flags: MessageFlags.Ephemeral,
+            allowed_mentions: { parse: [] },
+          },
+        },
+      };
+    case BUTTONS.blockConfirmed:
+      // The confirmation becomes the result: "@original" is the message this button is on.
+      return {
+        ...defer(context, { type: "block" }),
+        response: { type: InteractionResponseType.UpdateMessage, data: { content: "⏳ Blocking…", components: [] } },
+      };
     case BUTTONS.manage:
       return defer(context, { type: "panel" });
   }

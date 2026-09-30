@@ -121,8 +121,11 @@ export interface RelayOptions {
   triage?: TriageOptions | undefined;
   /** The agent linked to a Chatwoot user id, if any. */
   linkedAgent?: ((chatwootUserId: number) => LinkedAgent | undefined) | undefined;
-  /** Buttons on the ticket card and under each message (not activity lines). */
-  buttons?: MessageComponents | undefined;
+  /**
+   * The ticket buttons: on the card and under each message (not activity lines) and the triage
+   * bot's answer (see postButtons), and with "Use draft" when that answer has a draft.
+   */
+  buttons?: { message: MessageComponents; draft: MessageComponents } | undefined;
   /** Messages created longer ago than this are relayed without notifications. */
   liveSeconds: number;
   now?: () => Date;
@@ -186,7 +189,7 @@ export class Relay {
    * The ticket buttons as a message of their own, posted when the triage bot has answered in the
    * post (its hook tells the Hub), so they follow its draft. A post that no longer exists is left.
    */
-  async postButtons(accountId: number, conversationId: number): Promise<void> {
+  async postButtons(accountId: number, conversationId: number, draft: boolean): Promise<void> {
     const { store, forum, buttons } = this.options;
     const threadId = store.conversation(accountId, conversationId)?.threadId;
     if (!threadId || !buttons) return;
@@ -197,7 +200,7 @@ export class Relay {
           username: SYSTEM_USERNAME,
           avatar_url: this.options.avatars.chatwoot,
           allowed_mentions: { parse: [] },
-          components: buttons,
+          components: draft ? buttons.draft : buttons.message,
         },
         threadId,
       );
@@ -369,7 +372,7 @@ export class Relay {
     // message the triage bot answers has them after the answer instead (see postButtons).
     const last = parts.at(-1);
     if (last && this.options.buttons && message.messageType !== "activity" && !notification.triaged) {
-      last.components = this.options.buttons;
+      last.components = this.options.buttons.message;
     }
     return parts;
   }
@@ -411,7 +414,7 @@ export class Relay {
     };
     const tags = this.postTags(accountId, conversation);
     if (tags.length > 0) post.applied_tags = tags;
-    if (this.options.buttons) post.components = this.options.buttons;
+    if (this.options.buttons) post.components = this.options.buttons.message;
     const { channelId: threadId } = await forum.execute(target.forumChannelId, post);
     store.updateConversation(accountId, conversation.id, {
       threadId,

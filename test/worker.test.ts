@@ -243,11 +243,20 @@ async function triageHook(payload: unknown, secret = "triage-hook-secret-0123456
   );
 }
 
-const ALL_BUTTONS = ["ticket:reply", "ticket:draft", "ticket:take", "ticket:resolve", "ticket:manage"];
+/** The ticket buttons: the answering row, then the acting row. */
+const ACTIONS = ["ticket:take", "ticket:resolve", "ticket:snooze", "ticket:block", "ticket:manage"];
+const ALL_BUTTONS = [["ticket:reply"], ACTIONS];
+const DRAFT_BUTTONS = [["ticket:draft", "ticket:reply"], ACTIONS];
 
-/** The custom ids of a posted message's buttons. */
-function buttons(body: unknown): string[] | undefined {
-  return (body as { components?: Array<{ components: Array<{ custom_id: string }> }> }).components?.flatMap((row) =>
+/** The custom id of a posted message's highlighted (primary) button. */
+function primary(body: unknown): string | undefined {
+  const rows = (body as { components?: Array<{ components: Array<{ custom_id: string; style: number }> }> }).components;
+  return rows?.flatMap((row) => row.components).find((button) => button.style === 1)?.custom_id;
+}
+
+/** The custom ids of a posted message's buttons, row by row. */
+function buttons(body: unknown): string[][] | undefined {
+  return (body as { components?: Array<{ components: Array<{ custom_id: string }> }> }).components?.map((row) =>
     row.components.map((button) => button.custom_id),
   );
 }
@@ -429,21 +438,30 @@ describe("worker", () => {
     expect(thread).toMatch(/^\d{18}$/);
     const before = world.webhookPosts().length;
 
-    expect((await triageHook({ threadId: thread }, "wrong-secret-0123456789abcdef0123")).status).toBe(401);
-    expect((await triageHook({ threadId: "not a thread" })).status).toBe(400);
-    expect((await triageHook({ threadId: thread })).status).toBe(200);
-    // It waits a moment, so the answer (sent right after the hook) lands first.
-    await runInDurableObject(hub(), (_instance, state) => {
-      state.storage.sql.exec("UPDATE jobs SET not_before = 0");
-    });
-    await setAlarmNow();
-    await drain();
+    expect((await triageHook({ threadId: thread, draft: true }, "wrong-secret-0123456789abcdef0123")).status).toBe(401);
+    expect((await triageHook({ threadId: "not a thread", draft: true })).status).toBe(400);
+    expect((await triageHook({ threadId: thread })).status).toBe(400);
+    const answered = async (draft: boolean) => {
+      expect((await triageHook({ threadId: thread, draft })).status).toBe(200);
+      // It waits a moment, so the answer (sent right after the hook) lands first.
+      await runInDurableObject(hub(), (_instance, state) => {
+        state.storage.sql.exec("UPDATE jobs SET not_before = 0");
+      });
+      await setAlarmNow();
+      await drain();
+      return world.webhookPosts().at(-1);
+    };
 
-    const [bar, ...rest] = world.webhookPosts().slice(before);
-    expect(rest).toEqual([]);
+    const bar = await answered(true);
+    expect(world.webhookPosts()).toHaveLength(before + 1);
     expect(bar).toMatchObject({ thread, body: { username: "Chatwoot", allowed_mentions: { parse: [] } } });
     expect(bar?.body).not.toHaveProperty("content");
-    expect(buttons(bar?.body)).toEqual(ALL_BUTTONS);
+    // Under an answer with a draft, "Use draft" is the button to press; elsewhere "Reply" is.
+    expect(buttons(bar?.body)).toEqual(DRAFT_BUTTONS);
+    expect(primary(bar?.body)).toBe("ticket:draft");
+    expect(primary(world.webhookPosts().find((post) => post.thread === null)?.body)).toBe("ticket:reply");
+    // An answer without a draft (spam, already answered) gets no "Use draft".
+    expect(buttons((await answered(false))?.body)).toEqual(ALL_BUTTONS);
   });
 
   it("retries a failed message with backoff without skipping it", async () => {
