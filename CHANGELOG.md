@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Only the first ticket button (**Reply**, or **Use draft**) is coloured; the others are grey, so
+  their emoji stay visible. **Assign to…** shows 👉 and **Snooze** 😴 (instead of emoji too dark
+  to see on grey).
+
 ## [0.18.0] - 2026-09-30
 
 ### Changed
