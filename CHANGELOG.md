@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Support queue: with the new `queue` setting, an hourly message lists the tickets waiting for a
+  reply or without an assignee, pings their linked assignees, and pings a role when an unassigned
+  ticket has waited 1, 2, 4, 8, and 16 hours, then daily. See
+  [support queue](README.md#support-queue).
+
 ## [0.6.1] - 2026-09-30
 
 ### Fixed

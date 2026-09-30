@@ -22,6 +22,8 @@ import { loadSettings, relaysInbox, type Settings } from "./config.ts";
 import { DiscordForum } from "./discord/forum.ts";
 import { DiscordHttpError, DiscordRest } from "./discord/rest.ts";
 import { errorFields, log } from "./log.ts";
+import { postQueue } from "./queue.ts";
+import { queueBudget } from "./queue-limits.ts";
 import { latestMessageId, type ProcessorContext, processConversation, relayFor } from "./relay/processor.ts";
 import { processMessageUpdate } from "./relay/updates.ts";
 import { awaitsRouting, routeConversation, routesAccount } from "./routing.ts";
@@ -36,10 +38,11 @@ const payloadSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("conversation"), accountId: id, conversationId: id }),
   z.object({ type: z.literal("message-updated"), accountId: id, conversationId: id, messageId: id }),
   z.object({ type: z.literal("route"), accountId: id, conversationId: id }),
+  z.object({ type: z.literal("queue") }),
 ]);
 type JobPayload = z.infer<typeof payloadSchema>;
 
-const PRIORITY = { command: 0, sweep: 1, conversation: 2, route: 2, "message-updated": 3 } as const;
+const PRIORITY = { command: 0, sweep: 1, conversation: 2, route: 2, "message-updated": 3, queue: 4 } as const;
 /** Requests a job may need before it can start without being cut short. */
 const COMMAND_BUDGET = 20;
 const MIN_BUDGET = 2;
@@ -111,6 +114,13 @@ export class Hub extends DurableObject<Env> {
     await this.schedule();
   }
 
+  /** Queues the hourly support queue, if configured (called by the cron trigger at minute 0). */
+  async requestQueue(): Promise<void> {
+    if (!loadSettings(this.env).config.queue) return;
+    this.enqueue({ type: "queue" });
+    await this.schedule();
+  }
+
   async ticketForThread(threadId: string): Promise<{ accountId: number; conversationId: number } | null> {
     return this.store.ticketForThread(threadId) ?? null;
   }
@@ -135,7 +145,7 @@ export class Hub extends DurableObject<Env> {
         this.store.deleteJob(job.key);
         continue;
       }
-      if (budget.remaining < requiredBudget(payload) || Date.now() - startedAt > RUN_WALL_MS) {
+      if (budget.remaining < requiredBudget(payload, settings) || Date.now() - startedAt > RUN_WALL_MS) {
         yielded = true;
         break;
       }
@@ -176,6 +186,10 @@ export class Hub extends DurableObject<Env> {
         }
         case "message-updated":
           await processMessageUpdate(services, payload.accountId, payload.conversationId, payload.messageId);
+          this.store.completeJob(job);
+          return "done";
+        case "queue":
+          await postQueue(services);
           this.store.completeJob(job);
           return "done";
         case "route":
@@ -314,15 +328,7 @@ export class Hub extends DurableObject<Env> {
   }
 
   private enqueue(payload: JobPayload, notBefore?: number): void {
-    const key =
-      payload.type === "command"
-        ? `command:${payload.job.interactionId}`
-        : payload.type === "sweep"
-          ? `sweep:${payload.accountId}`
-          : payload.type === "conversation" || payload.type === "route"
-            ? `${payload.type}:${payload.accountId}:${payload.conversationId}`
-            : `${payload.type}:${payload.accountId}:${payload.conversationId}:${payload.messageId}`;
-    this.store.enqueue(key, PRIORITY[payload.type], JSON.stringify(payload), notBefore);
+    this.store.enqueue(jobKey(payload), PRIORITY[payload.type], JSON.stringify(payload), notBefore);
   }
 
   /** Sets the alarm for the earliest due job (or `at`), unless an earlier alarm is already set. */
@@ -346,8 +352,26 @@ async function respond(rest: DiscordRest, job: CommandJob, content: string): Pro
   }
 }
 
-function requiredBudget(payload: JobPayload): number {
+/** One job per key: a job queued again while it waits is not queued twice. */
+function jobKey(payload: JobPayload): string {
+  switch (payload.type) {
+    case "command":
+      return `command:${payload.job.interactionId}`;
+    case "sweep":
+      return `sweep:${payload.accountId}`;
+    case "queue":
+      return "queue";
+    case "conversation":
+    case "route":
+      return `${payload.type}:${payload.accountId}:${payload.conversationId}`;
+    case "message-updated":
+      return `${payload.type}:${payload.accountId}:${payload.conversationId}:${payload.messageId}`;
+  }
+}
+
+function requiredBudget(payload: JobPayload, settings: Settings): number {
   if (payload.type === "command") return COMMAND_BUDGET;
+  if (payload.type === "queue") return queueBudget(settings.config.accounts.length);
   if (payload.type === "route") return ROUTE_BUDGET;
   return payload.type === "sweep" ? SWEEP_PAGES : MIN_BUDGET;
 }
