@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-09-30
+
 ### Changed
 
 - **One card per post, at its bottom, showing the ticket as it is.** Instead of buttons under
@@ -438,7 +440,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-invocation subrequest budget, and a cron reconciliation sweep for missed webhooks.
 - Verification of Chatwoot webhook HMAC signatures and Discord Ed25519 interaction signatures.
 
-[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.18.1...HEAD
+[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.18.1...v0.19.0
 [0.18.1]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.16.0...v0.17.0
