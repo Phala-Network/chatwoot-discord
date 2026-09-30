@@ -49,15 +49,21 @@ export const NONE = ":none";
 const MAX_OPTIONS = 25;
 const MAX_OPTION_TEXT = 100;
 
-type Style = ButtonStyle.Primary | ButtonStyle.Secondary | ButtonStyle.Success | ButtonStyle.Danger;
+type Style = ButtonStyle.Primary | ButtonStyle.Secondary | ButtonStyle.Danger;
 
 function button(
   customId: string,
   label: string,
-  emoji: string,
+  emoji: string | undefined,
   style: Style = ButtonStyle.Secondary,
 ): APIButtonComponent {
-  return { type: ComponentType.Button, custom_id: customId, label, emoji: { name: emoji }, style };
+  return {
+    type: ComponentType.Button,
+    custom_id: customId,
+    label,
+    ...(emoji ? { emoji: { name: emoji } } : {}),
+    style,
+  };
 }
 
 function row(components: APIComponentInMessageActionRow[]): ActionRow {
@@ -75,9 +81,10 @@ function option(value: string, label: string, emoji: string, selected: boolean):
 
 /**
  * The ticket buttons, a row per concern: answering (Reply; under a triage bot's answer with a
- * draft, led by Use draft for that answer, highlighted), who owns the ticket (Take; Assign to,
- * which shows a menu of agents), and its state (Resolve, Snooze until the next reply, Block, and
- * Manage for the panel).
+ * draft, led by Use draft for that answer), who owns the ticket (Take; Assign to, which shows a
+ * menu of agents), and its state (Resolve, Snooze until the next reply, Block, and Manage for the
+ * panel). Only the first is highlighted; the others are told apart by their emoji, which a
+ * coloured button would hide.
  */
 export function ticketButtons(answerId?: string): ActionRow[] {
   return [
@@ -89,11 +96,11 @@ export function ticketButtons(answerId?: string): ActionRow[] {
           ]
         : [button(BUTTONS.reply, "Reply", "✏️", ButtonStyle.Primary)],
     ),
-    row([button(BUTTONS.take, "Take", "🙋"), button(BUTTONS.assign, "Assign to…", "👤")]),
+    row([button(BUTTONS.take, "Take", "🙋"), button(BUTTONS.assign, "Assign to…", "👉")]),
     row([
-      button(BUTTONS.resolve, "Resolve", "✅", ButtonStyle.Success),
-      button(BUTTONS.snooze, "Snooze", "💤"),
-      button(BUTTONS.block, "Block", "🚫", ButtonStyle.Danger),
+      button(BUTTONS.resolve, "Resolve", "✅"),
+      button(BUTTONS.snooze, "Snooze", "😴"),
+      button(BUTTONS.block, "Block", "🚫"),
       button(BUTTONS.manage, "Manage", "⚙️"),
     ]),
   ];
@@ -128,7 +135,7 @@ export function assigneeMenu(agents: Array<{ id: number; name: string }>, assign
 
 /** Block asks first: it resolves the ticket and mutes the contact. */
 export function blockConfirmation(): ActionRow[] {
-  return [row([button(BUTTONS.blockConfirmed, "Block contact", "🚫", ButtonStyle.Danger)])];
+  return [row([button(BUTTONS.blockConfirmed, "Block contact", undefined, ButtonStyle.Danger)])];
 }
 
 /** Text in a Components V2 message. */
@@ -146,7 +153,7 @@ export interface TicketState {
 const STATUSES: Array<[status: string, value: string, name: string, emoji: string]> = [
   ["open", "open", "Open", "🟢"],
   ["resolved", "resolved", "Resolved", "✅"],
-  ["snoozed", "until_next_reply", "Snooze", "💤"],
+  ["snoozed", "until_next_reply", "Snooze", "😴"],
 ];
 
 /** The card's accent: the ticket's status at a glance. */
