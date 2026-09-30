@@ -379,12 +379,19 @@ function component(context: Context, interaction: APIMessageComponentInteraction
     case BUTTONS.manage:
       return defer(context, { type: "panel" });
   }
+  // The panel's status buttons carry their value: "panel:status:resolved".
+  if (data.custom_id.startsWith(`${PANEL.status}:`)) {
+    const status = data.custom_id.slice(PANEL.status.length + 1);
+    if (status === "open" || status === "resolved") return defer(context, { type: "status", status });
+    return snooze(context, status, Date.now());
+  }
   if (data.component_type !== ComponentType.StringSelect) return privately("Unknown button.");
   const values = data.values;
-  const [value = ""] = values;
   switch (data.custom_id) {
-    case PANEL.assignee:
-      return value === NONE ? defer(context, { type: "unassign" }) : defer(context, assignee(value));
+    case PANEL.assignee: {
+      const [agent = ""] = values;
+      return agent === NONE ? defer(context, { type: "unassign" }) : defer(context, assignee(agent));
+    }
     case PANEL.labels: {
       // The panel was drawn with the ticket's labels selected: the change is what differs.
       const shown = shownLabels(interaction);
@@ -392,17 +399,6 @@ function component(context: Context, interaction: APIMessageComponentInteraction
       const remove = shown.filter((label) => !values.includes(label));
       return defer(context, { type: "labels", add, remove });
     }
-    case PANEL.priority: {
-      if (value === NONE) return defer(context, { type: "priority", priority: null });
-      const priority = prioritySchema.safeParse(value);
-      if (!priority.success) throw new UserError("Choose a priority from the list.");
-      return defer(context, { type: "priority", priority: priority.data });
-    }
-    case PANEL.status:
-      if (value === "open" || value === "pending" || value === "resolved") {
-        return defer(context, { type: "status", status: value });
-      }
-      return snooze(context, value, Date.now());
     default:
       return privately("Unknown menu.");
   }
@@ -417,7 +413,11 @@ function assignee(value: string): CommandAction {
 
 /** The labels the panel's label menu was drawn with (its default options). */
 function shownLabels(interaction: APIMessageComponentInteraction): string[] {
-  for (const row of interaction.message.components ?? []) {
+  // The panel is a card (a container) of rows.
+  const rows = (interaction.message.components ?? []).flatMap((part) =>
+    part.type === ComponentType.Container ? part.components : [part],
+  );
+  for (const row of rows) {
     if (row.type !== ComponentType.ActionRow) continue;
     for (const menu of row.components) {
       if (menu.type === ComponentType.StringSelect && menu.custom_id === PANEL.labels) {

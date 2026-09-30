@@ -432,13 +432,10 @@ describe("ticket buttons and the Manage panel", () => {
     expect(assign.response).toEqual({ type: InteractionResponseType.DeferredMessageUpdate });
     expect(assign.job).toMatchObject({ action: { type: "assign", chatwootUserId: 43 }, panel: true });
     expect((await press("panel:assignee", ["none"])).job?.action).toEqual({ type: "unassign" });
-    expect((await press("panel:priority", ["none"])).job?.action).toEqual({ type: "priority", priority: null });
-    expect((await press("panel:priority", ["high"])).job?.action).toEqual({ type: "priority", priority: "high" });
-    expect((await press("panel:status", ["pending"])).job?.action).toEqual({ type: "status", status: "pending" });
-    expect((await press("panel:status", ["until_next_reply"])).job?.action).toEqual({
-      type: "status",
-      status: "snoozed",
-    });
+    const resolve = await press("panel:status:resolved");
+    expect(resolve.response).toEqual({ type: InteractionResponseType.DeferredMessageUpdate });
+    expect(resolve.job).toMatchObject({ action: { type: "status", status: "resolved" }, panel: true });
+    expect((await press("panel:status:until_next_reply")).job?.action).toEqual({ type: "status", status: "snoozed" });
   });
 
   it("changes labels relative to the ones the panel showed", async () => {
@@ -466,6 +463,6 @@ describe("ticket buttons and the Manage panel", () => {
 
   it("refuses a menu value that is not in it", async () => {
     expect(privateText(await press("panel:assignee", ["everyone"]))).toMatch(/Choose an agent/);
-    expect(privateText(await press("panel:priority", ["critical"]))).toMatch(/Choose a priority/);
+    expect(privateText(await press("panel:status:forever"))).toMatch(/snooze option/);
   });
 });

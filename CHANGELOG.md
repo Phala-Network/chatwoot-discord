@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The Manage panel is a card coloured by the ticket's status, titled with the ticket and the
+  customer's name: menus for the assignee and labels, and **Open**, **Resolve**, and **Snooze**
+  buttons with the current status highlighted. Priority and "pending" left the panel (the
+  `/priority` and `/pending` commands remain).
+
 ## [0.14.0] - 2026-09-30
 
 ### Changed

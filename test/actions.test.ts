@@ -358,7 +358,12 @@ describe("executeCommand", () => {
 
   describe("Manage panel", () => {
     const state = on("GET", conversation, () =>
-      json({ id: 15, status: "open", priority: "high", labels: ["vip"], meta: { assignee: { id: 43 } } }),
+      json({
+        id: 15,
+        status: "open",
+        labels: ["vip"],
+        meta: { assignee: { id: 43 }, sender: { name: "Jane <@123>" } },
+      }),
     );
     const agents = on("GET", `${cw}/accounts/3/agents`, () =>
       json([
@@ -374,32 +379,40 @@ describe("executeCommand", () => {
         ],
       }),
     );
-    type Menu = { custom_id: string; options: Array<{ value: string; default: boolean }> };
-    type Part = { type: number; content?: string; components?: Menu[] };
-    // Each menu under its heading: "<heading>: <selected values>".
-    const layout = (components: unknown) =>
-      (components as Part[]).map((part) =>
-        part.type === 10
-          ? part.content
-          : (part.components ?? []).map((menu) =>
-              menu.options.filter((option) => option.default).map((option) => option.value),
-            )[0],
-      );
+    type Item = { custom_id: string; style?: number; options?: Array<{ value: string; default: boolean }> };
+    type Card = {
+      accent_color: number | null;
+      components: Array<{ type: number; content?: string; components?: Item[] }>;
+    };
+    // The card's text, each menu's selected values, and each button's id (the highlighted one marked "*").
+    const card = (components: unknown) => {
+      const [{ accent_color, components: parts }] = components as [Card];
+      return {
+        accent: accent_color,
+        parts: parts.map((part) =>
+          part.type === 10
+            ? part.content
+            : (part.components ?? []).map((item) =>
+                item.options
+                  ? item.options.filter((option) => option.default).map((option) => option.value)
+                  : `${item.custom_id}${item.style === 1 ? "*" : ""}`,
+              ),
+        ),
+      };
+    };
 
-    it("draws the ticket as it is: assignee, labels, priority, and status selected", async () => {
+    it("draws the ticket as it is: a card coloured by status, its assignee and labels selected", async () => {
       const { outcome } = run({ type: "panel" }, state, agents, labels);
       const { components } = await outcome;
-      expect(layout(components)).toEqual([
-        "### ⚙️ Acme #15",
-        "**Assignee**",
-        ["43"],
-        "**Labels**",
-        ["vip"],
-        "**Priority**",
-        ["high"],
-        "**Status**",
-        ["open"],
-      ]);
+      expect(card(components)).toEqual({
+        accent: 0x3ba55c,
+        parts: [
+          "### Acme #15 · Jane <\u200b@123>",
+          [["43"]],
+          [["vip"]],
+          ["panel:status:open*", "panel:status:resolved", "panel:status:until_next_reply"],
+        ],
+      });
     });
 
     it("draws it again after a change from the panel, with what was done", async () => {
@@ -409,9 +422,8 @@ describe("executeCommand", () => {
         settings,
         (request) => fetch(request),
       );
-      expect(content).toBe("### ⚙️ Acme #15\n✅ Assigned to Bob Example.");
-      expect(layout(components)[0]).toBe(content);
-      expect(components).toHaveLength(9);
+      expect(content).toBe("✅ Assigned to Bob Example.");
+      expect(card(components).parts[0]).toBe("### Acme #15 · Jane <\u200b@123>\n✅ Assigned to Bob Example.");
       expect(mock.requests.some((request) => request.url.pathname.endsWith("/assignments"))).toBe(true);
     });
 
@@ -422,7 +434,7 @@ describe("executeCommand", () => {
         settings,
         (request) => fetch(request),
       );
-      expect(layout(failed.components)).toEqual(["❌ That agent is not in this Chatwoot account."]);
+      expect(failed.components).toEqual([{ type: 10, content: "❌ That agent is not in this Chatwoot account." }]);
     });
   });
 
