@@ -33,8 +33,6 @@ interface HandlerDeps {
   settings: Settings;
   /** The conversation the relay mapped to this forum post, if any. */
   ticketForThread(threadId: string): Promise<Ticket | undefined>;
-  /** The draft (last code block) of the triage bot's latest message in the post that has one. */
-  latestDraft(threadId: string): Promise<string | undefined>;
 }
 
 export interface HandlerResult {
@@ -56,8 +54,7 @@ export async function handleInteraction(interaction: APIInteraction, deps: Handl
     const threadId = interaction.channel?.id ?? interaction.channel_id;
     const ticket = threadId ? await deps.ticketForThread(threadId) : undefined;
     const account = ticket && deps.settings.account(ticket.accountId);
-    if (!threadId || !ticket || !account)
-      return privately("Use this command inside a ticket post in the Chatwoot forum.");
+    if (!ticket || !account) return privately("Use this command inside a ticket post in the Chatwoot forum.");
 
     const userId = invokerId(interaction);
     if (!userId || !deps.settings.chatwootUserFor(userId) || !deps.settings.agentToken(userId))
@@ -67,7 +64,6 @@ export async function handleInteraction(interaction: APIInteraction, deps: Handl
       deps,
       interaction,
       userId,
-      threadId,
       ticket,
       title: `${account.name} #${ticket.conversationId}`,
       panel: interaction.type === InteractionType.MessageComponent && interaction.data.custom_id.startsWith("panel:"),
@@ -76,7 +72,7 @@ export async function handleInteraction(interaction: APIInteraction, deps: Handl
       case InteractionType.ModalSubmit:
         return submit(context, interaction);
       case InteractionType.MessageComponent:
-        return await component(context, interaction);
+        return component(context, interaction);
       default:
         return command(context, interaction);
     }
@@ -90,7 +86,6 @@ interface Context {
   deps: HandlerDeps;
   interaction: APIApplicationCommandInteraction | APIModalSubmitInteraction | APIMessageComponentInteraction;
   userId: string;
-  threadId: string;
   ticket: Ticket;
   title: string;
   /** From the Manage panel: the job draws the panel again in place of a confirmation. */
@@ -369,16 +364,11 @@ function defer(context: Context, action: CommandAction): HandlerResult {
 }
 
 /** A ticket button, or a change in the Manage panel. */
-async function component(context: Context, interaction: APIMessageComponentInteraction): Promise<HandlerResult> {
+function component(context: Context, interaction: APIMessageComponentInteraction): HandlerResult {
   const { data } = interaction;
   switch (data.custom_id) {
     case BUTTONS.reply:
       return { response: editor(context, "reply", undefined) };
-    case BUTTONS.draft: {
-      const draft = await context.deps.latestDraft(context.threadId);
-      if (!draft) return privately("The triage bot has not written a draft in this post yet.");
-      return { response: editor(context, "reply", draft) };
-    }
     case BUTTONS.take: {
       const chatwootUserId = context.deps.settings.chatwootUserFor(context.userId);
       if (chatwootUserId === undefined) return privately(NOT_LINKED);

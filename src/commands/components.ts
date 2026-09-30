@@ -16,7 +16,6 @@ import { PRIORITY_NAMES, SNOOZE_NAMES } from "./definitions.ts";
 /** Custom ids of the ticket buttons. */
 export const BUTTONS = {
   reply: "ticket:reply",
-  draft: "ticket:draft",
   take: "ticket:take",
   resolve: "ticket:resolve",
   manage: "ticket:manage",
@@ -48,14 +47,10 @@ function button(
   return { type: ComponentType.Button, custom_id: customId, label, emoji: { name: emoji }, style };
 }
 
-/**
- * The ticket card's buttons (`card`), or the shorter row under each customer message. "Reply with
- * draft" needs a triage bot to take the draft from.
- */
-export function ticketButtons(where: "card" | "message", draft: boolean): ActionRow[] {
+/** The ticket card's buttons (`card`), or the shorter row under each customer message. */
+export function ticketButtons(where: "card" | "message"): ActionRow[] {
   const buttons = [
     button(BUTTONS.reply, "Reply", "✏️", ButtonStyle.Primary),
-    ...(draft ? [button(BUTTONS.draft, "Reply with draft", "🤖")] : []),
     ...(where === "card"
       ? [button(BUTTONS.take, "Take", "🙋"), button(BUTTONS.resolve, "Resolve", "✅", ButtonStyle.Success)]
       : []),
