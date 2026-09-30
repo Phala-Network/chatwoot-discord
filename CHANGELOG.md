@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-09-30
+
 ### Removed
 
 - The **Reply with draft** button. Reading the triage bot's message needs the privileged Message
@@ -330,7 +332,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-invocation subrequest budget, and a cron reconciliation sweep for missed webhooks.
 - Verification of Chatwoot webhook HMAC signatures and Discord Ed25519 interaction signatures.
 
-[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.10.0...v0.11.0
