@@ -243,10 +243,11 @@ async function triageHook(payload: unknown, secret = "triage-hook-secret-0123456
   );
 }
 
-/** The ticket buttons: the answering row, then the acting row. */
-const ACTIONS = ["ticket:take", "ticket:resolve", "ticket:snooze", "ticket:block", "ticket:manage"];
-const ALL_BUTTONS = [["ticket:reply"], ACTIONS];
-const DRAFT_BUTTONS = [["ticket:draft", "ticket:reply"], ACTIONS];
+/** The ticket buttons: the answering row, then who owns it, then its state. */
+const OWNER = ["ticket:take", "ticket:assign"];
+const STATE = ["ticket:resolve", "ticket:snooze", "ticket:block", "ticket:manage"];
+const ALL_BUTTONS = [["ticket:reply"], OWNER, STATE];
+const DRAFT_BUTTONS = [["ticket:draft", "ticket:reply"], OWNER, STATE];
 
 /** The custom id of a posted message's highlighted (primary) button. */
 function primary(body: unknown): string | undefined {

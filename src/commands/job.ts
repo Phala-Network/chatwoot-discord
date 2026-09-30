@@ -33,6 +33,8 @@ const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("labels"), labels: z.array(z.string().min(1)) }),
   /** Only draws the Manage panel. */
   z.object({ type: z.literal("panel") }),
+  /** Only shows Assign to's menu of agents. */
+  z.object({ type: z.literal("pick-assignee") }),
   z.object({
     type: z.literal("message"),
     private: z.boolean(),

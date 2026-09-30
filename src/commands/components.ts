@@ -18,6 +18,9 @@ export const BUTTONS = {
   reply: "ticket:reply",
   draft: "ticket:draft",
   take: "ticket:take",
+  assign: "ticket:assign",
+  /** The menu Assign to shows. */
+  assignee: "ticket:assignee",
   resolve: "ticket:resolve",
   snooze: "ticket:snooze",
   block: "ticket:block",
@@ -60,9 +63,10 @@ function button(
 }
 
 /**
- * The ticket buttons, in two rows: answering (Use draft, highlighted, when the message above is
- * the triage bot's answer with a draft; Reply) and acting on the ticket (Take, Resolve, Snooze
- * until the next reply, Block, and ⚙️ for the Manage panel).
+ * The ticket buttons, a row per concern: answering (Use draft, highlighted, when the message above
+ * is the triage bot's answer with a draft; Reply), who owns it (Take; Assign to, which shows a
+ * menu of agents), and its state (Resolve, Snooze until the next reply, Block, and ⚙️ for the
+ * Manage panel).
  */
 export function ticketButtons(draft: boolean): ActionRow[] {
   const row = (components: APIButtonComponent[]): ActionRow => ({ type: ComponentType.ActionRow, components });
@@ -72,13 +76,35 @@ export function ticketButtons(draft: boolean): ActionRow[] {
         ? [button(BUTTONS.draft, "Use draft", "🤖", ButtonStyle.Primary), button(BUTTONS.reply, "Reply", "✏️")]
         : [button(BUTTONS.reply, "Reply", "✏️", ButtonStyle.Primary)],
     ),
+    row([button(BUTTONS.take, "Take", "🙋"), button(BUTTONS.assign, "Assign to…", "👤")]),
     row([
-      button(BUTTONS.take, "Take", "🙋"),
       button(BUTTONS.resolve, "Resolve", "✅", ButtonStyle.Success),
       button(BUTTONS.snooze, "Snooze", "💤"),
       button(BUTTONS.block, "Block", "🚫", ButtonStyle.Danger),
       button(BUTTONS.manage, "", "⚙️"),
     ]),
+  ];
+}
+
+/** Assign to's menu: the account's agents (and Unassigned), the current assignee selected. */
+export function assigneeMenu(agents: Array<{ id: number; name: string }>, assigneeId: number | null): ActionRow[] {
+  const option = (value: string, label: string, selected: boolean): APISelectMenuOption => ({
+    value,
+    label: Array.from(label).slice(0, MAX_OPTION_TEXT).join("") || value,
+    emoji: { name: "👤" },
+    ...(selected ? { default: true } : {}),
+  });
+  const options = [
+    option(NONE, "Unassigned", assigneeId === null),
+    ...agents.map((agent) => option(String(agent.id), agent.name, agent.id === assigneeId)),
+  ].slice(0, MAX_OPTIONS);
+  return [
+    {
+      type: ComponentType.ActionRow,
+      components: [
+        { type: ComponentType.StringSelect, custom_id: BUTTONS.assignee, placeholder: "Assign to…", options },
+      ],
+    },
   ];
 }
 

@@ -204,14 +204,16 @@ are supported); you provide TLS, the cron trigger, and storage persistence.
 Used inside a ticket post, by Discord users linked in `agents[]` who have a token in
 `CHATWOOT_AGENT_TOKENS`. The same actions are buttons, which need no typing:
 
-- The ticket card (at the top of the post) and every message (not activity lines) end with two
-  rows of buttons: **Reply**, then **Take**, **Resolve**, **Snooze** (until the next reply),
-  **Block**, and **⚙️** (the Manage card). Under the triage bot's answer the first row starts with
-  **Use draft**, highlighted, when the answer has a draft (see [Triage bot hook](#triage-bot-hook)).
+- The ticket card (at the top of the post) and every message (not activity lines) end with three
+  rows of buttons: answering (**Reply**), who owns the ticket (**Take**, **Assign to…**), and its
+  state (**Resolve**, **Snooze** until the next reply, **Block**, and **⚙️** for the Manage card).
+  Under the triage bot's answer the first row starts with **Use draft**, highlighted, when the
+  answer has a draft (see [Triage bot hook](#triage-bot-hook)).
 - **Reply** opens the `/reply` editor. **Use draft** opens it with the draft of the triage bot's
   newest message in the post that has one (its last code block, as **Reply with this** takes it);
   it reads the post's messages, which needs the Message Content intent, and says so when the bot
-  lacks it. **Take** assigns the ticket to you; **Resolve** resolves it. **Block** asks you to
+  lacks it. **Take** assigns the ticket to you; **Assign to…** shows you a menu of the account's
+  agents, and the menu turns into the result. **Resolve** resolves it. **Block** asks you to
   confirm first (only you see the question), then blocks the contact as `/block` does.
 - **Manage** opens a card only you see, drawn with the ticket as it is and coloured by its status:
   menus for its assignee and its label (one per ticket: choosing one replaces its labels), and

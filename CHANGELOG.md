@@ -9,15 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The ticket buttons are two rows: **Reply** (after **Use draft**, highlighted, under the triage
-  bot's answer when it has a draft), then **Take**, **Resolve**, **Snooze**, **Block**, and ⚙️
-  (the Manage card). **Use draft** is only under an answer with a draft.
+- The ticket buttons are three rows: answering (**Reply**, after **Use draft**, highlighted, under
+  the triage bot's answer when it has a draft), who owns the ticket (**Take**, **Assign to…**),
+  and its state (**Resolve**, **Snooze**, **Block**, and ⚙️ for the Manage card). **Use draft** is
+  only under an answer with a draft.
 - **Breaking:** the triage bot's hook sends `{"threadId", "draft"}`; `draft` (whether the answer
   has a draft) is required.
 
 ### Added
 
-- **Snooze** (until the next reply) and **Block** buttons. **Block** asks to confirm first.
+- **Assign to…**, **Snooze** (until the next reply), and **Block** buttons. **Assign to…** shows
+  a menu of the account's agents; **Block** asks to confirm first. Both turn into the result.
 
 ## [0.17.0] - 2026-09-30
 

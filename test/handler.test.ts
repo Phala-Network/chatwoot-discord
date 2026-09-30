@@ -442,6 +442,18 @@ describe("ticket buttons and the Manage panel", () => {
     expect((await press("ticket:snooze")).job?.action).toEqual({ type: "status", status: "snoozed" });
   });
 
+  it("Assign to shows a menu of agents; choosing one turns the menu into the result", async () => {
+    expect((await press("ticket:assign")).job?.action).toEqual({ type: "pick-assignee" });
+    const chosen = await press("ticket:assignee", ["43"]);
+    expect(chosen.response).toEqual({
+      type: InteractionResponseType.UpdateMessage,
+      data: { content: "⏳ Assigning…", components: [] },
+    });
+    expect(chosen.job?.action).toEqual({ type: "assign", chatwootUserId: 43 });
+    expect(chosen.job).not.toHaveProperty("panel");
+    expect((await press("ticket:assignee", ["none"])).job?.action).toEqual({ type: "unassign" });
+  });
+
   it("Block asks first; confirming turns the question into the result", async () => {
     const asked = await press("ticket:block");
     expect(asked.job).toBeUndefined();

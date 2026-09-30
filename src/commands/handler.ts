@@ -406,11 +406,14 @@ async function component(context: Context, interaction: APIMessageComponentInter
         },
       };
     case BUTTONS.blockConfirmed:
-      // The confirmation becomes the result: "@original" is the message this button is on.
-      return {
-        ...defer(context, { type: "block" }),
-        response: { type: InteractionResponseType.UpdateMessage, data: { content: "⏳ Blocking…", components: [] } },
-      };
+      return inPlace(context, { type: "block" }, "⏳ Blocking…");
+    case BUTTONS.assign:
+      return defer(context, { type: "pick-assignee" });
+    case BUTTONS.assignee: {
+      if (data.component_type !== ComponentType.StringSelect) return privately("Unknown menu.");
+      const [agent = NONE] = data.values;
+      return inPlace(context, agent === NONE ? { type: "unassign" } : assignee(agent), "⏳ Assigning…");
+    }
     case BUTTONS.manage:
       return defer(context, { type: "panel" });
   }
@@ -434,6 +437,17 @@ async function component(context: Context, interaction: APIMessageComponentInter
     default:
       return privately("Unknown menu.");
   }
+}
+
+/**
+ * A deferred command whose result replaces the private message it came from (a confirmation, a
+ * menu): "@original" is the message the button or menu is on, shown meanwhile as `interim`.
+ */
+function inPlace(context: Context, action: CommandAction, interim: string): HandlerResult {
+  return {
+    ...defer(context, action),
+    response: { type: InteractionResponseType.UpdateMessage, data: { content: interim, components: [] } },
+  };
 }
 
 function assignee(value: string): CommandAction {

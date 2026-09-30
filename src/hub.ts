@@ -10,6 +10,7 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   type APIMessageTopLevelComponent,
+  ComponentType,
   MessageFlags,
   type RESTPatchAPIWebhookWithTokenMessageJSONBody,
   type RESTPatchAPIWebhookWithTokenMessageResult,
@@ -376,8 +377,9 @@ export class Hub extends DurableObject<Env> {
 }
 
 /**
- * Replaces the invoker's "thinking…" with `content`, or with `components` as a Components V2
- * message: the Manage panel (the one the job came from, or a new one).
+ * Replaces the invoker's "thinking…" with `content`, and `components`: menus under the content,
+ * or, when they include more than action rows, a Components V2 message (the Manage panel, the one
+ * the job came from or a new one), which has no content.
  */
 async function respond(
   rest: DiscordRest,
@@ -385,7 +387,10 @@ async function respond(
   content: string,
   components?: APIMessageTopLevelComponent[],
 ): Promise<void> {
-  const body = components ? { flags: MessageFlags.IsComponentsV2, components } : { content };
+  const v2 = components?.some((component) => component.type !== ComponentType.ActionRow);
+  const body = v2
+    ? { flags: MessageFlags.IsComponentsV2, components }
+    : { content, ...(components ? { components } : {}) };
   try {
     await rest.patch<RESTPatchAPIWebhookWithTokenMessageResult, RESTPatchAPIWebhookWithTokenMessageJSONBody>(
       Routes.webhookMessage(job.applicationId, job.token, "@original"),
