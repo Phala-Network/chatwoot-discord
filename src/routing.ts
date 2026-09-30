@@ -144,9 +144,11 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     current = toRelayConversation(conversationId, now);
   }
 
+  // Closed meanwhile (and nobody took it): keep the decision pending until it opens again.
+  if (current.status !== "open" && !current.assignee) return;
   const owner =
     decision.owner !== null && decision.ownerConfidence >= routing.minConfidence ? owners[decision.owner] : undefined;
-  const assign = owner !== undefined && current.status === "open" && !current.assignee;
+  const assign = owner !== undefined && !current.assignee;
   if (assign) await chatwoot.assign(accountId, conversationId, owner.assignee);
 
   // The topic is a label: added when Jev is confident and the ticket has no topic label yet.

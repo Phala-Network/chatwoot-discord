@@ -201,6 +201,22 @@ describe("routeConversation", () => {
     expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
   });
 
+  it("keeps the decision for a ticket closed while Jev was answering, and applies it once the ticket opens again", async () => {
+    const store = new MapStore();
+    const ticket: Ticket = {};
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1] }, 0, () => {
+      ticket.status = "resolved";
+    });
+
+    await routeConversation(context(store), 1, 5);
+    expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
+    ticket.status = "open";
+    await routeConversation(context(store), 1, 5);
+
+    expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
+    expect(sent(requests, "POST", `${CW}/assignments`).map((r) => JSON.parse(r.body))).toEqual([{ assignee_id: 6 }]);
+  });
+
   it("waits for a customer message before asking", async () => {
     const store = new MapStore();
     const { requests } = world({ messages: [] }, { owner: ["cloud", 1], topic: ["billing", 1] });

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-30
+
+### Fixed
+
+- The support queue could post a message over Discord's 2,000-character limit when its note did
+  not fit an earlier message; the note now gets its own message, and assignee names are capped.
+- A retried queue post could appear twice: each part now carries a nonce Discord enforces.
+- A ticket that fell out of the pages the queue reads lost its escalation record, so Core Team was
+  pinged again for the same step when it came back.
+- A ticket closed while Jev was answering was marked routed; the decision now waits until the
+  ticket opens again.
+
 ## [0.8.0] - 2026-09-30
 
 ### Changed
@@ -269,7 +281,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-invocation subrequest budget, and a cron reconciliation sweep for missed webhooks.
 - Verification of Chatwoot webhook HMAC signatures and Discord Ed25519 interaction signatures.
 
-[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.6.1...v0.7.0
