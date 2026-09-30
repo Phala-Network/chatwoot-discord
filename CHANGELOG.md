@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Send from my email address** in the `/reply` editor: an email reply goes out from the agent's
+  own mailbox name on the inbox's domain. It needs a Chatwoot build that reads
+  `content_attributes.send_as_agent`; standard Chatwoot ignores it.
+
 ## [0.9.0] - 2026-09-30
 
 ### Changed

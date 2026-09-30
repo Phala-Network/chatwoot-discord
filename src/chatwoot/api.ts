@@ -138,6 +138,11 @@ interface NewMessage {
   content: string;
   private: boolean;
   files: ReadonlyArray<{ blob: Blob; filename: string }>;
+  /**
+   * Send an email reply from the agent's own mailbox name on the inbox's domain. Phala's Chatwoot
+   * build reads `content_attributes.send_as_agent` (Email::AgentAddressBuilder); upstream ignores it.
+   */
+  sendAsAgent?: boolean;
 }
 
 export type ChatwootClient = ReturnType<typeof chatwootClient>;
@@ -359,12 +364,19 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
      * strings, so the serializer appends the files itself.
      */
     createMessage(accountId: number, conversationId: number, message: NewMessage): Promise<void> {
-      const fields = { content: message.content, message_type: "outgoing", private: message.private } as const;
+      const fields = {
+        content: message.content,
+        message_type: "outgoing",
+        private: message.private,
+        ...(message.sendAsAgent ? { content_attributes: { send_as_agent: true } } : {}),
+      } as const;
       const multipart = (body: MultipartMessage) => {
         const form = new FormData();
         if (body.content) form.append("content", body.content);
         if (body.message_type) form.append("message_type", body.message_type);
         form.append("private", String(body.private ?? false));
+        // Chatwoot parses a JSON string here (Messages::MessageBuilder#content_attributes).
+        if (body.content_attributes) form.append("content_attributes", JSON.stringify(body.content_attributes));
         for (const file of message.files) form.append("attachments[]", file.blob, file.filename);
         return form;
       };

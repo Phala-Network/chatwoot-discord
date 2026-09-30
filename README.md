@@ -203,7 +203,7 @@ Used inside a ticket post, by Discord users linked in `agents[]` who have a toke
 
 | Command | Effect in Chatwoot |
 |---|---|
-| `/reply [message] [attachment]` | Without options, an editor with a message field and an optional upload field; with either option, sends it at once. Sends to the customer; an unassigned conversation is assigned to the sender. Refused when the channel does not accept a reply (Chatwoot's `can_reply`, e.g. after WhatsApp's 24-hour window). |
+| `/reply [message] [attachment]` | Without options, an editor with a message field and an optional upload field; with either option, sends it at once. Sends to the customer; an unassigned conversation is assigned to the sender. Refused when the channel does not accept a reply (Chatwoot's `can_reply`, e.g. after WhatsApp's 24-hour window). The editor's **Send from my email address** sends an email reply from the agent's own mailbox name on the inbox's domain (alice@corp.example answering support@acme.example sends as alice@acme.example); it needs a Chatwoot build that reads `content_attributes.send_as_agent` ([Phala-Network/chatwoot](https://github.com/Phala-Network/chatwoot), `phala/*` branches), and standard Chatwoot sends from the inbox as usual. |
 | Apps → **Reply with this** (message menu) | The `/reply` editor, prefilled: from the triage bot, the last code block of its message (none: no draft); from anyone else, the last code block or the whole message. |
 | `/note [message] [attachment]` | Like `/reply`, for a private note. |
 | `/resolve`, `/reopen` | Change the status. |
