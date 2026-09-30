@@ -7,12 +7,15 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { eventTarget, isFreshTimestamp, verifyChatwootSignature } from "./chatwoot/webhook.ts";
 import { FAILED } from "./commands/common.ts";
-import { draftAbove } from "./commands/draft.ts";
+import { draftFor } from "./commands/draft.ts";
 import { handleInteraction, privately } from "./commands/handler.ts";
 import { ConfigError, loadSettings } from "./config.ts";
 import { DiscordRest } from "./discord/rest.ts";
 import { HUB_NAME } from "./hub.ts";
 import { errorFields, log } from "./log.ts";
+
+/** Use draft looks up the triage bot's answer while Discord waits for the reply editor. */
+const DRAFT_TIMEOUT_MS = 2000;
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -70,33 +73,6 @@ app.post("/chatwoot/webhook", bodyLimit({ maxSize: 2 * 1024 * 1024 }), async (c)
   return c.json({ ok: true });
 });
 
-// The triage bot's hook, signed like Chatwoot's webhooks: the bot answered in a ticket post
-// (`{"threadId", "draft"}`: whether the answer has a draft), so the ticket buttons follow it.
-app.post("/triage/answered", bodyLimit({ maxSize: 1024 }), async (c) => {
-  const secret = loadSettings(c.env).secrets.TRIAGE_HOOK_SECRET;
-  if (!secret) return c.text("not found", 404);
-  const timestamp = c.req.header("x-timestamp");
-  if (!timestamp || !isFreshTimestamp(timestamp, Math.floor(Date.now() / 1000))) {
-    return c.text("invalid or stale timestamp", 401);
-  }
-  const body = new Uint8Array(await c.req.arrayBuffer());
-  if (!(await verifyChatwootSignature(secret, timestamp, body, c.req.header("x-signature")))) {
-    return c.text("invalid signature", 401);
-  }
-  let answer: { threadId?: unknown; draft?: unknown };
-  try {
-    answer = JSON.parse(new TextDecoder().decode(body));
-  } catch {
-    return c.text("bad request", 400);
-  }
-  const { threadId, draft } = answer;
-  if (typeof threadId !== "string" || !/^\d{17,20}$/.test(threadId) || typeof draft !== "boolean") {
-    return c.text("bad request", 400);
-  }
-  await hub(c.env).triageAnswered(threadId, draft);
-  return c.json({ ok: true });
-});
-
 app.post("/discord/interactions", bodyLimit({ maxSize: 1024 * 1024 }), async (c) => {
   const settings = loadSettings(c.env);
   const signature = c.req.header("x-signature-ed25519");
@@ -121,9 +97,14 @@ app.post("/discord/interactions", bodyLimit({ maxSize: 1024 * 1024 }), async (c)
     const result = await handleInteraction(interaction, {
       settings,
       ticketForThread: async (threadId) => (await stub.ticketForThread(threadId)) ?? undefined,
-      draftAbove: (threadId, messageId) =>
-        draftAbove(
-          new DiscordRest(settings.secrets.DISCORD_BOT_TOKEN, (request) => fetch(request)),
+      // Discord waits 3 s for the editor: the lookup fails fast rather than waiting out a rate limit.
+      draftFor: (threadId, messageId) =>
+        draftFor(
+          new DiscordRest(
+            settings.secrets.DISCORD_BOT_TOKEN,
+            (request) => fetch(request, { signal: AbortSignal.timeout(DRAFT_TIMEOUT_MS) }),
+            () => Promise.reject(new Error("rate limited")),
+          ),
           threadId,
           messageId,
           settings.config.triage.userId,

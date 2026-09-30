@@ -25,7 +25,6 @@ export default defineConfig({
           DISCORD_PUBLIC_KEY: publicHex,
           CHATWOOT_RELAY_TOKEN: "relay-token",
           TYPESAFE_API_KEY: "ts-key",
-          TRIAGE_HOOK_SECRET: "triage-hook-secret-0123456789abcdef",
           CHATWOOT_WEBHOOK_SECRETS: JSON.stringify({ "3": "secret-acme", "1": "secret-globex" }),
           CHATWOOT_AGENT_TOKENS: JSON.stringify({
             "100000000000000011": "token-alice",

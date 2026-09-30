@@ -18,7 +18,8 @@ let draft: Draft = { text: "Hi, restart the CVM from the dashboard." };
 const deps = {
   settings,
   ticketForThread: async (threadId: string) => (threadId === THREAD ? { accountId: 3, conversationId: 15 } : undefined),
-  draftAbove: async () => draft,
+  draftFor: async (threadId: string, messageId: string) =>
+    threadId === THREAD && messageId === "900" ? draft : { missing: "unanswered" as const },
 };
 
 /** A ticket button pressed, or a panel menu changed, in the post. */
@@ -410,7 +411,7 @@ describe("interaction handler", () => {
 });
 
 describe("ticket buttons and the Manage panel", () => {
-  it("Reply opens the editor; Use draft opens it with the triage bot's latest draft", async () => {
+  it("Reply opens the editor; Use draft opens it with the triage bot's draft for the message it is under", async () => {
     const { response } = await press("ticket:reply");
     expect(response.type === InteractionResponseType.Modal && response.data.custom_id).toBe("reply:777001");
     expect(editorField(response, "content")).not.toHaveProperty("value");
@@ -419,11 +420,17 @@ describe("ticket buttons and the Manage panel", () => {
     );
   });
 
-  it("Use draft says why there is none: not written yet, or not readable without the intent", async () => {
+  it("Use draft says why there is none, and links an answer it cannot read for Reply with this", async () => {
+    draft = { missing: "unanswered" };
+    expect(privateText(await press("ticket:draft"))).toMatch(/has not answered this message yet/);
     draft = { missing: "none" };
-    expect(privateText(await press("ticket:draft"))).toMatch(/answer above has no draft/);
-    draft = { missing: "unreadable" };
-    expect(privateText(await press("ticket:draft"))).toMatch(/Message Content intent.*Reply with this/);
+    expect(privateText(await press("ticket:draft"))).toMatch(/answer to this message has no draft/);
+    draft = { missing: "unreadable", answerId: "100000000000009100" };
+    expect(privateText(await press("ticket:draft"))).toMatch(
+      new RegExp(
+        `Message Content intent.*\\(https://discord\\.com/channels/[^/]+/${THREAD}/100000000000009100\\).*Reply with this`,
+      ),
+    );
     draft = { text: "Hi, restart the CVM from the dashboard." };
   });
 
@@ -451,7 +458,7 @@ describe("ticket buttons and the Manage panel", () => {
     });
     expect(chosen.job?.action).toEqual({ type: "assign", chatwootUserId: 43 });
     expect(chosen.job).not.toHaveProperty("panel");
-    expect((await press("ticket:assignee", ["none"])).job?.action).toEqual({ type: "unassign" });
+    expect((await press("ticket:assignee", [":none"])).job?.action).toEqual({ type: "unassign" });
   });
 
   it("Block asks first; confirming turns the question into the result", async () => {
@@ -473,7 +480,7 @@ describe("ticket buttons and the Manage panel", () => {
     const assign = await press("panel:assignee", ["43"]);
     expect(assign.response).toEqual({ type: InteractionResponseType.DeferredMessageUpdate });
     expect(assign.job).toMatchObject({ action: { type: "assign", chatwootUserId: 43 }, panel: true });
-    expect((await press("panel:assignee", ["none"])).job?.action).toEqual({ type: "unassign" });
+    expect((await press("panel:assignee", [":none"])).job?.action).toEqual({ type: "unassign" });
     const resolve = await press("panel:status:resolved");
     expect(resolve.response).toEqual({ type: InteractionResponseType.DeferredMessageUpdate });
     expect(resolve.job).toMatchObject({ action: { type: "status", status: "resolved" }, panel: true });
@@ -482,7 +489,9 @@ describe("ticket buttons and the Manage panel", () => {
 
   it("the label menu gives the ticket one label, or none", async () => {
     expect((await press("panel:labels", ["billing"])).job?.action).toEqual({ type: "labels", labels: ["billing"] });
-    expect((await press("panel:labels", ["none"])).job?.action).toEqual({ type: "labels", labels: [] });
+    expect((await press("panel:labels", [":none"])).job?.action).toEqual({ type: "labels", labels: [] });
+    // A label may be called "none": it is a label, not "no label".
+    expect((await press("panel:labels", ["none"])).job?.action).toEqual({ type: "labels", labels: ["none"] });
   });
 
   it("refuses a menu value that is not in it", async () => {

@@ -29,7 +29,7 @@ interface Notification {
   lines: string[];
   /** Users the lines may ping. */
   users: string[];
-  /** The triage bot is called: its answer is followed by the ticket buttons (see Relay.postButtons). */
+  /** The triage bot is called to answer the message (its buttons then include Use draft). */
   triaged: boolean;
 }
 

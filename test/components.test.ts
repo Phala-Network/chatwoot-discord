@@ -1,0 +1,38 @@
+import { describe, expect, it } from "vitest";
+import { assigneeMenu, panel } from "../src/commands/components.ts";
+
+type Menu = { custom_id: string; options: Array<{ value: string; default?: boolean }> };
+type Row = { type: number; components: Menu[] };
+
+/** The options of the panel's menu `customId`. */
+function panelMenu(components: unknown, customId: string): Menu["options"] {
+  const [card] = components as [{ components: Row[] }];
+  const menu = card.components.flatMap((part) => part.components ?? []).find((item) => item.custom_id === customId);
+  return menu?.options ?? [];
+}
+
+const agents = Array.from({ length: 30 }, (_, index) => ({ id: index + 1, name: `Agent ${index + 1}` }));
+
+describe("ticket menus", () => {
+  it("keep the current assignee in a menu of more agents than it holds", () => {
+    const [row] = assigneeMenu(agents, 29) as unknown as Row[];
+    const options = row?.components[0]?.options ?? [];
+    expect(options).toHaveLength(25);
+    expect(options.slice(0, 2)).toEqual([
+      expect.objectContaining({ value: ":none" }),
+      expect.objectContaining({ value: "29", default: true }),
+    ]);
+    const card = panel("### Acme #1", { assigneeId: 29, labels: [], status: "open" }, agents, []);
+    expect(panelMenu(card, "panel:assignee").find((option) => option.default)?.value).toBe("29");
+  });
+
+  it("offer every label a menu can hold, a label called none included, and leave longer ones to /label", () => {
+    const long = "l".repeat(101);
+    const card = panel("### Acme #1", { assigneeId: null, labels: ["none"], status: "open" }, [], ["billing", long]);
+    expect(panelMenu(card, "panel:labels").map((option) => `${option.value}${option.default ? "*" : ""}`)).toEqual([
+      ":none",
+      "none*",
+      "billing",
+    ]);
+  });
+});

@@ -8,7 +8,7 @@ import { errorFields, log } from "../log.ts";
 import { clip, defused } from "../relay/format.ts";
 import { downloadAttachment } from "./attachments.ts";
 import { FAILED, filesTooLarge, NOT_LINKED, UserError } from "./common.ts";
-import { assigneeMenu, panel, text } from "./components.ts";
+import { assigneeMenu, panel } from "./components.ts";
 import { PRIORITY_NAMES } from "./definitions.ts";
 import type { CommandJob } from "./job.ts";
 
@@ -16,8 +16,8 @@ interface CommandResult {
   /** The confirmation shown to the invoker (only they see it). */
   content: string;
   /**
-   * For the Manage panel, what replaces it (a Components V2 message, which has no `content`): the
-   * panel drawn again with the ticket as it is now, or the error.
+   * What goes with the result: Assign to's menu, or the Manage panel drawn again with the ticket as
+   * it is now (a Components V2 message; see respond in hub.ts).
    */
   components?: APIMessageTopLevelComponent[];
   /** Chatwoot could not find the conversation: it may have been deleted. */
@@ -176,8 +176,7 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
     return { content: `✅ ${message}`, conversationGone: false };
   } catch (error) {
     const gone = error instanceof ConversationGoneError || (error instanceof ChatwootError && error.status === 404);
-    const content = failure(error, job);
-    return { content, ...(isPanel(job) ? { components: [text(content)] } : {}), conversationGone: gone };
+    return { content: failure(error, job), conversationGone: gone };
   }
 }
 

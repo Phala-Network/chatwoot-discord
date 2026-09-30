@@ -11,11 +11,19 @@
 // it), so it waits for more detail instead of escalating; once MAX_MESSAGES were seen it stays open.
 // Jev's decision is recorded (without expiry) before it is applied, so a retry applies the same
 // decision without asking Jev again; it is applied to the conversation as it is after Jev answered,
-// so an assignee or topic label someone set meanwhile is kept. A ticket someone assigned is never routed
+// so an assignee or topic label someone set meanwhile is kept. A customer message newer than the
+// decision's makes it stale: the ticket is then not snoozed, and a decision not applied yet is made
+// again, so the new message is always classified. A ticket someone assigned is never routed
 // again, even if unassigned later.
 
 import { z } from "zod";
-import { type ChatwootClient, type Fetch, messageContent, toRelayConversation } from "./chatwoot/api.ts";
+import {
+  type ChatwootClient,
+  type ChatwootConversation,
+  type Fetch,
+  messageContent,
+  toRelayConversation,
+} from "./chatwoot/api.ts";
 import type { Settings } from "./config.ts";
 import { log } from "./log.ts";
 
@@ -63,6 +71,8 @@ const decisionSchema = z.object({
   topicConfidence: z.number(),
   /** Customer messages the decision was made on. */
   messages: z.number().int(),
+  /** The newest customer message when Jev was asked: a newer one makes the decision stale. */
+  lastMessageId: z.number().int().default(0),
   state: z.enum(["pending", "waiting", "done"]),
 });
 type Decision = z.infer<typeof decisionSchema>;
@@ -128,8 +138,11 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     store.set(key, JSON.stringify({ ...(recorded ?? unassignable()), state: "done" }));
     return;
   }
-  let decision = recorded?.state === "pending" ? recorded : undefined;
+  // A decision not applied yet is dropped when the customer has written since: Jev is asked again.
+  const stale = recorded?.state === "pending" && latestCustomerMessage(raw) > recorded.lastMessageId;
+  let decision = recorded?.state === "pending" && !stale ? recorded : undefined;
   let current = conversation;
+  let now = raw;
   if (!decision) {
     if (conversation.status !== "open") return; // Routed if it opens again unassigned.
     const { text, messages } = await customerText(chatwoot, accountId, conversationId, [
@@ -137,12 +150,13 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
       conversation.contact?.email,
     ]);
     // Nothing new since the last answer (or no customer message yet): a later message routes it.
-    if (messages <= (recorded?.messages ?? 0)) return;
-    decision = await decide(ctx, owners, text, messages);
+    if (!stale && messages <= (recorded?.messages ?? 0)) return;
+    decision = await decide(ctx, owners, text, messages, latestCustomerMessage(raw));
     store.set(key, JSON.stringify(decision));
     // Asking Jev takes a moment: apply the decision to the conversation as it is now.
-    const now = await chatwoot.getConversation(accountId, conversationId);
-    if (!now) return;
+    const reread = await chatwoot.getConversation(accountId, conversationId);
+    if (!reread) return;
+    now = reread;
     current = toRelayConversation(conversationId, now);
   }
 
@@ -166,8 +180,9 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
 
   const final = owner !== undefined || current.assignee != null || decision.messages >= MAX_MESSAGES;
   const state: RoutingState = final ? "done" : "waiting";
-  // Snoozed before the state is recorded, so a retry snoozes it again (a no-op when it is).
-  const snooze = state === "waiting" && routing.snoozeUnclear;
+  // Snoozed before the state is recorded, so a retry snoozes it again (a no-op when it is); not
+  // when the customer wrote while Jev was answering, since that message's run asks Jev again.
+  const snooze = state === "waiting" && routing.snoozeUnclear && latestCustomerMessage(now) <= decision.lastMessageId;
   if (snooze) await chatwoot.setStatus(accountId, conversationId, { status: "snoozed" });
   store.set(key, JSON.stringify({ ...decision, state }));
   log.info("ticket routed", {
@@ -183,6 +198,12 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     snoozed: snooze,
     state,
   });
+}
+
+/** The id of the conversation's latest message when it is the customer's, else 0. */
+function latestCustomerMessage(conversation: ChatwootConversation): number {
+  const last = conversation.last_non_activity_message;
+  return last && last.message_type === 0 && !last.private && typeof last.id === "number" ? last.id : 0;
 }
 
 /** The ticket's subject and first customer messages, with identifiers removed, and how many messages that is. */
@@ -214,7 +235,13 @@ export function sanitize(text: string, identities: Array<string | null | undefin
 
 type Owners = NonNullable<Settings["config"]["routing"]>["accounts"][string];
 
-async function decide(ctx: RoutingContext, owners: Owners, text: string, messages: number): Promise<Decision> {
+async function decide(
+  ctx: RoutingContext,
+  owners: Owners,
+  text: string,
+  messages: number,
+  lastMessageId: number,
+): Promise<Decision> {
   const routing = ctx.settings.config.routing;
   const apiKey = ctx.settings.secrets.TYPESAFE_API_KEY;
   if (!routing || !apiKey) throw new JevError("routing is not configured");
@@ -265,12 +292,21 @@ async function decide(ctx: RoutingContext, owners: Owners, text: string, message
     topic: topic.choice,
     topicConfidence: topic.confidence,
     messages,
+    lastMessageId,
     state: "pending",
   };
 }
 
 function unassignable(): Decision {
-  return { owner: null, ownerConfidence: 0, topic: null, topicConfidence: 0, messages: 0, state: "done" };
+  return {
+    owner: null,
+    ownerConfidence: 0,
+    topic: null,
+    topicConfidence: 0,
+    messages: 0,
+    lastMessageId: 0,
+    state: "done",
+  };
 }
 
 function readDecision(stored: string | undefined): Decision | undefined {

@@ -1,7 +1,7 @@
-// Buttons on a ticket's posts and the Manage panel. The buttons hold no state: each acts on the
-// ticket as it is when pressed. The panel (a Components V2 card) shows the ticket as it was when
-// last drawn and is drawn again after every change, so its selections and highlighted buttons are
-// the ticket's state (see executeCommand). Nothing here performs I/O.
+// Buttons on a ticket's posts, the menus they open, and the Manage panel. The buttons hold no
+// state: each acts on the ticket as it is when pressed. The panel (a Components V2 card) shows the
+// ticket as it was when drawn, and is drawn again after each change made from it (see
+// executeCommand). Nothing here performs I/O.
 
 import {
   type APIActionRowComponent,
@@ -13,9 +13,10 @@ import {
   ComponentType,
 } from "discord-api-types/v10";
 
-/** Custom ids of the ticket buttons. */
+/** Custom ids of the ticket buttons and the menus they show. */
 export const BUTTONS = {
   reply: "ticket:reply",
+  /** Under a customer message the triage bot is asked to answer (see draft.ts). */
   draft: "ticket:draft",
   take: "ticket:take",
   assign: "ticket:assign",
@@ -38,8 +39,11 @@ export const PANEL = {
 
 export type ActionRow = APIActionRowComponent<APIComponentInMessageActionRow>;
 
-/** The panel's value for "no assignee" and "no priority". */
-export const NONE = "none";
+/**
+ * A menu's value for "no assignee" or "no label". A Chatwoot label has only letters, digits, "-",
+ * and "_", and an agent is a number, so it cannot be either.
+ */
+export const NONE = ":none";
 
 /** Discord's limits for a select menu. */
 const MAX_OPTIONS = 25;
@@ -53,69 +57,73 @@ function button(
   emoji: string,
   style: Style = ButtonStyle.Secondary,
 ): APIButtonComponent {
+  return { type: ComponentType.Button, custom_id: customId, label, emoji: { name: emoji }, style };
+}
+
+function row(components: APIComponentInMessageActionRow[]): ActionRow {
+  return { type: ComponentType.ActionRow, components };
+}
+
+function option(value: string, label: string, emoji: string, selected: boolean): APISelectMenuOption {
   return {
-    type: ComponentType.Button,
-    custom_id: customId,
+    value,
+    label: Array.from(label).slice(0, MAX_OPTION_TEXT).join("") || value,
     emoji: { name: emoji },
-    style,
-    ...(label ? { label } : {}),
+    ...(selected ? { default: true } : {}),
   };
 }
 
 /**
- * The ticket buttons, a row per concern: answering (Use draft, highlighted, when the message above
- * is the triage bot's answer with a draft; Reply), who owns it (Take; Assign to, which shows a
- * menu of agents), and its state (Resolve, Snooze until the next reply, Block, and ⚙️ for the
- * Manage panel).
+ * The ticket buttons, a row per concern: answering (Reply, and Use draft under a customer message
+ * the triage bot answers), who owns the ticket (Take; Assign to, which shows a menu of agents),
+ * and its state (Resolve, Snooze until the next reply, Block, and Manage for the panel).
  */
 export function ticketButtons(draft: boolean): ActionRow[] {
-  const row = (components: APIButtonComponent[]): ActionRow => ({ type: ComponentType.ActionRow, components });
   return [
-    row(
-      draft
-        ? [button(BUTTONS.draft, "Use draft", "🤖", ButtonStyle.Primary), button(BUTTONS.reply, "Reply", "✏️")]
-        : [button(BUTTONS.reply, "Reply", "✏️", ButtonStyle.Primary)],
-    ),
+    row([
+      button(BUTTONS.reply, "Reply", "✏️", ButtonStyle.Primary),
+      ...(draft ? [button(BUTTONS.draft, "Use draft", "🤖")] : []),
+    ]),
     row([button(BUTTONS.take, "Take", "🙋"), button(BUTTONS.assign, "Assign to…", "👤")]),
     row([
       button(BUTTONS.resolve, "Resolve", "✅", ButtonStyle.Success),
       button(BUTTONS.snooze, "Snooze", "💤"),
       button(BUTTONS.block, "Block", "🚫", ButtonStyle.Danger),
-      button(BUTTONS.manage, "", "⚙️"),
+      button(BUTTONS.manage, "Manage", "⚙️"),
     ]),
   ];
 }
 
-/** Assign to's menu: the account's agents (and Unassigned), the current assignee selected. */
-export function assigneeMenu(agents: Array<{ id: number; name: string }>, assigneeId: number | null): ActionRow[] {
-  const option = (value: string, label: string, selected: boolean): APISelectMenuOption => ({
-    value,
-    label: Array.from(label).slice(0, MAX_OPTION_TEXT).join("") || value,
-    emoji: { name: "👤" },
-    ...(selected ? { default: true } : {}),
-  });
-  const options = [
-    option(NONE, "Unassigned", assigneeId === null),
-    ...agents.map((agent) => option(String(agent.id), agent.name, agent.id === assigneeId)),
-  ].slice(0, MAX_OPTIONS);
+/**
+ * The agents to choose from: Unassigned, the current assignee, then the others, as many as a menu
+ * holds (an account with more agents assigns the rest with /assign or in Chatwoot).
+ */
+function agentOptions(agents: Array<{ id: number; name: string }>, assigneeId: number | null): APISelectMenuOption[] {
+  const current = agents.filter((agent) => agent.id === assigneeId);
+  const others = agents.filter((agent) => agent.id !== assigneeId);
   return [
-    {
-      type: ComponentType.ActionRow,
-      components: [
-        { type: ComponentType.StringSelect, custom_id: BUTTONS.assignee, placeholder: "Assign to…", options },
-      ],
-    },
+    option(NONE, "Unassigned", "👤", assigneeId === null),
+    ...[...current, ...others].map((agent) => option(String(agent.id), agent.name, "👤", agent.id === assigneeId)),
+  ].slice(0, MAX_OPTIONS);
+}
+
+/** Assign to's menu: the account's agents, the current assignee selected. */
+export function assigneeMenu(agents: Array<{ id: number; name: string }>, assigneeId: number | null): ActionRow[] {
+  return [
+    row([
+      {
+        type: ComponentType.StringSelect,
+        custom_id: BUTTONS.assignee,
+        placeholder: "Assign to…",
+        options: agentOptions(agents, assigneeId),
+      },
+    ]),
   ];
 }
 
 /** Block asks first: it resolves the ticket and mutes the contact. */
 export function blockConfirmation(): ActionRow[] {
-  return [
-    {
-      type: ComponentType.ActionRow,
-      components: [button(BUTTONS.blockConfirmed, "Block contact", "🚫", ButtonStyle.Danger)],
-    },
-  ];
+  return [row([button(BUTTONS.blockConfirmed, "Block contact", "🚫", ButtonStyle.Danger)])];
 }
 
 /** Text in a Components V2 message. */
@@ -146,8 +154,9 @@ const STATUS_COLORS: Record<string, number> = {
 
 /**
  * The panel for a ticket, a card: its title (and what was just done), menus for its assignee and
- * label, and a row of buttons for its status, the current one highlighted. (Priority and
- * "pending" are left to the commands.)
+ * its label (the Manage card sets one label per ticket; /label adds and removes several), and a
+ * row of buttons for its status, the current one highlighted. Priority and "pending" are left to
+ * their commands.
  */
 export function panel(
   heading: string,
@@ -155,37 +164,26 @@ export function panel(
   agents: Array<{ id: number; name: string }>,
   accountLabels: string[],
 ): APIMessageTopLevelComponent[] {
-  const option = (value: string, label: string, emoji: string, selected = false): APISelectMenuOption => ({
-    value,
-    label: Array.from(label).slice(0, MAX_OPTION_TEXT).join("") || value,
-    emoji: { name: emoji },
-    ...(selected ? { default: true } : {}),
-  });
-  const menu = (customId: string, placeholder: string, options: APISelectMenuOption[]): ActionRow => ({
-    type: ComponentType.ActionRow,
-    components: [{ type: ComponentType.StringSelect, custom_id: customId, placeholder, options }],
-  });
-  const choices = (
-    field: string,
-    items: Array<[value: string, name: string, emoji: string, current: boolean]>,
-  ): ActionRow => ({
-    type: ComponentType.ActionRow,
-    components: items.map(([value, name, emoji, current]) =>
-      button(`${field}:${value}`, name, emoji, current ? ButtonStyle.Primary : ButtonStyle.Secondary),
-    ),
-  });
+  const menu = (customId: string, placeholder: string, options: APISelectMenuOption[]): ActionRow =>
+    row([{ type: ComponentType.StringSelect, custom_id: customId, placeholder, options }]);
 
-  const people = [
-    option(NONE, "Unassigned", "👤", ticket.assigneeId === null),
-    ...agents.map((agent) => option(String(agent.id), agent.name, "👤", agent.id === ticket.assigneeId)),
-  ].slice(0, MAX_OPTIONS);
-  // A ticket has one label: choosing one replaces the ticket's labels. Its own labels come first,
-  // so they stay in the menu when the account has too many.
+  // The ticket's own label first, so it stays in the menu when the account has too many. A label
+  // longer than an option value can be is left to /label.
   const current = ticket.labels[0];
   const labels = [
     option(NONE, "No label", "🏷️", current === undefined),
-    ...[...new Set([...ticket.labels, ...accountLabels])].map((label) => option(label, label, "🏷️", label === current)),
+    ...[...new Set([...ticket.labels, ...accountLabels])]
+      .filter((label) => label.length <= MAX_OPTION_TEXT)
+      .map((label) => option(label, label, "🏷️", label === current)),
   ].slice(0, MAX_OPTIONS);
+  const statuses = STATUSES.map(([status, value, name, emoji]) =>
+    button(
+      `${PANEL.status}:${value}`,
+      name,
+      emoji,
+      status === ticket.status ? ButtonStyle.Primary : ButtonStyle.Secondary,
+    ),
+  );
 
   return [
     {
@@ -193,12 +191,9 @@ export function panel(
       accent_color: STATUS_COLORS[ticket.status] ?? null,
       components: [
         { type: ComponentType.TextDisplay, content: heading },
-        menu(PANEL.assignee, "👤 Unassigned", people),
+        menu(PANEL.assignee, "👤 Unassigned", agentOptions(agents, ticket.assigneeId)),
         ...(labels.length > 1 ? [menu(PANEL.labels, "🏷️ No label", labels)] : []),
-        choices(
-          PANEL.status,
-          STATUSES.map(([status, value, name, emoji]) => [value, name, emoji, status === ticket.status]),
-        ),
+        row(statuses),
       ],
     },
   ];

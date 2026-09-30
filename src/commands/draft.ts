@@ -1,7 +1,8 @@
-// "Use draft": the draft of the triage bot's answer the button is under, read when it is pressed.
-// Reading another bot's message text needs the Message Content intent on this bot's application;
-// without it Discord returns the triage bot's messages with empty content, which is told apart
-// from an answer without a draft.
+// "Use draft" under a customer message: the draft of the triage bot's answer to it. The bot
+// answers as a Discord reply to the message, so the answer is found by that reference, which
+// Discord always shows. Its text needs the Message Content intent on this bot's application:
+// without it Discord returns another bot's message with empty content, and the button links to the
+// answer, whose draft "Reply with this" takes.
 
 import {
   type RESTGetAPIChannelMessagesQuery,
@@ -11,30 +12,33 @@ import {
 import type { DiscordRest } from "../discord/rest.ts";
 import { lastCodeBlock } from "../relay/format.ts";
 
-/**
- * Messages read back from the button's message. Its buttons are posted a moment after the answer,
- * so an activity line or two may come in between.
- */
-const LOOK_BACK = 10;
+/** Messages read after the customer message, for the answer. */
+const LOOK_AHEAD = 50;
 
-export type Draft = { text: string } | { missing: "none" | "unreadable" };
+export type Draft =
+  | { text: string }
+  | { missing: "unanswered" | "none" }
+  /** The answer's text cannot be read: `answerId` is the answer, to take its draft by hand. */
+  | { missing: "unreadable"; answerId: string };
 
-/** The last code block of the triage bot's answer nearest above `messageId` (the button's message). */
-export async function draftAbove(
+/** The draft (last code block) of the triage bot's answer to `messageId`. */
+export async function draftFor(
   rest: DiscordRest,
   threadId: string,
   messageId: string,
   triageUserId: string | undefined,
 ): Promise<Draft> {
-  if (!triageUserId) return { missing: "none" };
+  if (!triageUserId) return { missing: "unanswered" };
   const messages = await rest.get<RESTGetAPIChannelMessagesResult, RESTGetAPIChannelMessagesQuery>(
     Routes.channelMessages(threadId),
-    { query: { before: messageId, limit: LOOK_BACK } },
+    { query: { after: messageId, limit: LOOK_AHEAD } },
   );
-  // Newest first: the answer the button is under.
-  const answer = messages.find((message) => message.author.id === triageUserId);
-  if (!answer) return { missing: "none" };
-  if (answer.content === "") return { missing: "unreadable" };
+  // The newest answer to the message, should the bot have answered it twice.
+  const answer = messages.find(
+    (message) => message.author.id === triageUserId && message.message_reference?.message_id === messageId,
+  );
+  if (!answer) return { missing: "unanswered" };
+  if (answer.content === "") return { missing: "unreadable", answerId: answer.id };
   const text = lastCodeBlock(answer.content);
   return text ? { text } : { missing: "none" };
 }

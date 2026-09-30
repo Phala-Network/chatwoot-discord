@@ -113,8 +113,9 @@ To connect an AI agent, see [Connecting an AI agent](docs/ai-agent.md).
 
 1. Create an application at <https://discord.com/developers/applications>; note its
    **Application ID** and **Public Key**, and create a **bot token**. With a triage bot, turn on
-   the **Message Content** intent for **Use draft** (a bot in 100 or more servers, or in a large
-   one, needs Discord's review first); without it the button points to **Reply with this**.
+   the **Message Content** intent for **Use draft** (an app in 100 or more servers, or exposed to
+   a large one, needs Discord's review first); without it the button links to the bot's answer,
+   whose draft **Reply with this** takes.
 2. Invite the bot with the `bot` and `applications.commands` scopes.
 3. Create a **forum channel**. Give the bot *View Channels*, *Read Message History* (**Use
    draft**), *Manage Threads* (tags, archiving),
@@ -170,7 +171,6 @@ npx wrangler secret put CHATWOOT_RELAY_TOKEN
 npx wrangler secret put CHATWOOT_WEBHOOK_SECRETS   # {} for now; filled in step 4
 npx wrangler secret put CHATWOOT_AGENT_TOKENS      # {"<discord user id>":"<chatwoot token>"}
 npx wrangler secret put TYPESAFE_API_KEY           # only with routing
-npx wrangler secret put TRIAGE_HOOK_SECRET         # only with a triage bot hook (see Triage bot hook)
 npm run deploy
 ```
 
@@ -205,22 +205,24 @@ Used inside a ticket post, by Discord users linked in `agents[]` who have a toke
 `CHATWOOT_AGENT_TOKENS`. The same actions are buttons, which need no typing:
 
 - The ticket card (at the top of the post) and every message (not activity lines) end with three
-  rows of buttons: answering (**Reply**), who owns the ticket (**Take**, **Assign to…**), and its
-  state (**Resolve**, **Snooze** until the next reply, **Block**, and **⚙️** for the Manage card).
-  Under the triage bot's answer the first row starts with **Use draft**, highlighted, when the
-  answer has a draft (see [Triage bot hook](#triage-bot-hook)).
-- **Reply** opens the `/reply` editor. **Use draft** opens it with the draft of the triage bot's
-  newest message in the post that has one (its last code block, as **Reply with this** takes it);
-  it reads the post's messages, which needs the Message Content intent, and says so when the bot
-  lacks it. **Take** assigns the ticket to you; **Assign to…** shows you a menu of the account's
+  rows of buttons: answering (**Reply**, and **Use draft** under a customer message the triage
+  bot is asked to answer), who owns the ticket (**Take**, **Assign to…**), and its state
+  (**Resolve**, **Snooze** until the next reply, **Block**, and **Manage**).
+- **Reply** opens the `/reply` editor. **Use draft** opens it with the draft (the last code
+  block, as **Reply with this** takes it) of the triage bot's answer to that message: the bot
+  answers as a Discord reply, so the answer is the one that replies to it. Reading the answer's
+  text needs the Message Content intent; without it the button links to the answer instead, for
+  **Reply with this**. It also says when the bot has not answered yet or its answer has no draft.
+  **Take** assigns the ticket to you; **Assign to…** shows you a menu of the account's
   agents, and the menu turns into the result. **Resolve** resolves it. **Block** asks you to
   confirm first (only you see the question), then blocks the contact as `/block` does.
 - **Manage** opens a card only you see, drawn with the ticket as it is and coloured by its status:
-  menus for its assignee and its label (one per ticket: choosing one replaces its labels), and
-  **Open**, **Resolve**, and **Snooze** (until the next reply) buttons with the current status
-  highlighted. A change is made at once, and the card is drawn again with the result, so it
-  always shows the ticket's state. Priority and "pending" are set with `/priority` and
-  `/pending`; several labels with `/label`.
+  menus for its assignee and its label (the card sets one: choosing one replaces the ticket's
+  labels), and **Open**, **Resolve**, and **Snooze** (until the next reply) buttons with the
+  current status highlighted. A change is made at once, and the card is drawn again with the
+  result; a change someone else makes shows the next time it is drawn. A menu lists at most 25
+  choices (the current assignee and label always among them); assign others with `/assign`, and
+  set priority, "pending", and several labels with `/priority`, `/pending`, and `/label`.
 
 Posts created before the buttons were added have none; the commands work everywhere.
 
@@ -371,7 +373,6 @@ Secrets (Worker secrets, never in config), also validated at startup:
 | `CHATWOOT_WEBHOOK_SECRETS` | JSON object, `{"<account id>":"<secret>"}` | Each account's webhook secret. |
 | `CHATWOOT_AGENT_TOKENS` | JSON object, `{"<Discord user id>":"<token>"}`; optional, default `{}` | Each linked agent's own Chatwoot access token; commands act with it. |
 | `TYPESAFE_API_KEY` | non-empty; required with `routing` | TypeSafe API key for routing. |
-| `TRIAGE_HOOK_SECRET` | 32+ characters; optional | Signs the triage bot's hook ([triage bot hook](#triage-bot-hook)). Unset: the route is off. |
 
 ### Support queue
 
@@ -421,18 +422,6 @@ window, so a missed webhook only delays it.
   "topics": { "technical-support": "Something does not work.", "billing": "Payments, invoices, refunds." }
 }
 ```
-
-### Triage bot hook
-
-A customer message that calls the triage bot has no buttons of its own: the ticket buttons follow
-the bot's answer instead, so **Use draft** sits under the draft. The Worker cannot see Discord
-messages, so the bot's side says when it has answered: `POST /triage/answered` with the body
-`{"threadId":"<post id>","draft":<whether the answer has a draft>}` and the headers `x-timestamp`
-(Unix seconds) and `x-signature` (`sha256=` and the hex HMAC-SHA256 of `<timestamp>.<body>` with
-`TRIAGE_HOOK_SECRET`, as Chatwoot signs its webhooks). The Worker posts the buttons (with **Use
-draft** when there is a draft) in that post 3 seconds later, since a hook that fires as the answer
-is finished runs just before the answer is sent. For Hermes, an `agent:end` gateway hook in the
-triage profile does this.
 
 ## Limits and the Workers Free plan
 

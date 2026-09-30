@@ -122,10 +122,10 @@ export interface RelayOptions {
   /** The agent linked to a Chatwoot user id, if any. */
   linkedAgent?: ((chatwootUserId: number) => LinkedAgent | undefined) | undefined;
   /**
-   * The ticket buttons: on the card and under each message (not activity lines) and the triage
-   * bot's answer (see postButtons), and with "Use draft" when that answer has a draft.
+   * The ticket buttons: on the card and under each message (not activity lines); under a customer
+   * message the triage bot is asked to answer, with Use draft (`triaged`).
    */
-  buttons?: { message: MessageComponents; draft: MessageComponents } | undefined;
+  buttons?: { message: MessageComponents; triaged: MessageComponents } | undefined;
   /** Messages created longer ago than this are relayed without notifications. */
   liveSeconds: number;
   now?: () => Date;
@@ -183,30 +183,6 @@ export class Relay {
     }
     this.unarchived(accountId, conversation);
     if (this.notifier.notifies(message)) store.updateConversation(accountId, conversation.id, { announcePending: 1 });
-  }
-
-  /**
-   * The ticket buttons as a message of their own, posted when the triage bot has answered in the
-   * post (its hook tells the Hub), so they follow its draft. A post that no longer exists is left.
-   */
-  async postButtons(accountId: number, conversationId: number, draft: boolean): Promise<void> {
-    const { store, forum, buttons } = this.options;
-    const threadId = store.conversation(accountId, conversationId)?.threadId;
-    if (!threadId || !buttons) return;
-    try {
-      await forum.execute(
-        this.options.target(accountId).forumChannelId,
-        {
-          username: SYSTEM_USERNAME,
-          avatar_url: this.options.avatars.chatwoot,
-          allowed_mentions: { parse: [] },
-          components: draft ? buttons.draft : buttons.message,
-        },
-        threadId,
-      );
-    } catch (error) {
-      if (!(error instanceof UnknownThreadError)) throw error;
-    }
   }
 
   /**
@@ -368,11 +344,11 @@ export class Relay {
         allowed_mentions: { parse: [] },
       });
     }
-    // A message ends with the buttons to act on the ticket; an activity line has none, and a
-    // message the triage bot answers has them after the answer instead (see postButtons).
+    // A message ends with the buttons to act on the ticket; an activity line has none.
+    const { buttons } = this.options;
     const last = parts.at(-1);
-    if (last && this.options.buttons && message.messageType !== "activity" && !notification.triaged) {
-      last.components = this.options.buttons.message;
+    if (last && buttons && message.messageType !== "activity") {
+      last.components = notification.triaged ? buttons.triaged : buttons.message;
     }
     return parts;
   }

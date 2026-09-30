@@ -9,17 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The ticket buttons are three rows: answering (**Reply**, after **Use draft**, highlighted, under
-  the triage bot's answer when it has a draft), who owns the ticket (**Take**, **Assign to…**),
-  and its state (**Resolve**, **Snooze**, **Block**, and ⚙️ for the Manage card). **Use draft** is
-  only under an answer with a draft.
-- **Breaking:** the triage bot's hook sends `{"threadId", "draft"}`; `draft` (whether the answer
-  has a draft) is required.
+- The ticket buttons are three rows: answering (**Reply**), who owns the ticket (**Take**,
+  **Assign to…**), and its state (**Resolve**, **Snooze**, **Block**, **Manage**). They are under
+  every message again, the customer's included.
+- **Use draft** is under a customer message the triage bot is asked to answer, and takes the draft
+  of the bot's answer to it (the answer that replies to the message), read when pressed. Without
+  the Message Content intent it links to that answer, for **Reply with this**.
+- Routing does not snooze a ticket the customer wrote to while Jev was answering, and asks Jev
+  again instead of applying a decision made before the customer's newest message.
+- The Manage card's menus keep the current assignee and label among their 25 choices, and a label
+  may be called `none`; a label longer than a menu value can be is left to `/label`.
+- A failed change from the Manage card shows in the card, which is a Components V2 message.
+- The support queue is retried for three minutes at most, while Discord's nonce check can drop a
+  repeated post; a later retry is dropped rather than risk posting the queue twice.
 
 ### Added
 
 - **Assign to…**, **Snooze** (until the next reply), and **Block** buttons. **Assign to…** shows
   a menu of the account's agents; **Block** asks to confirm first. Both turn into the result.
+
+### Removed
+
+- **Breaking:** the triage bot hook (`POST /triage/answered`) and the `TRIAGE_HOOK_SECRET` secret:
+  it could not place the buttons after the bot's answer reliably. Delete the secret.
 
 ## [0.17.0] - 2026-09-30
 

@@ -226,34 +226,12 @@ async function chatwootWebhook(
   );
 }
 
-/** The triage bot's hook: signed like a Chatwoot webhook, with the shared secret. */
-async function triageHook(payload: unknown, secret = "triage-hook-secret-0123456789abcdef") {
-  const body = JSON.stringify(payload);
-  const ts = String(Math.floor(Date.now() / 1000));
-  return call(
-    new Request("https://relay.example.com/triage/answered", {
-      method: "POST",
-      body,
-      headers: {
-        "content-type": "application/json",
-        "x-timestamp": ts,
-        "x-signature": `sha256=${await hmac(secret, `${ts}.${body}`)}`,
-      },
-    }),
-  );
-}
-
 /** The ticket buttons: the answering row, then who owns it, then its state. */
 const OWNER = ["ticket:take", "ticket:assign"];
 const STATE = ["ticket:resolve", "ticket:snooze", "ticket:block", "ticket:manage"];
 const ALL_BUTTONS = [["ticket:reply"], OWNER, STATE];
-const DRAFT_BUTTONS = [["ticket:draft", "ticket:reply"], OWNER, STATE];
-
-/** The custom id of a posted message's highlighted (primary) button. */
-function primary(body: unknown): string | undefined {
-  const rows = (body as { components?: Array<{ components: Array<{ custom_id: string; style: number }> }> }).components;
-  return rows?.flatMap((row) => row.components).find((button) => button.style === 1)?.custom_id;
-}
+/** Under a customer message the triage bot is asked to answer. */
+const TRIAGED_BUTTONS = [["ticket:reply", "ticket:draft"], OWNER, STATE];
 
 /** The custom ids of a posted message's buttons, row by row. */
 function buttons(body: unknown): string[][] | undefined {
@@ -383,8 +361,8 @@ describe("worker", () => {
       content:
         "-# via Live chat · Acme — Product App\n-# jane@example.com\n[Open in Chatwoot](<https://chatwoot.example.com/app/accounts/3/conversations/12>)",
     });
-    // The card and every message carry the ticket buttons, but a message the triage bot answers
-    // has them after the answer (see the triage hook test); activity lines have none.
+    // The card and every message carry the ticket buttons (with Use draft under a customer message
+    // the triage bot is asked to answer); activity lines have none.
     expect(buttons(posts[0]?.body)).toEqual(ALL_BUTTONS);
     const thread = posts[1]?.thread ?? "";
     expect(thread).toMatch(/^\d{18}$/);
@@ -397,7 +375,7 @@ describe("worker", () => {
         avatar_url: "https://gravatar.com/avatar/?d=mp&f=y&s=256",
       },
     });
-    expect(buttons(posts[1]?.body)).toBeUndefined();
+    expect(buttons(posts[1]?.body)).toEqual(TRIAGED_BUTTONS);
 
     // The post URL is merged into the conversation's attributes; other attributes survive.
     const link = world.requests.find((request) => request.url.pathname.endsWith("/custom_attributes"));
@@ -429,40 +407,6 @@ describe("worker", () => {
       },
     ]);
     expect(buttons(later[0]?.body)).toEqual(ALL_BUTTONS);
-  });
-
-  it("posts the ticket buttons after the triage bot's answer when its signed hook says it answered", async () => {
-    world.conversation(21, [{ id: 701, content: "help", message_type: 0 }]);
-    await chatwootWebhook(created(21));
-    await drain();
-    const thread = world.webhookPosts().at(-1)?.thread ?? "";
-    expect(thread).toMatch(/^\d{18}$/);
-    const before = world.webhookPosts().length;
-
-    expect((await triageHook({ threadId: thread, draft: true }, "wrong-secret-0123456789abcdef0123")).status).toBe(401);
-    expect((await triageHook({ threadId: "not a thread", draft: true })).status).toBe(400);
-    expect((await triageHook({ threadId: thread })).status).toBe(400);
-    const answered = async (draft: boolean) => {
-      expect((await triageHook({ threadId: thread, draft })).status).toBe(200);
-      // It waits a moment, so the answer (sent right after the hook) lands first.
-      await runInDurableObject(hub(), (_instance, state) => {
-        state.storage.sql.exec("UPDATE jobs SET not_before = 0");
-      });
-      await setAlarmNow();
-      await drain();
-      return world.webhookPosts().at(-1);
-    };
-
-    const bar = await answered(true);
-    expect(world.webhookPosts()).toHaveLength(before + 1);
-    expect(bar).toMatchObject({ thread, body: { username: "Chatwoot", allowed_mentions: { parse: [] } } });
-    expect(bar?.body).not.toHaveProperty("content");
-    // Under an answer with a draft, "Use draft" is the button to press; elsewhere "Reply" is.
-    expect(buttons(bar?.body)).toEqual(DRAFT_BUTTONS);
-    expect(primary(bar?.body)).toBe("ticket:draft");
-    expect(primary(world.webhookPosts().find((post) => post.thread === null)?.body)).toBe("ticket:reply");
-    // An answer without a draft (spam, already answered) gets no "Use draft".
-    expect(buttons((await answered(false))?.body)).toEqual(ALL_BUTTONS);
   });
 
   it("retries a failed message with backoff without skipping it", async () => {
@@ -758,6 +702,46 @@ describe("worker", () => {
     expect(JSON.parse(edit?.body ?? "")).toEqual({ content: "✅ Resolved.", allowed_mentions: { parse: [] } });
     const toggled = world.requests.find((request) => request.url.pathname.endsWith("/toggle_status"));
     expect(toggled?.headers.get("api_access_token")).toBe("token-alice");
+  });
+
+  it("shows a failed change from the Manage panel as text in that panel (a Components V2 message)", async () => {
+    const thread = "100000000000030009";
+    await runInDurableObject(hub(), (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO conversations (account_id, conversation_id, thread_id, cursor) VALUES (3, 91, ?, 0)",
+        thread,
+      );
+    });
+    const profile = on("GET", "chatwoot.example.com/api/v1/profile", () =>
+      json({ id: 42, name: "Alice", email: "alice@example.com", accounts: [{ id: 3 }] }),
+    );
+    const refused = on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/91/toggle_status", () =>
+      json({ error: "forbidden" }, { status: 403 }),
+    );
+    world.mock.spy.mockRestore();
+    world = new World([profile, refused]);
+    const response = await discordInteraction({
+      id: "900091",
+      application_id: "100000000000000001",
+      token: "interaction-token",
+      type: 3,
+      channel_id: thread,
+      channel: { id: thread, type: 11 },
+      member: { user: { id: ALICE } },
+      message: { id: "900", flags: 32768, components: [] },
+      data: { custom_id: "panel:status:resolved", component_type: 2 },
+    });
+    expect(await response.json()).toEqual({ type: 6 });
+    await drain();
+    await vi.waitFor(() =>
+      expect(world.requests.some((request) => request.url.pathname.endsWith("original"))).toBe(true),
+    );
+    const edit = world.requests.find((request) => request.url.pathname.endsWith("original"));
+    expect(JSON.parse(edit?.body ?? "")).toEqual({
+      flags: 32768,
+      components: [{ type: 10, content: "❌ You do not have access to this conversation." }],
+      allowed_mentions: { parse: [] },
+    });
   });
 
   it("runs a replayed signed command once, and refuses an old signed request", async () => {

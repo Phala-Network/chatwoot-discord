@@ -34,8 +34,8 @@ interface HandlerDeps {
   settings: Settings;
   /** The conversation the relay mapped to this forum post, if any. */
   ticketForThread(threadId: string): Promise<Ticket | undefined>;
-  /** The draft of the triage bot's answer nearest above a message (a Use draft button's). */
-  draftAbove(threadId: string, messageId: string): Promise<Draft>;
+  /** The draft of the triage bot's answer to a customer message in the post. */
+  draftFor(threadId: string, messageId: string): Promise<Draft>;
 }
 
 export interface HandlerResult {
@@ -374,13 +374,24 @@ function defer(context: Context, action: CommandAction): HandlerResult {
 async function component(context: Context, interaction: APIMessageComponentInteraction): Promise<HandlerResult> {
   const { data } = interaction;
   switch (data.custom_id) {
+    case BUTTONS.draft: {
+      // The button is under the customer message whose answer it takes.
+      const draft = await context.deps.draftFor(context.threadId, interaction.message.id);
+      if ("text" in draft) return { response: editor(context, "reply", draft.text) };
+      switch (draft.missing) {
+        case "unanswered":
+          return privately("The triage bot has not answered this message yet.");
+        case "none":
+          return privately("The triage bot's answer to this message has no draft.");
+        case "unreadable":
+          return privately(
+            `This bot cannot read the triage bot's messages yet (it needs Discord's Message Content intent). Right-click [the answer](https://discord.com/channels/${interaction.guild_id ?? "@me"}/${context.threadId}/${draft.answerId}) and choose Apps → ${REPLY_WITH_THIS}.`,
+          );
+      }
+      break;
+    }
     case BUTTONS.reply:
       return { response: editor(context, "reply", undefined) };
-    case BUTTONS.draft: {
-      const draft = await context.deps.draftAbove(context.threadId, interaction.message.id);
-      if ("text" in draft) return { response: editor(context, "reply", draft.text) };
-      return privately(draft.missing === "unreadable" ? DRAFT_UNREADABLE : "The answer above has no draft.");
-    }
     case BUTTONS.take: {
       const chatwootUserId = context.deps.settings.chatwootUserFor(context.userId);
       if (chatwootUserId === undefined) return privately(NOT_LINKED);
@@ -454,9 +465,6 @@ function assignee(value: string): CommandAction {
     throw new UserError("Choose an agent from the list.");
   return { type: "assign", chatwootUserId };
 }
-
-const DRAFT_UNREADABLE =
-  "This bot cannot read the triage bot's messages yet (it needs Discord's Message Content intent). Right-click the draft and choose Apps → Reply with this.";
 
 export function privately(content: string): HandlerResult {
   return {
