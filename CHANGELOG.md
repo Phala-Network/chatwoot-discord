@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- The **Reply with draft** button. Reading the triage bot's message needs the privileged Message
+  Content intent, which Discord grants a bot in large servers only after a review; without it the
+  button found no draft. Use **Reply with this** on the triage bot's message instead.
+
 ## [0.13.0] - 2026-09-30
 
 ### Added

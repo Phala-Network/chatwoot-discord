@@ -352,13 +352,7 @@ describe("worker", () => {
       (body as { components?: Array<{ components: Array<{ custom_id: string }> }> }).components?.flatMap((row) =>
         row.components.map((button) => button.custom_id),
       );
-    expect(buttons(posts[0]?.body)).toEqual([
-      "ticket:reply",
-      "ticket:draft",
-      "ticket:take",
-      "ticket:resolve",
-      "ticket:manage",
-    ]);
+    expect(buttons(posts[0]?.body)).toEqual(["ticket:reply", "ticket:take", "ticket:resolve", "ticket:manage"]);
     const thread = posts[1]?.thread ?? "";
     expect(thread).toMatch(/^\d{18}$/);
     expect(posts[1]).toMatchObject({
@@ -370,7 +364,7 @@ describe("worker", () => {
         avatar_url: "https://gravatar.com/avatar/?d=mp&f=y&s=256",
       },
     });
-    expect(buttons(posts[1]?.body)).toEqual(["ticket:reply", "ticket:draft", "ticket:manage"]);
+    expect(buttons(posts[1]?.body)).toEqual(["ticket:reply", "ticket:manage"]);
 
     // The post URL is merged into the conversation's attributes; other attributes survive.
     const link = world.requests.find((request) => request.url.pathname.endsWith("/custom_attributes"));

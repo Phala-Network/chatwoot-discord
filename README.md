@@ -112,12 +112,11 @@ To connect an AI agent, see [Connecting an AI agent](docs/ai-agent.md).
 ### 1. Discord
 
 1. Create an application at <https://discord.com/developers/applications>; note its
-   **Application ID** and **Public Key**, and create a **bot token**. With a triage bot
-   (`triage.userId`), turn on the **Message Content** intent, which **Reply with draft** needs to
-   read the triage bot's messages; nothing else needs a privileged intent.
+   **Application ID** and **Public Key**, and create a **bot token**. No privileged intents are
+   needed.
 2. Invite the bot with the `bot` and `applications.commands` scopes.
-3. Create a **forum channel**. Give the bot *View Channels*, *Read Message History* (**Reply with
-   draft**), *Manage Threads* (tags, archiving), and *Manage Webhooks* (it creates a webhook, named `Chatwoot`, that posts the messages; it only
+3. Create a **forum channel**. Give the bot *View Channels*, *Manage Threads* (tags, archiving),
+   and *Manage Webhooks* (it creates a webhook, named `Chatwoot`, that posts the messages; it only
    uses a webhook its own application created).
 4. Create the forum tags you want: one per account, one per status (`Open`, `Pending`,
    `Snoozed`, `Resolved`), one for unassigned posts, one per agent, one per topic value, and any
@@ -202,12 +201,11 @@ are supported); you provide TLS, the cron trigger, and storage persistence.
 Used inside a ticket post, by Discord users linked in `agents[]` who have a token in
 `CHATWOOT_AGENT_TOKENS`. The same actions are buttons, which need no typing:
 
-- The ticket card, at the top of the post: **Reply**, **Reply with draft** (with a triage bot),
-  **Take**, **Resolve**, and **Manage**. Under each customer message: **Reply**, **Reply with
-  draft**, and **Manage**.
-- **Reply** opens the `/reply` editor. **Reply with draft** opens it with the draft of the triage
-  bot's latest message in the post that has one (its last code block, as **Reply with this**
-  takes it). **Take** assigns the ticket to you; **Resolve** resolves it.
+- The ticket card, at the top of the post: **Reply**, **Take**, **Resolve**, and **Manage**. Under
+  each customer message: **Reply** and **Manage**.
+- **Reply** opens the `/reply` editor; to start from the triage bot's draft, use **Reply with
+  this** on its message (a button cannot read another bot's message without the privileged
+  Message Content intent). **Take** assigns the ticket to you; **Resolve** resolves it.
 - **Manage** opens a panel only you see, drawn with the ticket as it is: menus for its assignee,
   labels, priority, and status (snooze included). A change is made at once, and the panel is drawn
   again with the result, so it always shows the ticket's state. A label change adds and removes

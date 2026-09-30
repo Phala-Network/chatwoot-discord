@@ -13,11 +13,9 @@ import { ALICE, BOB, CAROL, TRIAGE, testSettings } from "./helpers.ts";
 
 const THREAD = "100000000000001500";
 const settings = testSettings();
-const DRAFTS = new Map([[THREAD, "Hi, restart the CVM from the dashboard."]]);
 const deps = {
   settings,
   ticketForThread: async (threadId: string) => (threadId === THREAD ? { accountId: 3, conversationId: 15 } : undefined),
-  latestDraft: async (threadId: string) => DRAFTS.get(threadId),
 };
 
 /** A ticket button pressed, or a panel menu changed, in the post. */
@@ -409,17 +407,10 @@ describe("interaction handler", () => {
 });
 
 describe("ticket buttons and the Manage panel", () => {
-  it("Reply opens the editor; Reply with draft opens it with the triage bot's latest draft", async () => {
-    const reply = await press("ticket:reply");
-    expect(reply.response.type === InteractionResponseType.Modal && reply.response.data.custom_id).toBe("reply:777001");
-    expect(editorField(reply.response, "content")).not.toHaveProperty("value");
-
-    const draft = await press("ticket:draft");
-    expect(editorField(draft.response, "content")?.value).toBe("Hi, restart the CVM from the dashboard.");
-
-    DRAFTS.delete(THREAD);
-    expect(privateText(await press("ticket:draft"))).toMatch(/has not written a draft/);
-    DRAFTS.set(THREAD, "Hi, restart the CVM from the dashboard.");
+  it("Reply opens the editor", async () => {
+    const { response } = await press("ticket:reply");
+    expect(response.type === InteractionResponseType.Modal && response.data.custom_id).toBe("reply:777001");
+    expect(editorField(response, "content")).not.toHaveProperty("value");
   });
 
   it("Take assigns the invoker, Resolve resolves, Manage draws the panel, each answered privately", async () => {
