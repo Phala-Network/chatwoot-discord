@@ -9,6 +9,9 @@ import {
   type RESTGetCurrentApplicationResult,
   type RESTPatchAPIChannelJSONBody,
   type RESTPatchAPIChannelResult,
+  type RESTPatchAPIWebhookWithTokenMessageJSONBody,
+  type RESTPatchAPIWebhookWithTokenMessageQuery,
+  type RESTPatchAPIWebhookWithTokenMessageResult,
   type RESTPostAPIChannelWebhookJSONBody,
   type RESTPostAPIChannelWebhookResult,
   type RESTPostAPIWebhookWithTokenJSONBody,
@@ -55,7 +58,8 @@ export class DiscordForum implements ForumClient {
           RESTPostAPIWebhookWithTokenQuery
         >(Routes.webhook(webhook.id, webhook.token), {
           body: tags ? { ...message, applied_tags: tags } : message,
-          query: { wait: true, ...(threadId ? { thread_id: threadId } : {}) },
+          // The webhook is this application's, so with_components lets it post any components.
+          query: { wait: true, with_components: true, ...(threadId ? { thread_id: threadId } : {}) },
           auth: false,
         }),
       );
@@ -87,6 +91,34 @@ export class DiscordForum implements ForumClient {
     } catch (error) {
       if (error instanceof DiscordHttpError && error.status === 404 && error.code !== UNKNOWN_TAG) {
         throw new UnknownThreadError(threadId);
+      }
+      throw error;
+    }
+  }
+
+  async editMessage(
+    forumChannelId: string,
+    threadId: string,
+    messageId: string,
+    message: WebhookMessage,
+  ): Promise<boolean> {
+    const webhook = await this.webhook(forumChannelId);
+    try {
+      await this.rest.patch<
+        RESTPatchAPIWebhookWithTokenMessageResult,
+        RESTPatchAPIWebhookWithTokenMessageJSONBody,
+        RESTPatchAPIWebhookWithTokenMessageQuery
+      >(Routes.webhookMessage(webhook.id, webhook.token, messageId), {
+        body: message,
+        query: { thread_id: threadId, with_components: true },
+        auth: false,
+      });
+      return true;
+    } catch (error) {
+      if (error instanceof DiscordHttpError && error.status === 404) {
+        if (error.code === UNKNOWN_MESSAGE) return false;
+        if (error.code === UNKNOWN_WEBHOOK) this.cache.delete(webhookKey(forumChannelId));
+        else throw new UnknownThreadError(threadId);
       }
       throw error;
     }

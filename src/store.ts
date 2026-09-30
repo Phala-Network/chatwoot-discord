@@ -81,6 +81,11 @@ export const MIGRATIONS: string[] = [
      PRIMARY KEY (account_id, conversation_id, message_id, discord_message_id)
    );
    ALTER TABLE conversations ADD COLUMN title_message_id INTEGER;`,
+  // A post's card: its message, whether messages were posted after it, and the triage answer
+  // whose draft it offers (see Relay.sync).
+  `ALTER TABLE conversations ADD COLUMN card_id TEXT;
+   ALTER TABLE conversations ADD COLUMN card_covered INTEGER;
+   ALTER TABLE conversations ADD COLUMN answer_id TEXT;`,
 ];
 
 const COUNTER_TTL_MS = 2 * 60 * 60 * 1000;
@@ -104,6 +109,9 @@ const COLUMNS: ReadonlyArray<readonly [keyof ConversationFields, string]> = [
   ["titleSubject", "title_subject"],
   ["title", "title"],
   ["titleMessageId", "title_message_id"],
+  ["cardId", "card_id"],
+  ["cardCovered", "card_covered"],
+  ["answerId", "answer_id"],
 ];
 
 export interface Job {
@@ -145,6 +153,9 @@ export class Store implements RelayStore, Cache {
         title_subject: string | null;
         title: string | null;
         title_message_id: number | null;
+        card_id: string | null;
+        card_covered: number | null;
+        answer_id: string | null;
       }>(
         `SELECT ${COLUMNS.map(([, column]) => column).join(", ")} FROM conversations
          WHERE account_id = ? AND conversation_id = ?`,
@@ -162,6 +173,9 @@ export class Store implements RelayStore, Cache {
       titleSubject: row.title_subject ?? undefined,
       title: row.title ?? undefined,
       titleMessageId: row.title_message_id ?? undefined,
+      cardId: row.card_id ?? undefined,
+      cardCovered: row.card_covered ?? undefined,
+      answerId: row.answer_id ?? undefined,
     };
   }
 
@@ -220,7 +234,8 @@ export class Store implements RelayStore, Cache {
     this.sql.exec(
       `INSERT INTO conversations (account_id, conversation_id, thread_id) VALUES (?, ?, ?)
        ON CONFLICT (account_id, conversation_id) DO UPDATE SET thread_id = excluded.thread_id, state = NULL,
-         announced_assignee = NULL, announce_pending = NULL, title_subject = NULL, title = NULL, title_message_id = NULL`,
+         announced_assignee = NULL, announce_pending = NULL, title_subject = NULL, title = NULL, title_message_id = NULL,
+         card_id = NULL, card_covered = NULL, answer_id = NULL`,
       accountId,
       conversationId,
       threadId,
@@ -289,7 +304,7 @@ export class Store implements RelayStore, Cache {
   forgetThread(accountId: number, conversationId: number): void {
     this.sql.exec(
       `UPDATE conversations SET thread_id = NULL, state = NULL, announced_assignee = NULL, announce_pending = NULL,
-         title_subject = NULL, title = NULL, title_message_id = NULL
+         title_subject = NULL, title = NULL, title_message_id = NULL, card_id = NULL, card_covered = NULL, answer_id = NULL
        WHERE account_id = ? AND conversation_id = ?`,
       accountId,
       conversationId,

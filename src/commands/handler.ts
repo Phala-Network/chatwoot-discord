@@ -393,6 +393,8 @@ async function component(context: Context, interaction: APIMessageComponentInter
     }
     case BUTTONS.resolve:
       return defer(context, { type: "status", status: "resolved" });
+    case BUTTONS.reopen:
+      return defer(context, { type: "status", status: "open" });
     case BUTTONS.snooze:
       return snooze(context, "until_next_reply", Date.now());
     case BUTTONS.block:

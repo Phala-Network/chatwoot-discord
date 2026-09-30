@@ -89,7 +89,10 @@ export class DiscordRest {
     return this.request("POST", path, request);
   }
 
-  patch<Result, Body>(path: string, request: DiscordRequest<Body>): Promise<Result> {
+  patch<Result, Body, Query extends object = never>(
+    path: string,
+    request: DiscordRequest<Body, Query>,
+  ): Promise<Result> {
     return this.request("PATCH", path, request);
   }
 

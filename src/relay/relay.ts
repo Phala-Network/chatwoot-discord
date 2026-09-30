@@ -1,8 +1,10 @@
 // Posts Chatwoot messages into a Discord forum: one post per conversation, opened by a ticket
-// card, with every message as a reply under its sender's name. Keeps the post's tags and
-// archived flag in step with the conversation.
+// header, with every message as a reply under its sender's name. Keeps the post's tags, archived
+// flag, and card (its last message, with the ticket's state and buttons) in step with the
+// conversation.
 
-import type { RESTPostAPIWebhookWithTokenJSONBody } from "discord-api-types/v10";
+import { MessageFlags, type RESTPostAPIWebhookWithTokenJSONBody } from "discord-api-types/v10";
+import type { CardTicket } from "../commands/components.ts";
 import { errorFields, log } from "../log.ts";
 import {
   type Avatars,
@@ -54,6 +56,8 @@ export interface ForumClient {
     threadId: string,
     patch: { archived: boolean; applied_tags?: string[]; name?: string },
   ): Promise<void>;
+  /** Edits a message the forum's webhook posted; false if the message no longer exists. */
+  editMessage(forumChannelId: string, threadId: string, messageId: string, message: WebhookMessage): Promise<boolean>;
   /** Deletes a message the forum's webhook posted; a message that is already gone counts as deleted. */
   deleteMessage(forumChannelId: string, threadId: string, messageId: string): Promise<void>;
   /** True if `threadId` is a post that still exists in the forum. */
@@ -81,6 +85,12 @@ export interface PostFields {
   title: string;
   /** The Chatwoot message the title's subject comes from. */
   titleMessageId: number;
+  /** The post's card ("" or unset: none yet). */
+  cardId: string;
+  /** 1 once a message was posted after the card, which then moves to the bottom. */
+  cardCovered: number;
+  /** The triage bot's answer whose draft the card offers ("" or unset: none). */
+  answerId: string;
 }
 
 export interface RelayStore {
@@ -121,11 +131,8 @@ export interface RelayOptions {
   triage?: TriageOptions | undefined;
   /** The agent linked to a Chatwoot user id, if any. */
   linkedAgent?: ((chatwootUserId: number) => LinkedAgent | undefined) | undefined;
-  /**
-   * The ticket buttons, on the card and under each message (not activity lines), and those right
-   * under a triage bot's answer with a draft (see postAnswerButtons).
-   */
-  buttons?: { message: MessageComponents; answer(answerId: string): MessageComponents } | undefined;
+  /** The post's card for the ticket, offering the draft of the triage bot's answer `answerId`; none if unset. */
+  card?: ((ticket: CardTicket, answerId: string | undefined) => MessageComponents) | undefined;
   /** Messages created longer ago than this are relayed without notifications. */
   liveSeconds: number;
   now?: () => Date;
@@ -183,33 +190,18 @@ export class Relay {
     }
     this.unarchived(accountId, conversation);
     if (this.notifier.notifies(message)) store.updateConversation(accountId, conversation.id, { announcePending: 1 });
+    // The customer wrote again: the triage bot's last draft answers what came before.
+    if (message.messageType === "incoming") store.updateConversation(accountId, conversation.id, { answerId: "" });
   }
 
   /**
-   * The triage bot's answer `answerId` has a draft: posts the ticket buttons, led by its Use draft,
-   * right under it (the bot's hook calls once the answer is in the post). Posting unarchives the
-   * post, so its state is marked out of date first, for the next sync, however the post ends. A
-   * post that no longer exists is left.
+   * The triage bot answered in the post with a draft (its hook reports each answer once it is
+   * there): the card offers that draft, under the answer, from the next sync.
    */
-  async postAnswerButtons(accountId: number, conversationId: number, answerId: string): Promise<void> {
-    const { store, forum, buttons } = this.options;
-    const threadId = store.conversation(accountId, conversationId)?.threadId;
-    if (!threadId || !buttons) return;
-    store.updateConversation(accountId, conversationId, { state: OUT_OF_DATE });
-    try {
-      await forum.execute(
-        this.options.target(accountId).forumChannelId,
-        {
-          username: SYSTEM_USERNAME,
-          avatar_url: this.options.avatars.chatwoot,
-          allowed_mentions: { parse: [] },
-          components: buttons.answer(answerId),
-        },
-        threadId,
-      );
-    } catch (error) {
-      if (!(error instanceof UnknownThreadError)) throw error;
-    }
+  answered(accountId: number, conversationId: number, answerId: string): void {
+    const { store } = this.options;
+    if (!store.conversation(accountId, conversationId)?.threadId) return;
+    store.updateConversation(accountId, conversationId, { answerId, cardCovered: 1 });
   }
 
   /**
@@ -237,27 +229,36 @@ export class Relay {
   }
 
   /**
-   * Brings the post's tags, title, and archived flag in line with the conversation. Discord only
+   * Brings the post's tags, title, archived flag, and card in line with the conversation. The
+   * card is the post's last message: it is edited when the conversation changes, and posted again
+   * at the bottom (the previous one deleted) once messages were posted after it. Discord only
    * lets a request change an archived post if it also unarchives it, so the changes are applied
-   * with `archived: false` and a resolved post is archived by a second request.
+   * with `archived: false` and a resolved post is archived by a last request.
    */
   async sync(accountId: number, conversation: RelayConversation, threadId: string): Promise<void> {
     const { store, forum } = this.options;
     const state = this.stateOf(conversation);
     const recorded = store.conversation(accountId, conversation.id);
-    if (recorded?.state === state) return;
+    const card = this.options.card?.(cardTicket(conversation), recorded?.answerId || undefined);
+    const cardDue = card !== undefined && (!recorded?.cardId || recorded.cardCovered === 1);
+    if (recorded?.state === state && !cardDue) return;
     const target = this.options.target(accountId);
     const subject = recorded?.titleSubject;
     const title = subject === undefined ? undefined : threadTitle(target.name, conversation, subject);
     // Only a changed title is sent: other updates leave the post's name alone.
     const rename = title !== recorded?.title ? title : undefined;
     try {
-      await forum.updateThread(target.forumChannelId, threadId, {
-        archived: false,
-        applied_tags: this.postTags(accountId, conversation),
-        ...(rename ? { name: rename } : {}),
-      });
-      if (rename) store.updateConversation(accountId, conversation.id, { title: rename });
+      // Only the card is due: the post is as recorded, and not archived unless its ticket is
+      // resolved, and then the card is posted anew, which unarchives it.
+      if (recorded?.state !== state) {
+        await forum.updateThread(target.forumChannelId, threadId, {
+          archived: false,
+          applied_tags: this.postTags(accountId, conversation),
+          ...(rename ? { name: rename } : {}),
+        });
+        if (rename) store.updateConversation(accountId, conversation.id, { title: rename });
+      }
+      if (card) await this.placeCard(accountId, conversation.id, threadId, card);
       if (conversation.status === "resolved") {
         await forum.updateThread(target.forumChannelId, threadId, { archived: true });
       }
@@ -371,12 +372,6 @@ export class Relay {
         allowed_mentions: { parse: [] },
       });
     }
-    // A message's last part (the one the triage bot is called on and answers, before any
-    // truncation note) carries the buttons to act on the ticket; an activity line has none.
-    const last = parts[kept.length - 1];
-    if (last && this.options.buttons && message.messageType !== "activity") {
-      last.components = this.options.buttons.message;
-    }
     return parts;
   }
 
@@ -391,6 +386,7 @@ export class Relay {
       if (!payload) break;
       const { messageId } = await forum.execute(forumChannelId, payload, threadId);
       store.savePostedPart(accountId, conversationId, message.id, part, messageId);
+      store.updateConversation(accountId, conversationId, { cardCovered: 1 });
     }
   }
 
@@ -417,7 +413,6 @@ export class Relay {
     };
     const tags = this.postTags(accountId, conversation);
     if (tags.length > 0) post.applied_tags = tags;
-    if (this.options.buttons) post.components = this.options.buttons.message;
     const { channelId: threadId } = await forum.execute(target.forumChannelId, post);
     store.updateConversation(accountId, conversation.id, {
       threadId,
@@ -453,6 +448,7 @@ export class Relay {
       return undefined;
     }
     this.unarchived(accountId, conversation);
+    store.updateConversation(accountId, conversation.id, { cardCovered: 1 });
     return messageId;
   }
 
@@ -469,6 +465,34 @@ export class Relay {
     } catch (error) {
       log.warn("assignee not added to the post", { accountId, conversationId, threadId, ...errorFields(error) });
     }
+  }
+
+  /**
+   * Edits the post's card, or posts it at the bottom of the post when messages were posted after
+   * it (deleting the previous one) or it is gone. The post must not be archived.
+   */
+  private async placeCard(
+    accountId: number,
+    conversationId: number,
+    threadId: string,
+    components: MessageComponents,
+  ): Promise<void> {
+    const { store, forum, avatars } = this.options;
+    const forumChannelId = this.forumOf(accountId);
+    const recorded = store.conversation(accountId, conversationId);
+    const card: WebhookMessage = { flags: MessageFlags.IsComponentsV2, components };
+    const cardId = recorded?.cardId;
+    if (cardId && recorded?.cardCovered !== 1) {
+      if (await forum.editMessage(forumChannelId, threadId, cardId, card)) return;
+    } else if (cardId) {
+      await forum.deleteMessage(forumChannelId, threadId, cardId);
+    }
+    const { messageId } = await forum.execute(
+      forumChannelId,
+      { ...card, username: SYSTEM_USERNAME, avatar_url: avatars.chatwoot, allowed_mentions: { parse: [] } },
+      threadId,
+    );
+    store.updateConversation(accountId, conversationId, { cardId: messageId, cardCovered: 0 });
   }
 
   /** A message from Chatwoot itself. */
@@ -498,4 +522,14 @@ export class Relay {
     const ids = tagKeys(accountId, conversation, this.options.topicAttribute).flatMap((key) => tags[key] ?? []);
     return [...new Set(ids)].slice(0, MAX_TAGS);
   }
+}
+
+/** What the post's card shows of the conversation. */
+function cardTicket(conversation: RelayConversation): CardTicket {
+  const { assignee } = conversation;
+  return {
+    status: conversation.status ?? "open",
+    assignee: assignee ? (assignee.name ?? `#${assignee.id ?? "?"}`) : null,
+    labels: conversation.labels,
+  };
 }

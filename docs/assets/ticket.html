@@ -1,10 +1,10 @@
 <!doctype html>
 <!--
-  Illustration of one ticket post: the ticket card, a customer message that mentions a triage
-  bot, an activity line with the new assignee's ping, the bot's draft, a private note, the reply
-  an agent sent with "Reply with this" (agents show their own avatars), and a customer follow-up
-  that mentions the bot and pings the assignee. Every name, address, and ticket is fictional. Regenerate
-  docs/assets/ticket.png with docs/assets/render.sh.
+  Illustration of one ticket post: the ticket header, a customer message that mentions a triage
+  bot, an activity line with the new assignee's ping, the bot's answer with its draft, a private
+  note (agents show their own avatars), and the ticket's card at the bottom, led by Use draft for
+  that answer. Every name, address, and ticket is fictional. Regenerate docs/assets/ticket.png
+  with docs/assets/render.sh.
 -->
 <html lang="en">
   <head>
@@ -130,38 +130,35 @@
         font: 13.5px/1.45 ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
         white-space: pre-wrap;
       }
-      .highlight {
-        background: rgba(255, 255, 255, 0.03);
+      .card {
+        margin-top: 4px;
+        padding: 12px 16px 14px;
+        width: 460px;
+        border-left: 4px solid #3ba55c;
+        border-radius: 8px;
+        background: #2b2d31;
       }
-      .menu {
-        position: absolute;
-        right: 24px;
-        top: 10px;
+      .card p {
+        margin: 0 0 10px;
+      }
+      .row {
         display: flex;
-        align-items: flex-start;
-        gap: 4px;
+        gap: 8px;
+        margin-top: 8px;
+      }
+      .button {
+        padding: 5px 14px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 8px;
+        background: #3b3c43;
+        color: #fff;
         font-size: 14px;
-      }
-      .menu ul {
-        margin: 0;
-        padding: 6px;
-        list-style: none;
-        border-radius: 6px;
-        background: #111214;
-        box-shadow: 0 8px 16px rgba(0, 0, 0, 0.35);
-      }
-      .menu li {
-        padding: 6px 10px;
-        border-radius: 3px;
-        color: #b5bac1;
+        font-weight: 500;
         white-space: nowrap;
       }
-      .menu li.active {
-        background: #4752c4;
-        color: #fff;
-      }
-      .menu .sub {
-        margin-top: 76px;
+      .button.primary {
+        border-color: transparent;
+        background: #5865f2;
       }
       .note {
         padding: 0 20px;
@@ -212,7 +209,7 @@
         </div>
       </div>
 
-      <div class="msg highlight">
+      <div class="msg">
         <div class="avatar" style="background: #7c5cd6">TB</div>
         <div class="body">
           <span class="name">Triage bot</span><span class="badge">APP</span><span class="time">Today at 9:03 AM</span>
@@ -224,18 +221,6 @@
           <pre>
 Hi Dana, thanks for the details! After a key rotation, deliveries can be signed with the previous key for up to 10 minutes. Could you retry now and let us know if the 401s continue?</pre
           >
-        </div>
-        <div class="menu">
-          <ul>
-            <li>Add Reaction</li>
-            <li>Reply</li>
-            <li>Create Thread</li>
-            <li class="active">Apps ›</li>
-            <li>Copy Text</li>
-          </ul>
-          <ul class="sub">
-            <li class="active">Reply with this</li>
-          </ul>
         </div>
       </div>
 
@@ -250,24 +235,20 @@ Hi Dana, thanks for the details! After a key rotation, deliveries can be signed 
       </div>
 
       <div class="msg">
-        <div class="avatar" style="background: #2e86c1">SC</div>
+        <div class="avatar" style="background: #1f93ff">💬</div>
         <div class="body">
-          <span class="name">Sam Carter · Acme</span><span class="badge">APP</span
-          ><span class="time">Today at 9:06 AM</span>
-          <p>
-            Hi Dana, thanks for the details! After a key rotation, deliveries can be signed with the previous key for
-            up to 10 minutes. Could you retry now and let us know if the 401s continue?
-          </p>
-        </div>
-      </div>
-
-      <div class="msg">
-        <div class="avatar" style="background: #3ba55c">DW</div>
-        <div class="body">
-          <span class="name">Dana Whitfield</span><span class="badge">APP</span
-          ><span class="time">Today at 9:14 AM</span>
-          <p>Retried just now and deliveries go through again. Thanks!</p>
-          <p class="small"><span class="mention">@Triage bot</span> <span class="mention">@Sam Carter</span></p>
+          <span class="name">Chatwoot</span><span class="badge">APP</span><span class="time">Today at 9:05 AM</span>
+          <div class="card">
+            <p>🟢 <b>Open</b> · 👉 <b>Sam Carter</b> · 🏷️ technical-support</p>
+            <div class="row">
+              <span class="button primary">🤖 Use draft</span><span class="button">✏️ Reply</span>
+            </div>
+            <div class="row"><span class="button">🙋 Take</span><span class="button">👉 Sam Carter</span></div>
+            <div class="row">
+              <span class="button">✅ Resolve</span><span class="button">😴 Snooze</span
+              ><span class="button">🚫 Block</span><span class="button">⚙️ Manage</span>
+            </div>
+          </div>
         </div>
       </div>
 

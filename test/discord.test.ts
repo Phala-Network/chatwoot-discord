@@ -58,7 +58,10 @@ describe("DiscordForum", () => {
     // The application id and the webhook are looked up once, then cached.
     expect(requests.filter((request) => request.method === "GET")).toHaveLength(2);
     const posts = requests.filter((request) => request.url.pathname.startsWith("/api/v10/webhooks/"));
-    expect(posts.map((request) => request.url.search)).toEqual(["?wait=true", "?wait=true&thread_id=thread-9"]);
+    expect(posts.map((request) => request.url.search)).toEqual([
+      "?wait=true&with_components=true",
+      "?wait=true&with_components=true&thread_id=thread-9",
+    ]);
     expect(posts.every((request) => request.headers.get("authorization") === null)).toBe(true);
     expect(requests[1]?.headers.get("authorization")).toBe("Bot bot-token");
   });

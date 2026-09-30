@@ -9,6 +9,7 @@ import {
 } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import worker from "../src/index.ts";
 import { ALICE, json, mockFetch, on, type Recorded, type Route } from "./helpers.ts";
 
@@ -70,7 +71,17 @@ class World {
     return this.requests.filter((request) => request.method === method && path.test(request.url.pathname));
   }
 
+  /** The messages the webhook posted, cards left out. */
   webhookPosts(): Array<{ thread: string | null; body: Record<string, unknown> }> {
+    return this.executions().filter((post) => post.body.content !== undefined);
+  }
+
+  /** The cards the webhook posted. */
+  cards(): Array<{ thread: string | null; body: Record<string, unknown> }> {
+    return this.executions().filter((post) => post.body.content === undefined);
+  }
+
+  private executions(): Array<{ thread: string | null; body: Record<string, unknown> }> {
     return this.requests
       .filter((request) => request.method === "POST" && /^\/api\/v10\/webhooks\/1\/tok$/.test(request.url.pathname))
       .map((request) => ({ thread: request.url.searchParams.get("thread_id"), body: JSON.parse(request.body) }));
@@ -162,6 +173,7 @@ class World {
         /^discord\.com\/api\/v10\/webhooks\/1\/tok\/messages\/[\w-]+$/,
         () => new Response(null, { status: 204 }),
       ),
+      on("PATCH", /^discord\.com\/api\/v10\/webhooks\/1\/tok\/messages\/[\w-]+$/, () => json({})),
       on("POST", "discord.com/api/v10/webhooks/1/tok", (request) => {
         const thread = request.url.searchParams.get("thread_id");
         if (thread) {
@@ -178,7 +190,7 @@ class World {
         }
         const id = nextThreadId();
         this.threads.set(id, FORUM);
-        return json({ id: "card", channel_id: id });
+        return json({ id: "header", channel_id: id });
       }),
       on("PATCH", /^discord\.com\/api\/v10\/webhooks\/100000000000000001\/[^/]+\/messages\/(@|%40)original$/, () =>
         json({}),
@@ -248,10 +260,19 @@ const OWNER = ["ticket:take", "ticket:assign"];
 const STATE = ["ticket:resolve", "ticket:snooze", "ticket:block", "ticket:manage"];
 const ALL_BUTTONS = [["ticket:reply"], OWNER, STATE];
 
-/** The custom ids of a posted message's buttons, row by row. */
-function buttons(body: unknown): string[][] | undefined {
-  return (body as { components?: Array<{ components: Array<{ custom_id: string }> }> }).components?.map((row) =>
-    row.components.map((button) => button.custom_id),
+/** The custom ids of a card's buttons, row by row, after its summary line. */
+function buttons(body: Record<string, unknown> | undefined): string[][] | undefined {
+  const card = z
+    .object({
+      components: z.tuple([
+        z.object({
+          components: z.array(z.object({ components: z.array(z.object({ custom_id: z.string() })).optional() })),
+        }),
+      ]),
+    })
+    .safeParse(body);
+  return card.data?.components[0].components.flatMap((part) =>
+    part.components ? [part.components.map((button) => button.custom_id)] : [],
   );
 }
 
@@ -369,6 +390,7 @@ describe("worker", () => {
 
     const posts = world.webhookPosts();
     expect(posts).toHaveLength(2);
+    expect(posts.every((post) => post.body.components === undefined)).toBe(true);
     expect(posts[0]?.thread).toBeNull();
     expect(posts[0]?.body).toMatchObject({
       thread_name: "[Acme #12] Jane Doe — My agent will not connect",
@@ -376,8 +398,6 @@ describe("worker", () => {
       content:
         "-# via Live chat · Acme — Product App\n-# jane@example.com\n[Open in Chatwoot](<https://chatwoot.example.com/app/accounts/3/conversations/12>)",
     });
-    // The card and every message carry the ticket buttons; activity lines have none.
-    expect(buttons(posts[0]?.body)).toEqual(ALL_BUTTONS);
     const thread = posts[1]?.thread ?? "";
     expect(thread).toMatch(/^\d{18}$/);
     expect(posts[1]).toMatchObject({
@@ -389,7 +409,10 @@ describe("worker", () => {
         avatar_url: "https://gravatar.com/avatar/?d=mp&f=y&s=256",
       },
     });
-    expect(buttons(posts[1]?.body)).toEqual(ALL_BUTTONS);
+    // The post ends with its card.
+    const card = world.cards();
+    expect(card).toMatchObject([{ thread, body: { flags: 1 << 15, username: "Chatwoot" } }]);
+    expect(buttons(card[0]?.body)).toEqual(ALL_BUTTONS);
 
     // The post URL is merged into the conversation's attributes; other attributes survive.
     const link = world.requests.find((request) => request.url.pathname.endsWith("/custom_attributes"));
@@ -420,15 +443,17 @@ describe("worker", () => {
         },
       },
     ]);
-    expect(buttons(later[0]?.body)).toEqual(ALL_BUTTONS);
+    // The card moved below the new message.
+    expect(world.cards()).toHaveLength(2);
+    expect(world.sent("DELETE", /^\/api\/v10\/webhooks\/1\/tok\/messages\//)).toHaveLength(1);
   });
 
-  it("puts Use draft right under the triage bot's answer when its signed hook says the answer is in", async () => {
-    world.conversation(21, [{ id: 701, content: "help", message_type: 0 }]);
-    await chatwootWebhook(created(21));
+  it("moves the card under the triage bot's answer, offering its draft, when its signed hook says the answer is in", async () => {
+    world.conversation(24, [{ id: 701, content: "help", message_type: 0 }]);
+    await chatwootWebhook(created(24));
     await drain();
     const thread = world.webhookPosts().at(-1)?.thread ?? "";
-    const before = world.webhookPosts().length;
+    const before = world.cards().length;
     const answerId = "100000000000009100";
     const answer = { threadId: thread, answerId, draft: "Hi, restart the agent from the dashboard." };
 
@@ -441,11 +466,10 @@ describe("worker", () => {
     expect((await triageHook(answer)).status).toBe(200);
     await drain();
 
-    const bar = world.webhookPosts().slice(before);
-    expect(bar).toHaveLength(1);
-    expect(bar[0]).toMatchObject({ thread, body: { username: "Chatwoot", allowed_mentions: { parse: [] } } });
-    expect(bar[0]?.body).not.toHaveProperty("content");
-    expect(buttons(bar[0]?.body)).toEqual([[`ticket:draft:${answerId}`, "ticket:reply"], OWNER, STATE]);
+    const moved = world.cards().slice(before);
+    expect(moved).toHaveLength(1);
+    expect(moved[0]).toMatchObject({ thread, body: { username: "Chatwoot", allowed_mentions: { parse: [] } } });
+    expect(buttons(moved[0]?.body)).toEqual([[`ticket:draft:${answerId}`, "ticket:reply"], OWNER, STATE]);
 
     // Use draft opens the editor with the draft the hook sent: no Discord read, no intent needed.
     const pressed = await discordInteraction({
@@ -960,10 +984,19 @@ describe("worker", () => {
     await sweep();
     expect(reads()).toBe(before); // up to date: not queued
 
+    // A post from before cards gets its card.
+    await runInDurableObject(hub(), (_instance, state) => {
+      state.storage.sql.exec("UPDATE conversations SET card_id = NULL WHERE conversation_id = 32");
+    });
+    const cards = world.cards().length;
+    await sweep();
+    expect(reads()).toBe(before + 1);
+    expect(world.cards()).toHaveLength(cards + 1);
+
     const conversation = world.conversations.get(32);
     if (conversation) conversation.status = "resolved"; // missed webhook
     await sweep();
-    expect(reads()).toBe(before + 1);
+    expect(reads()).toBe(before + 2);
     expect(JSON.parse(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).at(-1)?.body ?? "")).toEqual({
       archived: true,
     });

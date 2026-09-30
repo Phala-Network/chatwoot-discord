@@ -443,6 +443,7 @@ describe("ticket buttons and the Manage panel", () => {
     expect(take.response).toEqual(deferred);
     expect(take.job?.action).toEqual({ type: "assign", chatwootUserId: 42 });
     expect((await press("ticket:resolve")).job?.action).toEqual({ type: "status", status: "resolved" });
+    expect((await press("ticket:reopen")).job?.action).toEqual({ type: "status", status: "open" });
     const manage = await press("ticket:manage");
     expect(manage.job?.action).toEqual({ type: "panel" });
     expect(manage.job).not.toHaveProperty("panel");

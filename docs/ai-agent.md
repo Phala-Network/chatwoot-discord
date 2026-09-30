@@ -38,8 +38,9 @@ separate message), so when the agent sees it, the whole message is already in th
 
 The mention is a literal token in the message content; Discord sends no notification for it
 (the relay's `allowed_mentions` leaves it out), so nobody is pinged by it. Only customer
-messages carry it. Agent replies, private notes, activity lines, the ticket card that opens a
-post, and customers' responses to interactive messages (option picks, forms, CSAT ratings) do
+messages carry it. Agent replies, private notes, activity lines, the ticket header that opens a
+post, the post's card (its last message: the ticket's state and buttons, with no text content),
+and customers' responses to interactive messages (option picks, forms, CSAT ratings) do
 not. Neither do automatic email replies (out of office, for example), nor customer messages
 created more than `reconcile.lookbackSeconds` (an hour by default) before they are relayed: the
 history posted when an older conversation gets its post, or messages caught up after downtime.
@@ -103,7 +104,7 @@ details) from Chatwoot's API. Chatwoot access tokens are not scoped: any agent's
 send messages. Give the AI agent its own Chatwoot user, a member of only the inboxes it needs, and
 let it make read (`GET`) requests only.
 
-- The ticket card that opens every post links to the conversation:
+- The ticket header that opens every post links to the conversation:
   `https://<chatwoot>/app/accounts/<account id>/conversations/<conversation id>`. The post title
   starts with `[<Account> #<conversation id>]`.
 - In the other direction, each conversation's `discord_thread` custom attribute (the

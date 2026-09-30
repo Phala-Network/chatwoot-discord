@@ -144,7 +144,7 @@ export class Hub extends DurableObject<Env> {
 
   /**
    * The triage bot's answer `answerId` is in the post, with the reply draft it proposes: the
-   * draft is kept for Use draft, and the answer gets its Use draft button (Relay.postAnswerButtons).
+   * draft is kept for Use draft, and the post's card offers it under the answer (Relay.answered).
    * Each answer is taken once, so a repeated call adds nothing.
    */
   async triageAnswered(threadId: string, answerId: string, draft: string): Promise<void> {
@@ -236,17 +236,10 @@ export class Hub extends DurableObject<Env> {
           this.store.completeJob(job);
           return "done";
         case "answer":
-          // At most once: Discord cannot tell a repeated post from a new one, and the buttons are a
-          // convenience (those under every message remain). Posting unarchives the post, so the
-          // ticket's state is applied again afterwards, whatever the post's outcome.
-          this.store.deleteJob(job.key);
+          // The card moves under the answer when the conversation's post is synced next.
+          services.relay.answered(payload.accountId, payload.conversationId, payload.answerId);
+          this.store.completeJob(job);
           this.enqueue({ type: "conversation", accountId: payload.accountId, conversationId: payload.conversationId });
-          try {
-            await services.relay.postAnswerButtons(payload.accountId, payload.conversationId, payload.answerId);
-          } catch (error) {
-            if (error instanceof BudgetExhaustedError) throw error;
-            log.warn("answer buttons not posted", { answerId: payload.answerId, ...errorFields(error) });
-          }
           return "done";
         case "route":
           await routeConversation(
@@ -334,8 +327,11 @@ export class Hub extends DurableObject<Env> {
         const needsCursor = row?.threadId !== undefined && row.cursor === undefined;
         const cursor = row?.cursor ?? settings.config.relay.startAfterMessageId;
         const behind = needsCursor || (latest !== undefined && latest > cursor);
+        // A post without a card (e.g. from before cards) gets one while its ticket is not resolved.
         const stale =
-          row?.threadId !== undefined && row.state !== relay.stateOf(toRelayConversation(conversationId, conversation));
+          row?.threadId !== undefined &&
+          (row.state !== relay.stateOf(toRelayConversation(conversationId, conversation)) ||
+            (!row.cardId && conversation.status !== "resolved"));
         if (behind || stale) {
           this.enqueue({ type: "conversation", accountId, conversationId });
           queued += 1;

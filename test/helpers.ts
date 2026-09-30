@@ -48,7 +48,19 @@ export class MemoryStore implements RelayStore {
     const row = this.rows.get(`${a}:${c}`);
     if (!row) return undefined;
     const { threadId, state, announcedAssignee, announcePending, titleSubject, title, titleMessageId } = row;
-    return { threadId, state, announcedAssignee, announcePending, titleSubject, title, titleMessageId };
+    const { cardId, cardCovered, answerId } = row;
+    return {
+      threadId,
+      state,
+      announcedAssignee,
+      announcePending,
+      titleSubject,
+      title,
+      titleMessageId,
+      cardId,
+      cardCovered,
+      answerId,
+    };
   }
   updateConversation(a: number, c: number, patch: Partial<PostFields>) {
     this.rows.set(`${a}:${c}`, { ...this.rows.get(`${a}:${c}`), ...patch });
@@ -98,6 +110,8 @@ type ThreadPatch = { archived: boolean; applied_tags?: string[]; name?: string }
  */
 export class FakeForum implements ForumClient {
   calls: Array<[string | undefined, WebhookMessage]> = [];
+  /** Message edits, as [messageId, payload]. */
+  edits: Array<[string, WebhookMessage]> = [];
   patches: Array<[string, ThreadPatch]> = [];
   deleted: string[] = [];
   archived = new Set<string>();
@@ -141,6 +155,14 @@ export class FakeForum implements ForumClient {
     else this.archived.delete(threadId);
   }
 
+  async editMessage(_forum: string, threadId: string, messageId: string, payload: WebhookMessage) {
+    // Like Discord, which refuses changes in an archived post.
+    if (this.archived.has(threadId)) throw new Error("Discord HTTP 400: Thread is archived");
+    if (this.deleted.includes(messageId)) return false;
+    this.edits.push([messageId, payload]);
+    return true;
+  }
+
   async deleteMessage(_forum: string, _threadId: string, messageId: string) {
     this.deleted.push(messageId);
   }
@@ -162,6 +184,11 @@ export class FakeForum implements ForumClient {
 
   contents(): string[] {
     return this.calls.map(([, payload]) => payload.content ?? "");
+  }
+
+  /** The messages posted, cards left out. */
+  messages(): Array<[string | undefined, WebhookMessage]> {
+    return this.calls.filter(([, payload]) => payload.content !== undefined);
   }
 }
 

@@ -90,6 +90,12 @@ class World {
           : json({ id, parent_id: FORUM });
       }),
       on("PATCH", /^discord\.com\/api\/v10\/channels\/\d+$/, () => json({})),
+      on("PATCH", /^discord\.com\/api\/v10\/webhooks\/1\/tok\/messages\/[^/]+$/, () => json({})),
+      on(
+        "DELETE",
+        /^discord\.com\/api\/v10\/webhooks\/1\/tok\/messages\/[^/]+$/,
+        () => new Response(null, { status: 204 }),
+      ),
       on("GET", /^discord\.com\/api\/v10\/users\/\d+$/, (request) => {
         const id = request.url.pathname.split("/").at(-1) ?? "";
         const user = this.discordUsers[id];
@@ -132,7 +138,19 @@ class World {
       .map((post) => String(post.body.content));
   }
 
+  /** The messages the webhook posted, cards left out. */
   posts(): Array<{ thread: string | null; body: Record<string, unknown> }> {
+    return this.webhookPosts().filter((post) => post.body.content !== undefined);
+  }
+
+  /** The cards the webhook posted. */
+  cards(): Array<Record<string, unknown>> {
+    return this.webhookPosts()
+      .filter((post) => post.body.content === undefined)
+      .map((post) => post.body);
+  }
+
+  private webhookPosts(): Array<{ thread: string | null; body: Record<string, unknown> }> {
     return this.sent("POST", "/webhooks/1/tok").map((request) => ({
       thread: request.url.searchParams.get("thread_id"),
       body: JSON.parse(request.body),

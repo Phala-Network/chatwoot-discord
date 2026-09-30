@@ -23,10 +23,11 @@ const MESSAGE_REQUESTS = 13;
 /**
  * After the messages: the notice that pings a new assignee and adding them to the post; linking
  * the post from its conversation (the forum's guild and the attribute update); and bringing the
- * post's tags, title, and archived flag up to date (the forum's tags, the update, the update
- * again with the tags looked up again, and archiving).
+ * post's tags, title, archived flag, and card up to date (the forum's tags, the update, the update
+ * again with the tags looked up again, editing or deleting the card, posting it again, and
+ * archiving).
  */
-export const FINISH_REQUESTS = 2 + 2 + 5;
+export const FINISH_REQUESTS = 2 + 2 + 7;
 
 /** What one message may need, with room left to finish the run afterwards. */
 export function requestsPerMessage(maxChunks: number): number {

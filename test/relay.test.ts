@@ -1,6 +1,8 @@
+import { ComponentType } from "discord-api-types/v10";
 import { beforeEach, describe, expect, it } from "vitest";
+import { ticketCard } from "../src/commands/components.ts";
 import { CONTENT_LIMIT } from "../src/relay/format.ts";
-import { Relay, type RelayOptions } from "../src/relay/relay.ts";
+import { Relay, type RelayOptions, type WebhookMessage } from "../src/relay/relay.ts";
 import type { LinkedAgent, RelayAssignee, RelayMessage } from "../src/relay/types.ts";
 import { FakeForum, FORUM, MemoryStore, message, TAGS, TRIAGE } from "./helpers.ts";
 
@@ -661,15 +663,6 @@ describe("Relay", () => {
     expect(replies[2]).toMatch(/^-# Message truncated/);
   });
 
-  it("puts the buttons on the part the triage bot is called on, not on the truncation note", async () => {
-    const buttons = { message: [{ type: 1, components: [] }], answer: () => [] };
-    ({ relay, forum } = relayWith({ triage, maxChunks: 2, buttons }));
-    await relay.relay(message({ content: `${"x".repeat(1900)}\n`.repeat(4) }));
-    const replies = forum.calls.slice(1).map(([, payload]) => payload);
-    expect(replies.map((reply) => reply.components !== undefined)).toEqual([false, true, false]);
-    expect(replies[1]?.content?.endsWith(`\n-# <@${TRIAGE}>`)).toBe(true);
-  });
-
   it("pings linked agents mentioned in a private note, where they are mentioned", async () => {
     const note = message({
       messageType: "outgoing",
@@ -715,5 +708,100 @@ describe("Relay", () => {
     adopted.store.updateConversation(3, 12, { threadId: "adopted-thread" });
     await adopted.relay.sync(3, renamed.conversation, "adopted-thread");
     expect(adopted.forum.patches).toEqual([["adopted-thread", tagsFor("open")]]);
+  });
+});
+
+describe("the card", () => {
+  /** The card's summary line, and its buttons' custom ids by row. */
+  const shown = (payload: WebhookMessage | undefined) => {
+    const container = payload?.components?.[0];
+    if (container?.type !== ComponentType.Container) return [];
+    return container.components.map((part) => {
+      if (part.type === ComponentType.TextDisplay) return part.content;
+      if (part.type !== ComponentType.ActionRow) return undefined;
+      return part.components.map((button) => ("custom_id" in button ? button.custom_id : undefined));
+    });
+  };
+
+  it("is the post's last message: posted after the run's messages, edited on a change, and moved down after new messages", async () => {
+    const { relay, forum, store } = relayWith({ card: ticketCard });
+    const conversation = message().conversation;
+    await relay.relay(message());
+    await relay.sync(3, conversation, "thread-1");
+    const [thread, card] = forum.calls.at(-1) ?? [];
+    expect(thread).toBe("thread-1");
+    expect(card).toMatchObject({ flags: 1 << 15, username: "Chatwoot", allowed_mentions: { parse: [] } });
+    expect(card).not.toHaveProperty("content");
+    expect(shown(card)).toEqual([
+      "🟢 **Open** · 👉 Unassigned",
+      ["ticket:reply"],
+      ["ticket:take", "ticket:assign"],
+      ["ticket:resolve", "ticket:snooze", "ticket:block", "ticket:manage"],
+    ]);
+    const cardId = store.conversation(3, 12)?.cardId;
+
+    // Nothing changed: nothing is sent.
+    const sent = forum.calls.length;
+    await relay.sync(3, conversation, "thread-1");
+    expect(forum.calls).toHaveLength(sent);
+    expect(forum.edits).toEqual([]);
+
+    // Snoozed and assigned: the card is edited in place.
+    const snoozed = { ...conversation, status: "snoozed", assignee: { id: 7, name: "Kim" }, labels: ["billing"] };
+    await relay.sync(3, snoozed, "thread-1");
+    expect(forum.calls).toHaveLength(sent);
+    expect(forum.edits.map(([id]) => id)).toEqual([cardId]);
+    expect(shown(forum.edits[0]?.[1])).toEqual([
+      "😴 **Snoozed** · 👉 **Kim** · 🏷️ billing",
+      ["ticket:reply"],
+      ["ticket:take", "ticket:assign"],
+      ["ticket:reopen", "ticket:resolve", "ticket:block", "ticket:manage"],
+    ]);
+
+    // A new message: the card moves below it.
+    await relay.relay(message({ id: 2, conversation: snoozed }));
+    await relay.sync(3, snoozed, "thread-1");
+    expect(forum.deleted).toEqual([cardId]);
+    expect(forum.calls.at(-1)?.[1].flags).toBe(1 << 15);
+    expect(store.conversation(3, 12)?.cardId).not.toBe(cardId);
+  });
+
+  it("offers the triage bot's draft under its answer, until the customer writes again", async () => {
+    const { relay, forum, store } = relayWith({ card: ticketCard });
+    const conversation = message().conversation;
+    await relay.relay(message());
+    await relay.sync(3, conversation, "thread-1");
+    const first = store.conversation(3, 12)?.cardId;
+
+    relay.answered(3, 12, "100000000000009100");
+    await relay.sync(3, conversation, "thread-1");
+    expect(forum.deleted).toEqual([first]);
+    expect(shown(forum.calls.at(-1)?.[1])[1]).toEqual(["ticket:draft:100000000000009100", "ticket:reply"]);
+
+    await relay.relay(message({ id: 2 }));
+    await relay.sync(3, conversation, "thread-1");
+    expect(shown(forum.calls.at(-1)?.[1])[1]).toEqual(["ticket:reply"]);
+  });
+
+  it("is posted again when someone deleted it, and changed in a resolved post before it is archived again", async () => {
+    const { relay, forum, store } = relayWith({ card: ticketCard });
+    const conversation = message().conversation;
+    await relay.relay(message());
+    await relay.sync(3, conversation, "thread-1");
+    const cardId = store.conversation(3, 12)?.cardId ?? "";
+    forum.deleted.push(cardId);
+
+    await relay.sync(3, { ...conversation, status: "resolved" }, "thread-1");
+    expect(shown(forum.calls.at(-1)?.[1])).toEqual([
+      "✅ **Resolved** · 👉 Unassigned",
+      ["ticket:reply"],
+      ["ticket:take", "ticket:assign"],
+      ["ticket:reopen", "ticket:block", "ticket:manage"],
+    ]);
+    expect(forum.archived.has("thread-1")).toBe(true);
+
+    await relay.sync(3, { ...conversation, status: "open" }, "thread-1");
+    expect(forum.edits).toHaveLength(1);
+    expect(forum.archived.has("thread-1")).toBe(false);
   });
 });
