@@ -24,7 +24,7 @@ export const PRIORITY_NAMES = { none: "None", urgent: "Urgent", high: "High", me
  * that do not depend on the agent's time zone. The others reopen at 9 AM in the browser's time
  * zone, which an interaction does not carry.
  */
-const SNOOZE_NAMES = { until_next_reply: "Until next reply", an_hour_from_now: "Until an hour from now" };
+export const SNOOZE_NAMES = { until_next_reply: "Until next reply", an_hour_from_now: "Until an hour from now" };
 
 const slash = ApplicationCommandType.ChatInput;
 

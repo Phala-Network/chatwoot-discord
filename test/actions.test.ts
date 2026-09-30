@@ -343,6 +343,74 @@ describe("executeCommand", () => {
       const missing = run({ type: "label", change: "remove", label: "vip" }, conversationLabels, setLabels);
       expect(await missing.result).toBe('❌ This conversation has no label "vip".');
     });
+
+    it("adds and removes several, keeping labels the change does not name", async () => {
+      const { result, requests } = run(
+        { type: "labels", add: ["vip"], remove: ["refund"] },
+        on("GET", `${conversation}/labels`, () => json({ payload: ["refund", "web3"] })),
+        accountLabels,
+        setLabels,
+      );
+      expect(await result).toBe("✅ Labels added vip; removed refund.");
+      expect(sent(requests)).toEqual([{ labels: ["web3", "vip"] }]);
+    });
+  });
+
+  describe("Manage panel", () => {
+    const state = on("GET", conversation, () =>
+      json({ id: 15, status: "open", priority: "high", labels: ["vip"], meta: { assignee: { id: 43 } } }),
+    );
+    const agents = on("GET", `${cw}/accounts/3/agents`, () =>
+      json([
+        { id: 42, name: "Alice Example" },
+        { id: 43, name: "Bob Example" },
+      ]),
+    );
+    const labels = on("GET", `${cw}/accounts/3/labels`, () =>
+      json({
+        payload: [
+          { id: 1, title: "vip" },
+          { id: 2, title: "refund" },
+        ],
+      }),
+    );
+    type Menu = { custom_id: string; options: Array<{ value: string; default: boolean }> };
+    const selected = (rows: unknown) =>
+      Object.fromEntries(
+        (rows as Array<{ components: Menu[] }>).map(({ components: [menu] }) => [
+          menu?.custom_id,
+          menu?.options.filter((option) => option.default).map((option) => option.value),
+        ]),
+      );
+
+    it("draws the ticket as it is: assignee, labels, priority, and status selected", async () => {
+      const { outcome } = run({ type: "panel" }, state, agents, labels);
+      const { content, components } = await outcome;
+      expect(content).toBe("⚙️ **Acme #15**");
+      expect(selected(components)).toEqual({
+        "panel:assignee": ["43"],
+        "panel:labels": ["vip"],
+        "panel:priority": ["high"],
+        "panel:status": ["open"],
+      });
+    });
+
+    it("draws it again after a change from the panel, with what was done", async () => {
+      const mock = mockFetch(profile, agents, ok("POST", `${conversation}/assignments`), state, labels);
+      const { content, components } = await executeCommand(
+        { ...job({ type: "assign", chatwootUserId: 43 }), panel: true },
+        settings,
+        (request) => fetch(request),
+      );
+      expect(content).toBe("⚙️ **Acme #15**\n✅ Assigned to Bob Example.");
+      expect(components).toHaveLength(4);
+      expect(mock.requests.some((request) => request.url.pathname.endsWith("/assignments"))).toBe(true);
+    });
+
+    it("keeps the panel's menus when the change fails", async () => {
+      const { outcome } = run({ type: "assign", chatwootUserId: 99 }, agents);
+      expect((await outcome).components).toBeUndefined();
+    });
   });
 
   it("maps Chatwoot permission errors to a clear message", async () => {
