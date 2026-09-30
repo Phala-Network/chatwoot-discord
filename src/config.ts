@@ -135,8 +135,13 @@ export const configSchema = z
             )
             .refine((owners) => Object.keys(owners).length > 0, "needs at least one owner"),
         ),
-        /** Values of the topic attribute (relay.topicAttribute) and what each covers. Unset: no topic. */
-        topics: z.record(z.string().min(1), z.string().min(1).max(1000)).optional(),
+        /** Topic labels (Chatwoot label names, lower case) and what each covers. Unset: no topic. */
+        topics: z
+          .record(
+            z.string().regex(/^[a-z0-9_-]{1,255}$/, "must be a Chatwoot label name (lower case)"),
+            z.string().min(1).max(1000),
+          )
+          .optional(),
       })
       .optional(),
     /**

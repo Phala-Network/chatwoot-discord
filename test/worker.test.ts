@@ -890,11 +890,12 @@ describe("worker", () => {
         return json({});
       }),
       on("POST", `${globex}/conversations/7/custom_attributes`, () => json({})),
+      on("POST", `${globex}/conversations/7/labels`, () => json({})),
       on("POST", "api.typesafe.ai/v1/systemone", () =>
         json({
           answers: {
             owner: { type: "choice", choice: "cloud", probabilities: { cloud: 0.9, unclear: 0.1 } },
-            topic: { type: "choice", choice: "Billing", probabilities: { Billing: 1 } },
+            topic: { type: "choice", choice: "billing", probabilities: { billing: 1 } },
           },
         }),
       ),
@@ -910,12 +911,9 @@ describe("worker", () => {
     expect(world.sent("POST", /\/accounts\/1\/conversations\/7\/assignments$/).map((r) => JSON.parse(r.body))).toEqual([
       { assignee_id: 6 },
     ]);
-    // The relay also writes its link attribute; routing writes only the topic.
-    const topics = world
-      .sent("POST", /\/accounts\/1\/conversations\/7\/custom_attributes$/)
-      .map((r) => JSON.parse(r.body))
-      .filter((body) => "topic" in body.custom_attributes);
-    expect(topics).toEqual([{ custom_attributes: { topic: "Billing" }, merge: true }]);
+    expect(world.sent("POST", /\/accounts\/1\/conversations\/7\/labels$/).map((r) => JSON.parse(r.body))).toEqual([
+      { labels: ["billing"] },
+    ]);
   });
 
   it("closes the post when a command finds its conversation deleted", async () => {

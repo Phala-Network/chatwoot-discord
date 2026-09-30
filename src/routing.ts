@@ -1,5 +1,5 @@
 // Routing: when `routing` is configured for an account, a new ticket gets its owner assigned and
-// its topic set by TypeSafe Jev (https://docs.typesafe.ai), a classifier that answers a multiple
+// its topic label added by TypeSafe Jev (https://docs.typesafe.ai), a classifier that answers a multiple
 // choice question with a probability per option.
 //
 // A ticket is routed when it is open, unassigned, and has a customer message. Jev sees the subject
@@ -9,7 +9,7 @@
 // message, until an owner is found or MAX_MESSAGES were seen; then the ticket stays for a person.
 // Jev's decision is recorded (without expiry) before it is applied, so a retry applies the same
 // decision without asking Jev again; it is applied to the conversation as it is after Jev answered,
-// so an assignee or topic someone set meanwhile is kept. A ticket someone assigned is never routed
+// so an assignee or topic label someone set meanwhile is kept. A ticket someone assigned is never routed
 // again, even if unassigned later.
 
 import { z } from "zod";
@@ -149,12 +149,16 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
   const assign = owner !== undefined && current.status === "open" && !current.assignee;
   if (assign) await chatwoot.assign(accountId, conversationId, owner.assignee);
 
-  const topicAttribute = settings.config.relay.topicAttribute;
+  // The topic is a label: added when Jev is confident and the ticket has no topic label yet.
+  const topics = Object.keys(routing.topics ?? {});
   const topic =
-    decision.topicConfidence >= routing.minConfidence && !current.customAttributes[topicAttribute]
+    decision.topic !== null &&
+    topics.includes(decision.topic) &&
+    decision.topicConfidence >= routing.minConfidence &&
+    !current.labels.some((label) => topics.includes(label))
       ? decision.topic
       : null;
-  if (topic !== null) await chatwoot.setCustomAttribute(accountId, conversationId, topicAttribute, topic);
+  if (topic !== null) await chatwoot.setLabels(accountId, conversationId, [...current.labels, topic]);
 
   const final = owner !== undefined || current.assignee != null || decision.messages >= MAX_MESSAGES;
   const state: RoutingState = final ? "done" : "waiting";

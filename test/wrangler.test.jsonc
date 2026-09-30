@@ -26,7 +26,7 @@
       "triage": { "userId": "100000000000000777", "draftLabels": ["Draft", "Brouillon"] },
       "routing": {
         "accounts": { "1": { "cloud": { "assignee": 6, "covers": "Cloud support." } } },
-        "topics": { "Billing": "Payments." }
+        "topics": { "billing": "Payments." }
       }
     }
   }
