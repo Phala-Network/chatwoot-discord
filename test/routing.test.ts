@@ -67,6 +67,7 @@ function world(
       return json({});
     }),
     on("POST", `${CW}/labels`, () => json({})),
+    on("POST", `${CW}/toggle_status`, () => json({})),
     on("POST", "api.typesafe.ai/v1/systemone", () => {
       whileJevAnswers?.();
       return json({
@@ -81,8 +82,8 @@ function world(
   return mock;
 }
 
-function context(store = new MapStore()) {
-  const settings = testSettings({ routing: ROUTING }, { TYPESAFE_API_KEY: "ts-key" });
+function context(store = new MapStore(), routing: object = ROUTING) {
+  const settings = testSettings({ routing }, { TYPESAFE_API_KEY: "ts-key" });
   const fetch = (request: Request) => globalThis.fetch(request);
   return { settings, store, chatwoot: chatwootClient(settings.config.chatwoot.baseUrl, "relay-token", fetch), fetch };
 }
@@ -169,6 +170,25 @@ describe("routeConversation", () => {
 
     expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
     expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
+  });
+
+  it("with snoozeUnclear, snoozes a ticket it cannot assign until the customer's next message, not after the last try", async () => {
+    const store = new MapStore();
+    const message = (id: number) => ({ id, content: `Message ${id}`, message_type: 0 });
+    const ticket: Ticket = { messages: [message(1)] };
+    const { requests } = world(ticket, { owner: ["unclear", 1], topic: ["billing", 0.5] });
+    const snoozing = { ...ROUTING, snoozeUnclear: true };
+
+    await routeConversation(context(store, snoozing), 1, 5);
+    ticket.messages = [message(1), message(2), message(3)];
+    await routeConversation(context(store, snoozing), 1, 5);
+
+    expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(2);
+    expect(sent(requests, "POST", `${CW}/toggle_status`).map((r) => JSON.parse(r.body))).toEqual([
+      { status: "snoozed" },
+    ]);
+    await routeConversation(context(new MapStore()), 1, 5);
+    expect(sent(requests, "POST", `${CW}/toggle_status`)).toHaveLength(1);
   });
 
   it("sends the first customer messages, however long the conversation", async () => {

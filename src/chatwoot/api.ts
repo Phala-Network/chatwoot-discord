@@ -239,7 +239,7 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
     async listConversations(
       accountId: number,
       page: number,
-      status: "all" | "open" = "all",
+      status: "all" | "open" | "snoozed" = "all",
     ): Promise<ChatwootConversation[]> {
       const list = await data(
         "list conversations",

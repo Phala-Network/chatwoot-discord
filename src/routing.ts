@@ -7,6 +7,8 @@
 // keys, phone numbers, IP addresses, handles, and the contact's name) removed. An owner below
 // `minConfidence`, or "unclear", is not assigned: Jev is asked again when the customer adds a
 // message, until an owner is found or MAX_MESSAGES were seen; then the ticket stays for a person.
+// With `snoozeUnclear`, such a ticket is snoozed until the customer's next message (which reopens
+// it), so it waits for more detail instead of escalating; once MAX_MESSAGES were seen it stays open.
 // Jev's decision is recorded (without expiry) before it is applied, so a retry applies the same
 // decision without asking Jev again; it is applied to the conversation as it is after Jev answered,
 // so an assignee or topic label someone set meanwhile is kept. A ticket someone assigned is never routed
@@ -164,6 +166,9 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
 
   const final = owner !== undefined || current.assignee != null || decision.messages >= MAX_MESSAGES;
   const state: RoutingState = final ? "done" : "waiting";
+  // Snoozed before the state is recorded, so a retry snoozes it again (a no-op when it is).
+  const snooze = state === "waiting" && routing.snoozeUnclear;
+  if (snooze) await chatwoot.setStatus(accountId, conversationId, { status: "snoozed" });
   store.set(key, JSON.stringify({ ...decision, state }));
   log.info("ticket routed", {
     accountId,
@@ -175,6 +180,7 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     messages: decision.messages,
     assigned: assign,
     topicSet: topic !== null,
+    snoozed: snooze,
     state,
   });
 }
