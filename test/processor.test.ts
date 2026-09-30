@@ -91,6 +91,7 @@ class World {
       }),
       on("PATCH", /^discord\.com\/api\/v10\/channels\/\d+$/, () => json({})),
       on("PATCH", /^discord\.com\/api\/v10\/webhooks\/1\/tok\/messages\/[^/]+$/, () => json({})),
+      on("GET", /^discord\.com\/api\/v10\/channels\/\d+\/messages$/, () => json([])),
       on(
         "DELETE",
         /^discord\.com\/api\/v10\/webhooks\/1\/tok\/messages\/[^/]+$/,
@@ -124,7 +125,7 @@ class World {
           this.failAnnouncements -= 1;
           return json({ message: "unavailable" }, { status: 503 });
         }
-        if (thread) return json({ id: `m-${this.requests.length}`, channel_id: thread });
+        if (thread) return json({ id: String(100000000000001000n + BigInt(this.requests.length)), channel_id: thread });
         this.threads += 1;
         return json({ id: "card", channel_id: `20000000000000000${this.threads}` });
       }),

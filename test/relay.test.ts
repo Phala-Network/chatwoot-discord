@@ -4,7 +4,7 @@ import { ticketCard } from "../src/commands/components.ts";
 import { CONTENT_LIMIT } from "../src/relay/format.ts";
 import { Relay, type RelayOptions, type WebhookMessage } from "../src/relay/relay.ts";
 import type { LinkedAgent, RelayAssignee, RelayMessage } from "../src/relay/types.ts";
-import { FakeForum, FORUM, MemoryStore, message, TAGS, TRIAGE } from "./helpers.ts";
+import { FakeForum, FORUM, MemoryStore, message, snowflake, TAGS, TRIAGE } from "./helpers.ts";
 
 function relayWith(options: Partial<RelayOptions> = {}, tags: Record<string, string> = TAGS) {
   const forum = options.forum instanceof FakeForum ? options.forum : new FakeForum();
@@ -234,10 +234,8 @@ describe("Relay", () => {
     };
     await relay.relay(message());
     expect(await tags({ id: 7, name: "Kingsley" })).toEqual(["t-acme", "t-open", "t-kingsley"]);
-    // Renamed in Chatwoot: the tag stays, so the post is not synced again.
-    const patches = forum.patches.length;
+    // Renamed in Chatwoot: the tag stays (the post is synced again for its card, which names them).
     expect(await tags({ id: 7, name: "Kingsley Don" })).toEqual(["t-acme", "t-open", "t-kingsley"]);
-    expect(forum.patches).toHaveLength(patches);
     // An agent who is not linked is tagged by id too; one without a tag in the forum gets none.
     expect(await tags({ id: 8, name: "Sam Lee" })).toEqual(["t-acme", "t-open", "t-sam"]);
     expect(await tags({ id: 10, name: "Lee" })).toEqual(["t-acme", "t-open"]);
@@ -773,10 +771,11 @@ describe("the card", () => {
     await relay.sync(3, conversation, "thread-1");
     const first = store.conversation(3, 12)?.cardId;
 
-    relay.answered(3, 12, "100000000000009100");
+    const answer = snowflake();
+    relay.answered(3, 12, answer);
     await relay.sync(3, conversation, "thread-1");
     expect(forum.deleted).toEqual([first]);
-    expect(shown(forum.calls.at(-1)?.[1])[1]).toEqual(["ticket:draft:100000000000009100", "ticket:reply"]);
+    expect(shown(forum.calls.at(-1)?.[1])[1]).toEqual([`ticket:draft:${answer}`, "ticket:reply"]);
 
     await relay.relay(message({ id: 2 }));
     await relay.sync(3, conversation, "thread-1");
@@ -803,5 +802,50 @@ describe("the card", () => {
     await relay.sync(3, { ...conversation, status: "open" }, "thread-1");
     expect(forum.edits).toHaveLength(1);
     expect(forum.archived.has("thread-1")).toBe(false);
+  });
+
+  it("posts one card after an answer to posting it was lost, deleting the one Discord kept", async () => {
+    const { relay, forum, store } = relayWith({ card: ticketCard });
+    const conversation = message().conversation;
+    await relay.relay(message());
+    forum.loseAnswer = true;
+    await expect(relay.sync(3, conversation, "thread-1")).rejects.toThrow();
+    await relay.sync(3, conversation, "thread-1");
+    const live = await forum.cards(FORUM, "thread-1");
+    expect(live).toEqual([store.conversation(3, 12)?.cardId]);
+  });
+
+  it("archives a resolved post again when that failed after its card moved", async () => {
+    const { relay, forum } = relayWith({ card: ticketCard });
+    const conversation = { ...message().conversation, status: "resolved" };
+    await relay.relay(message({ conversation }));
+    await relay.sync(3, conversation, "thread-1");
+    expect(forum.archived.has("thread-1")).toBe(true);
+
+    relay.answered(3, 12, snowflake());
+    forum.failArchive = true;
+    await expect(relay.sync(3, conversation, "thread-1")).rejects.toThrow();
+    expect(forum.archived.has("thread-1")).toBe(false);
+    await relay.sync(3, conversation, "thread-1");
+    expect(forum.archived.has("thread-1")).toBe(true);
+  });
+
+  it("offers only the latest draft that answers the customer's latest message, however late receipts come", async () => {
+    const { relay, forum } = relayWith({ card: ticketCard });
+    const conversation = message().conversation;
+    const draftOffered = () => shown(forum.calls.at(-1)?.[1])[1]?.[0];
+    await relay.relay(message());
+    const older = snowflake();
+    const newer = snowflake();
+    relay.answered(3, 12, newer);
+    relay.answered(3, 12, older); // out of order: ignored
+    await relay.sync(3, conversation, "thread-1");
+    expect(draftOffered()).toBe(`ticket:draft:${newer}`);
+
+    // The customer answers a form: the draft is behind them, and a late receipt does not bring it back.
+    await relay.postResponse(3, conversation, "• Rating: 5");
+    relay.answered(3, 12, newer);
+    await relay.sync(3, conversation, "thread-1");
+    expect(draftOffered()).toBe("ticket:reply");
   });
 });

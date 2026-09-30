@@ -12,12 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **One card per post, at its bottom, showing the ticket as it is.** Instead of buttons under
   every message, a post ends with the ticket's card, coloured by its status: a line with the
   status, the assignee, and the labels, and the buttons, which follow the ticket: **Assign to…**
-  is named after the assignee, and **Resolve** / **Snooze** give way to **Reopen** when the
-  ticket is snoozed or resolved. The card is edited when the ticket changes and moves to the
-  bottom when messages come in. After a triage bot's answer with a draft, it moves under the
-  answer and is led by **Use draft** until the customer writes again. The sweep gives posts from
-  before cards theirs while their ticket is not resolved; buttons under older messages keep
-  working.
+  is named after the assignee, and **Reopen** replaces **Snooze** while the ticket is snoozed and
+  both **Resolve** and **Snooze** once it is resolved. The card is edited when the ticket changes
+  and moves to the bottom when the relay posts messages. After a triage bot's answer with a
+  draft, it moves under the answer and is led by **Use draft** until the customer writes again;
+  a receipt for an earlier answer changes nothing. A card whose posting may have succeeded
+  unseen is looked for before another is posted, so a post keeps one. The sweep gives posts from
+  before cards theirs, a few at a time, while their ticket is not resolved; buttons under older
+  messages keep working.
 - The post's opening message is called the ticket header in the documentation.
 - Webhook messages are sent with `with_components=true`, as Discord documents for components.
 

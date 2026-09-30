@@ -29,6 +29,7 @@ import { errorFields, log } from "./log.ts";
 import { postQueue } from "./queue.ts";
 import { queueBudget } from "./queue-limits.ts";
 import { latestMessageId, type ProcessorContext, processConversation, relayFor } from "./relay/processor.ts";
+import { CARD_UNKNOWN } from "./relay/relay.ts";
 import { processMessageUpdate } from "./relay/updates.ts";
 import { awaitsRouting, routeConversation, routesAccount } from "./routing.ts";
 import { type Job, Store } from "./store.ts";
@@ -69,6 +70,9 @@ const ROUTE_BUDGET = 14;
 const SWEEP_PAGES = 10;
 /** A sweep pass left unfinished this long (e.g. its account was removed) is started over. */
 const SWEEP_PASS_TTL_MS = 24 * 60 * 60 * 1000;
+/** Posts without a card a sweep queues at most, and how long before one is queued again. */
+const CARD_BACKFILL_PER_SWEEP = 10;
+const CARD_BACKFILL_RETRY_MS = 24 * 60 * 60 * 1000;
 const sweepPassSchema = z.object({ cutoff: z.number(), page: z.number().int().positive(), startedAt: z.number() });
 /**
  * The longest wait between retries of a failing job. A job is never dropped: its log turns from
@@ -294,7 +298,7 @@ export class Hub extends DurableObject<Env> {
    * pages per run, continuing where it stopped until it is done. Activity means a new message
    * (Chatwoot's `last_activity_at`); a change that creates none, such as only a custom
    * attribute, relies on its webhook. It also queues routing for open, unassigned conversations
-   * of a routed account that are not routed yet.
+   * of a routed account that are not routed yet, and posts still without a card (backfillCards).
    */
   private async sweep(accountId: number, { settings, chatwoot, relay }: ProcessorContext): Promise<void> {
     const lastKey = `sweep:${accountId}:last`;
@@ -327,17 +331,19 @@ export class Hub extends DurableObject<Env> {
         const needsCursor = row?.threadId !== undefined && row.cursor === undefined;
         const cursor = row?.cursor ?? settings.config.relay.startAfterMessageId;
         const behind = needsCursor || (latest !== undefined && latest > cursor);
-        // A post without a card (e.g. from before cards) gets one while its ticket is not resolved.
+        // A card still to be moved or posted counts too (its sync may have failed).
         const stale =
           row?.threadId !== undefined &&
           (row.state !== relay.stateOf(toRelayConversation(conversationId, conversation)) ||
-            (!row.cardId && conversation.status !== "resolved"));
+            row.cardCovered === 1 ||
+            row.cardId === CARD_UNKNOWN);
         if (behind || stale) {
           this.enqueue({ type: "conversation", accountId, conversationId });
           queued += 1;
         }
       }
     }
+    queued += this.backfillCards(accountId);
     if (reachedCutoff) {
       // The next pass covers everything active since this one started, so activity while it ran
       // (which reorders the list) is read again.
@@ -349,6 +355,23 @@ export class Hub extends DurableObject<Env> {
       this.enqueue({ type: "sweep", accountId }); // Continues in the next run.
       log.info("sweep continues", { accountId, nextPage: page, seen, queued });
     }
+  }
+
+  /**
+   * Queues a few of the account's posts without a card (from before cards) whose ticket is not
+   * resolved, however long ago their last activity, each at most once a day. Returns how many.
+   */
+  private backfillCards(accountId: number): number {
+    let queued = 0;
+    for (const conversationId of this.store.postsWithoutCard(accountId)) {
+      if (queued >= CARD_BACKFILL_PER_SWEEP) break;
+      const key = `card-backfill:${accountId}:${conversationId}`;
+      if (this.store.get(key) !== undefined) continue;
+      this.store.set(key, "1", CARD_BACKFILL_RETRY_MS);
+      this.enqueue({ type: "conversation", accountId, conversationId });
+      queued += 1;
+    }
+    return queued;
   }
 
   private sweepPass(key: string): z.infer<typeof sweepPassSchema> | undefined {

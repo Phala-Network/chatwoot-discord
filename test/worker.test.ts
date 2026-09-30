@@ -27,6 +27,8 @@ function nextThreadId(): string {
 interface FakeConversation {
   id: number;
   status: string;
+  /** Unix seconds; default: now. */
+  lastActivityAt?: number;
   custom_attributes: Record<string, unknown>;
   messages: Array<{
     id: number;
@@ -95,7 +97,7 @@ class World {
       custom_attributes: conversation.custom_attributes,
       meta: { sender: { name: "Jane Doe", email: "jane@example.com" }, channel: "Channel::WebWidget" },
       messages: conversation.messages.slice(-1).map(({ id }) => ({ id })),
-      last_activity_at: Math.floor(Date.now() / 1000),
+      last_activity_at: conversation.lastActivityAt ?? Math.floor(Date.now() / 1000),
     };
   }
 
@@ -174,6 +176,7 @@ class World {
         () => new Response(null, { status: 204 }),
       ),
       on("PATCH", /^discord\.com\/api\/v10\/webhooks\/1\/tok\/messages\/[\w-]+$/, () => json({})),
+      on("GET", /^discord\.com\/api\/v10\/channels\/\d+\/messages$/, () => json([])),
       on("POST", "discord.com/api/v10/webhooks/1/tok", (request) => {
         const thread = request.url.searchParams.get("thread_id");
         if (thread) {
@@ -186,7 +189,7 @@ class World {
             return json({ message: "Internal Server Error" }, { status: 500 });
           }
           this.replies += 1;
-          return json({ id: `m-${this.replies}`, channel_id: thread });
+          return json({ id: String(100000000000001000n + BigInt(this.replies)), channel_id: thread });
         }
         const id = nextThreadId();
         this.threads.set(id, FORUM);
@@ -569,6 +572,11 @@ describe("worker", () => {
     await chatwootWebhook(created(14));
     await drain();
     expect(world.webhookPosts().map((post) => post.thread)).toEqual([thread]);
+    // The adopted post may hold a card from before: it is looked for before one is posted.
+    expect(world.sent("GET", new RegExp(`^/api/v10/channels/${thread}/messages$`))).toHaveLength(1);
+    // Posted on adoption, then moved under the new message.
+    expect(world.cards().map((card) => card.thread)).toEqual([thread, thread]);
+    expect(world.sent("DELETE", /^\/api\/v10\/webhooks\/1\/tok\/messages\//)).toHaveLength(1);
   });
 
   it("opens a new post when the linked thread no longer exists", async () => {
@@ -661,7 +669,7 @@ describe("worker", () => {
     });
     await drain();
     const deletes = world.sent("DELETE", /^\/api\/v10\/webhooks\/1\/tok\/messages\//);
-    expect(deletes.map((request) => request.url.pathname.split("/").at(-1))).toEqual(["m-2"]);
+    expect(deletes.map((request) => request.url.pathname.split("/").at(-1))).toEqual(["100000000000001002"]);
     expect(deletes[0]?.url.searchParams.get("thread_id")).toBe(world.webhookPosts()[1]?.thread);
   });
 
@@ -993,13 +1001,37 @@ describe("worker", () => {
     expect(reads()).toBe(before + 1);
     expect(world.cards()).toHaveLength(cards + 1);
 
+    // A card left covered (its move failed) is moved.
+    await runInDurableObject(hub(), (_instance, state) => {
+      state.storage.sql.exec("UPDATE conversations SET card_covered = 1 WHERE conversation_id = 32");
+    });
+    await sweep();
+    expect(reads()).toBe(before + 2);
+    expect(world.cards()).toHaveLength(cards + 2);
+
     const conversation = world.conversations.get(32);
     if (conversation) conversation.status = "resolved"; // missed webhook
     await sweep();
-    expect(reads()).toBe(before + 2);
+    expect(reads()).toBe(before + 3);
     expect(JSON.parse(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).at(-1)?.body ?? "")).toEqual({
       archived: true,
     });
+  });
+
+  it("gives a post from before cards its card, however long ago its ticket was active", async () => {
+    world.conversation(34, [{ id: 3401, content: "hello", message_type: 0 }]);
+    await chatwootWebhook(created(34));
+    await drain();
+    const quiet = world.conversations.get(34);
+    if (quiet) quiet.lastActivityAt = Math.floor(Date.now() / 1000) - 7 * 24 * 3600;
+    await runInDurableObject(hub(), (_instance, state) => {
+      state.storage.sql.exec("UPDATE conversations SET card_id = NULL WHERE conversation_id = 34");
+    });
+    const cards = world.cards().length;
+    await sweep();
+    expect(world.cards()).toHaveLength(cards + 1);
+    await sweep();
+    expect(world.cards()).toHaveLength(cards + 1);
   });
 
   it("a sweep longer than a run's page limit continues where it stopped, down to its window's start", async () => {

@@ -52,6 +52,9 @@ export const NONE = ":none";
 const MAX_OPTIONS = 25;
 const MAX_OPTION_TEXT = 100;
 const MAX_BUTTON_TEXT = 80;
+/** What a card's summary shows at most: the labels, and the characters of a name or label. */
+const CARD_LABELS = 5;
+const CARD_TEXT = 60;
 
 type Style = ButtonStyle.Primary | ButtonStyle.Secondary | ButtonStyle.Danger;
 
@@ -68,6 +71,12 @@ function button(
     ...(emoji ? { emoji: { name: emoji } } : {}),
     style,
   };
+}
+
+/** `text` cut to `max` characters, with an ellipsis when cut. */
+function clip(text: string, max: number): string {
+  const characters = Array.from(text);
+  return characters.length > max ? `${characters.slice(0, max - 1).join("")}…` : text;
 }
 
 function row(components: APIComponentInMessageActionRow[]): ActionRow {
@@ -117,10 +126,12 @@ const STATUS_NAMES: Record<string, string> = {
  */
 export function ticketCard(ticket: CardTicket, answerId?: string): APIMessageTopLevelComponent[] {
   const assignee = ticket.assignee === null ? undefined : defused(ticket.assignee);
+  const more = ticket.labels.length - CARD_LABELS;
   const summary = [
-    STATUS_NAMES[ticket.status] ?? `**${ticket.status}**`,
-    `👉 ${assignee ? `**${assignee}**` : "Unassigned"}`,
-    ...ticket.labels.map((label) => `🏷️ ${label}`),
+    STATUS_NAMES[ticket.status] ?? `**${clip(ticket.status, CARD_TEXT)}**`,
+    `👉 ${assignee ? `**${clip(assignee, CARD_TEXT)}**` : "Unassigned"}`,
+    ...ticket.labels.slice(0, CARD_LABELS).map((label) => `🏷️ ${clip(label, CARD_TEXT)}`),
+    ...(more > 0 ? [`+${more}`] : []),
   ].join(" · ");
   const reopen = button(BUTTONS.reopen, "Reopen", "↩️");
   const resolve = button(BUTTONS.resolve, "Resolve", "✅");
@@ -146,11 +157,7 @@ export function ticketCard(ticket: CardTicket, answerId?: string): APIMessageTop
         ),
         row([
           button(BUTTONS.take, "Take", "🙋"),
-          button(
-            BUTTONS.assign,
-            assignee ? Array.from(assignee).slice(0, MAX_BUTTON_TEXT).join("") : "Assign to…",
-            "👉",
-          ),
+          button(BUTTONS.assign, assignee ? clip(assignee, MAX_BUTTON_TEXT) : "Assign to…", "👉"),
         ]),
         row([...state, button(BUTTONS.block, "Block", "🚫"), button(BUTTONS.manage, "Manage", "⚙️")]),
       ],

@@ -38,6 +38,14 @@ export function message(overrides: Overrides = {}): RelayMessage {
   };
 }
 
+let lastSnowflake = 100000000000100000n;
+
+/** A new Discord id, greater than every one before it, as Discord's grow with time. */
+export function snowflake(): string {
+  lastSnowflake += 1n;
+  return String(lastSnowflake);
+}
+
 export class MemoryStore implements RelayStore {
   rows = new Map<string, Partial<PostFields>>();
   parts = new Map<string, string[]>();
@@ -48,7 +56,7 @@ export class MemoryStore implements RelayStore {
     const row = this.rows.get(`${a}:${c}`);
     if (!row) return undefined;
     const { threadId, state, announcedAssignee, announcePending, titleSubject, title, titleMessageId } = row;
-    const { cardId, cardCovered, answerId } = row;
+    const { cardId, cardCovered, answerId, customerMessageId } = row;
     return {
       threadId,
       state,
@@ -60,6 +68,7 @@ export class MemoryStore implements RelayStore {
       cardId,
       cardCovered,
       answerId,
+      customerMessageId,
     };
   }
   updateConversation(a: number, c: number, patch: Partial<PostFields>) {
@@ -105,11 +114,13 @@ type ThreadPatch = { archived: boolean; applied_tags?: string[]; name?: string }
 
 /**
  * Records webhook executions like Discord would: a new post gets channel id "thread-<n>" and
- * every message id "message-<n>". Like Discord, posting into an archived post unarchives it, and
+ * every message a new Discord id (see snowflake). Like Discord, posting into an archived post unarchives it, and
  * an archived post's tags cannot change unless the same update unarchives it.
  */
 export class FakeForum implements ForumClient {
   calls: Array<[string | undefined, WebhookMessage]> = [];
+  /** The id of each call's message. */
+  ids: string[] = [];
   /** Message edits, as [messageId, payload]. */
   edits: Array<[string, WebhookMessage]> = [];
   patches: Array<[string, ThreadPatch]> = [];
@@ -121,6 +132,10 @@ export class FakeForum implements ForumClient {
   failThreadWith: "gone" | "error" | undefined;
   /** Fails the next execution into a thread after this many succeed. */
   failAfter: number | undefined;
+  /** Posts the next message into a thread but loses Discord's answer. */
+  loseAnswer = false;
+  /** Fails the next request that archives a post. */
+  failArchive = false;
 
   constructor(public guildId = "100000000000000044") {}
 
@@ -139,13 +154,23 @@ export class FakeForum implements ForumClient {
     }
     this.calls.push([threadId, payload]);
     if (threadId) this.archived.delete(threadId);
-    return { channelId: threadId ?? `thread-${this.calls.length}`, messageId: `message-${this.calls.length}` };
+    const messageId = snowflake();
+    this.ids.push(messageId);
+    if (threadId && this.loseAnswer) {
+      this.loseAnswer = false;
+      throw new Error("Discord's answer was lost");
+    }
+    return { channelId: threadId ?? `thread-${this.calls.length}`, messageId };
   }
 
   async updateThread(_forum: string, threadId: string, patch: ThreadPatch) {
     if (this.failThreadWith === "gone") {
       this.failThreadWith = undefined;
       throw new UnknownThreadError(threadId);
+    }
+    if (patch.archived && this.failArchive) {
+      this.failArchive = false;
+      throw new Error("Discord HTTP 500");
     }
     if (this.archived.has(threadId) && patch.archived !== false) {
       throw new Error("Discord HTTP 400: Thread is archived");
@@ -161,6 +186,13 @@ export class FakeForum implements ForumClient {
     if (this.deleted.includes(messageId)) return false;
     this.edits.push([messageId, payload]);
     return true;
+  }
+
+  async cards(_forum: string, threadId: string) {
+    return this.calls.flatMap(([thread, payload], index) => {
+      const id = this.ids[index] ?? "";
+      return thread === threadId && payload.flags === 1 << 15 && !this.deleted.includes(id) ? [id] : [];
+    });
   }
 
   async deleteMessage(_forum: string, _threadId: string, messageId: string) {

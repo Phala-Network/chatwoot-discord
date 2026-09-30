@@ -2,8 +2,11 @@
 // name, and its guild (for post links).
 
 import {
+  MessageFlags,
   type RESTDeleteAPIWebhookWithTokenMessageQuery,
   type RESTDeleteAPIWebhookWithTokenMessageResult,
+  type RESTGetAPIChannelMessagesQuery,
+  type RESTGetAPIChannelMessagesResult,
   type RESTGetAPIChannelResult,
   type RESTGetAPIChannelWebhooksResult,
   type RESTGetCurrentApplicationResult,
@@ -30,6 +33,8 @@ const UNKNOWN_WEBHOOK = 10015;
 const UNKNOWN_MESSAGE = 10008;
 const UNKNOWN_TAG = 10087;
 const APPLICATION_KEY = "discord:application";
+/** How many of a post's latest messages are searched for its cards: a card is at or near the bottom. */
+const CARD_SEARCH = 50;
 
 export interface Cache {
   get(key: string): string | undefined;
@@ -120,6 +125,25 @@ export class DiscordForum implements ForumClient {
         if (error.code === UNKNOWN_WEBHOOK) this.cache.delete(webhookKey(forumChannelId));
         else throw new UnknownThreadError(threadId);
       }
+      throw error;
+    }
+  }
+
+  async cards(forumChannelId: string, threadId: string): Promise<string[]> {
+    const webhook = await this.webhook(forumChannelId);
+    try {
+      // A message's author and flags are given without the Message Content intent.
+      const messages = await this.rest.get<RESTGetAPIChannelMessagesResult, RESTGetAPIChannelMessagesQuery>(
+        Routes.channelMessages(threadId),
+        { query: { limit: CARD_SEARCH } },
+      );
+      return messages
+        .filter(
+          (message) => message.webhook_id === webhook.id && ((message.flags ?? 0) & MessageFlags.IsComponentsV2) !== 0,
+        )
+        .map((message) => message.id);
+    } catch (error) {
+      if (error instanceof DiscordHttpError && error.status === 404) throw new UnknownThreadError(threadId);
       throw error;
     }
   }

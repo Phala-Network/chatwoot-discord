@@ -24,7 +24,7 @@ const CHANNEL_LABELS: Record<string, string> = {
   "Channel::Whatsapp": "WhatsApp",
 };
 
-/** Channels that reach the contact by phone number, which the ticket card then shows. */
+/** Channels that reach the contact by phone number, which the ticket header then shows. */
 const PHONE_CHANNELS: ReadonlySet<string> = new Set(["Channel::Sms", "Channel::TwilioSms", "Channel::Whatsapp"]);
 
 /** The value when it has visible content, otherwise undefined. */

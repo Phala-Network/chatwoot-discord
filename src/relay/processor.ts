@@ -235,7 +235,7 @@ export function latestMessageId(conversation: ChatwootConversation): number | un
   return ids.length === 0 ? undefined : Math.max(...ids);
 }
 
-/** The inbox name for a new post's ticket card; omitted when Chatwoot will not say. */
+/** The inbox name for a new post's ticket header; omitted when Chatwoot will not say. */
 async function cachedInboxName(
   { store, chatwoot }: ProcessorContext,
   accountId: number,

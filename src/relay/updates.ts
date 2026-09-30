@@ -34,9 +34,10 @@ export async function processMessageUpdate(
   const raw = await chatwoot.getConversation(accountId, conversationId);
   if (!raw) return; // Deleted: the conversation's own job closes the post.
   const conversation = toRelayConversation(conversationId, raw);
-  // Posting unarchives the post: bring its archived flag back.
-  if (await relayDerived(context, accountId, conversation, message))
-    await relay.sync(accountId, conversation, threadId);
+  await relayDerived(context, accountId, conversation, message);
+  // Posting unarchives the post and covers its card: bring both back, also when a retry finds
+  // the post already made (sync does nothing when nothing is due).
+  await relay.sync(accountId, conversation, threadId);
 }
 
 /**
@@ -44,23 +45,23 @@ export async function processMessageUpdate(
  * name) or a notice that it could not be delivered. Chatwoot lets a customer submit again (a
  * CSAT rating can be changed for 14 days), and only changed text is posted again. A blocked
  * contact's response is not posted, like their messages. Each post is recorded, so it is removed
- * with the message. Returns whether it posted.
+ * with the message.
  */
 export async function relayDerived(
   { store, relay }: ProcessorContext,
   accountId: number,
   conversation: RelayConversation,
   message: ChatwootMessage,
-): Promise<boolean> {
+): Promise<void> {
   const derived = derivedText(message);
-  if (!derived || (derived.kind === "response" && conversation.contact.blocked)) return false;
+  if (!derived || (derived.kind === "response" && conversation.contact.blocked)) return;
   const digest = await sha256(derived.text);
-  if (store.postedResponse(accountId, conversation.id, message.id) === digest) return false;
+  if (store.postedResponse(accountId, conversation.id, message.id) === digest) return;
   const discordId =
     derived.kind === "response"
       ? await relay.postResponse(accountId, conversation, derived.text)
       : await relay.notify(accountId, conversation, derived.text);
-  if (discordId === undefined) return false;
+  if (discordId === undefined) return;
   store.savePostedResponse(accountId, conversation.id, message.id, digest);
   store.saveDerivedMessage(accountId, conversation.id, message.id, discordId);
   log.info(derived.kind === "response" ? "response posted" : "delivery failure posted", {
@@ -68,7 +69,6 @@ export async function relayDerived(
     conversationId: conversation.id,
     messageId: message.id,
   });
-  return true;
 }
 
 function derivedText(message: ChatwootMessage): { kind: "response" | "notice"; text: string } | undefined {

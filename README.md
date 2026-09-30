@@ -209,10 +209,11 @@ Used inside a ticket post, by Discord users linked in `agents[]` who have a toke
 - Every post ends with the ticket's card, coloured by its status: a line with the status, the
   assignee, and the labels, then a row of buttons per concern. Answering: **Reply**. Who owns the
   ticket: **Take**, and **Assign to…**, named after the assignee once there is one. Its state:
-  **Resolve** and **Snooze** (until the next reply), or **Reopen** when it is snoozed or
-  resolved, then **Block** and **Manage**. The card is edited when the ticket changes, and moves
-  to the bottom (posted again, the previous one deleted) when messages come in, so a post has one
-  card, always under its latest message.
+  **Resolve** and **Snooze** (until the next reply) while it is open; **Reopen** and **Resolve**
+  while it is snoozed; **Reopen** once it is resolved; then **Block** and **Manage**. The card is
+  edited when the ticket changes, and moves to the bottom (posted again, the previous one deleted)
+  when the relay posts messages or the triage bot reports an answer, so a post has one card,
+  under the latest of those (a message posted in Discord by anyone else does not move it).
 - After a triage bot's answer with a draft, reported by the bot's hook (see
   [Triage bot hook](#triage-bot-hook)), the card moves under the answer and is led by
   **Use draft** (highlighted), until the customer writes again. **Use draft** opens the `/reply`
@@ -351,7 +352,7 @@ replace:
 | `relay.linkAttribute` | string | `discord_thread` | Conversation custom attribute that receives the post URL (`""` disables it). |
 | `relay.startAfterMessageId` | integer ≥ 0 | `0` | Messages with an id at or below this are never relayed (cutover watermark). |
 | `relay.maxAttempts` | integer ≥ 1 | `5` | Attempts before a message Discord refuses as invalid is skipped with a notice. |
-| `relay.subrequestBudget` | integer 20–1000, and ≥ `relay.maxChunks` + 26 | `45` | Outbound requests per alarm invocation (Free plan limit: 50). The minimum fits a run's setup and one message's worst case (`src/relay/limits.ts`). |
+| `relay.subrequestBudget` | integer 20–1000, and ≥ `relay.maxChunks` + 28 | `45` | Outbound requests per alarm invocation (Free plan limit: 50). The minimum fits a run's setup and one message's worst case (`src/relay/limits.ts`). |
 | `avatars.chatwoot` | https URL | `<publicUrl>/favicon-512x512.png` | Avatar of activity lines, cards, notices, agent bots, and agents with neither a linked Discord user nor an https Chatwoot avatar. |
 | `avatars.contact` | https URL | Gravatar "mystery person" | Avatar of customers without an https avatar in Chatwoot. |
 | `queue` | object | unset | The hourly [support queue](#support-queue). Unset: off. Requires `relay.subrequestBudget` ≥ 5 × accounts + 4. |
@@ -455,7 +456,7 @@ came in between). The hook is a convenience: if a call is lost, the card offers 
 | Free plan limit | How this service stays within it |
 |---|---|
 | 10 ms CPU per Worker request | The Worker verifies a signature, parses JSON, and makes one Durable Object call. Bodies over 2 MB are rejected; a very large webhook that fails is relayed by the next sweep. |
-| 50 subrequests per invocation | Alarms count requests against `relay.subrequestBudget` and yield to a fresh invocation before it runs out. A conversation run needs 4 requests to set up; it starts a message only while `relay.maxChunks` + 22 requests remain (its parts, 13 for everything else a message may need, and 9 to finish the run), so the budget must be at least `relay.maxChunks` + 26 (`src/relay/limits.ts`). A command starts only with 20 left, a sweep with 10. |
+| 50 subrequests per invocation | Alarms count requests against `relay.subrequestBudget` and yield to a fresh invocation before it runs out. A conversation run needs 4 requests to set up; it starts a message only while `relay.maxChunks` + 24 requests remain (its parts, 13 for everything else a message may need, and 11 to finish the run), so the budget must be at least `relay.maxChunks` + 28 (`src/relay/limits.ts`). A command starts only with 20 left, a sweep with 10. |
 | 128 MB memory | Attachments are capped at 25 MB each / 50 MB per command. |
 | 100,000 Worker requests/day | See the estimate below. |
 | Durable Objects (SQLite): 100,000 requests/day, 100,000 rows written/day | See the estimate below. |
