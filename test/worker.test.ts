@@ -465,6 +465,24 @@ describe("worker", () => {
     };
     expect(modal.type).toBe(9);
     expect(modal.data.components[0]?.component.value).toBe(answer.draft);
+
+    // An answer whose draft is not kept, and that Discord will not give back: it is linked instead.
+    const other = "100000000000009102";
+    const unread = await discordInteraction({
+      id: "900212",
+      application_id: "100000000000000001",
+      token: "interaction-token",
+      type: 3,
+      guild_id: GUILD,
+      channel_id: thread,
+      channel: { id: thread, type: 11 },
+      member: { user: { id: ALICE } },
+      message: { id: "100000000000009103", components: [] },
+      data: { custom_id: `ticket:draft:${other}`, component_type: 2 },
+    });
+    const link = (await unread.json()) as { type: number; data: { content: string; flags: number } };
+    expect(link.type).toBe(4);
+    expect(link.data.content).toContain(`(https://discord.com/channels/${GUILD}/${thread}/${other})`);
   });
 
   it("retries a failed message with backoff without skipping it", async () => {

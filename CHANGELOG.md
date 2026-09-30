@@ -18,8 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that answer, at once and once per answer. **Use draft** takes the draft the hook sent, else reads the answer
   (Message Content intent), else links to it for **Reply with this**.
 - Routing does not snooze a ticket the customer has written to since the messages Jev was given,
-  asks Jev again instead of applying a decision made before them, and lifts its own snooze when
-  a customer message came just before it.
+  and asks Jev again instead of applying a decision made before them. It reads past pages of
+  notes and activity lines to find the customer's messages.
+- **Use draft** links to the answer when Discord cannot give it back in time, and the Manage
+  card keeps its label menu when the ticket's only label is too long for it.
 - The Manage card's menus keep the current assignee and label among their 25 choices, a label may
   be called `none`, and a current label too long for a menu is named in its placeholder.
 - A failed change from the Manage card shows in the card, which is a Components V2 message.

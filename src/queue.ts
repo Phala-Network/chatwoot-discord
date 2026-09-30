@@ -237,6 +237,8 @@ async function post(
         enforce_nonce: true,
         allowed_mentions: { parse: [], users: [...chunk.users].sort(), roles: chunk.role && roleId ? [roleId] : [] },
       },
+      // A rate limit goes back to the job, which waits and checks the queue's deadline first.
+      retry: false,
     },
   );
 }

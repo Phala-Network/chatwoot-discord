@@ -199,7 +199,7 @@ export function panel(
       components: [
         { type: ComponentType.TextDisplay, content: heading },
         menu(PANEL.assignee, "👤 Unassigned", agentOptions(agents, ticket.assigneeId)),
-        ...(labels.length > 1 ? [menu(PANEL.labels, labelPlaceholder, labels)] : []),
+        ...(labels.length > 1 || unlisted ? [menu(PANEL.labels, labelPlaceholder, labels)] : []),
         row(statuses),
       ],
     },

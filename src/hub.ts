@@ -60,11 +60,11 @@ const PRIORITY = {
 const COMMAND_BUDGET = 20;
 const MIN_BUDGET = 2;
 /**
- * Reading the conversation, whether the customer wrote since, and the messages; possibly reopening;
- * asking Jev; reading the conversation again; assigning; setting the topic; checking again before a
- * snooze; and the snooze.
+ * Reading the conversation; for a decision not applied yet, whether the customer wrote since (up
+ * to 3 pages); the messages; asking Jev; reading the conversation again; assigning; setting the
+ * topic; checking again before a snooze (up to 3 pages); and the snooze.
  */
-const ROUTE_BUDGET = 10;
+const ROUTE_BUDGET = 14;
 /** Pages of conversations (25 each by default) a sweep run reads; a longer pass continues in the next run. */
 const SWEEP_PAGES = 10;
 /** A sweep pass left unfinished this long (e.g. its account was removed) is started over. */
@@ -236,12 +236,17 @@ export class Hub extends DurableObject<Env> {
           this.store.completeJob(job);
           return "done";
         case "answer":
-          // At most once: Discord cannot tell a repeated post from a new one, and the button is a
-          // convenience (the ticket buttons under every message remain).
+          // At most once: Discord cannot tell a repeated post from a new one, and the buttons are a
+          // convenience (those under every message remain). Posting unarchives the post, so the
+          // ticket's state is applied again afterwards, whatever the post's outcome.
           this.store.deleteJob(job.key);
-          await services.relay.postAnswerButtons(payload.accountId, payload.conversationId, payload.answerId);
-          // Posting unarchived the post: apply the ticket's current state again.
           this.enqueue({ type: "conversation", accountId: payload.accountId, conversationId: payload.conversationId });
+          try {
+            await services.relay.postAnswerButtons(payload.accountId, payload.conversationId, payload.answerId);
+          } catch (error) {
+            if (error instanceof BudgetExhaustedError) throw error;
+            log.warn("answer buttons not posted", { answerId: payload.answerId, ...errorFields(error) });
+          }
           return "done";
         case "route":
           await routeConversation(

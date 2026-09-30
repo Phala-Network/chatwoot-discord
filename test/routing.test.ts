@@ -227,26 +227,23 @@ describe("routeConversation", () => {
     expect(sent(requests, "POST", `${CW}/toggle_status`)).toHaveLength(1);
   });
 
-  it("lifts its snooze when the customer wrote just before it, and asks Jev again", async () => {
+  it("sees a customer message behind more than a page of notes: does not snooze, and asks Jev again with it", async () => {
     const store = new MapStore();
     const message = (id: number) => ({ id, content: `Message ${id}`, message_type: 0 });
     const ticket: Ticket = { messages: [message(1)] };
     const snoozing = { ...ROUTING, snoozeUnclear: true };
-    const { requests } = world(ticket, { owner: ["unclear", 1], topic: ["billing", 0.5] });
+    const notes = Array.from({ length: 150 }, (_, i) => ({ id: i + 2, content: "note", message_type: 2 }));
+    const { requests } = world(ticket, { owner: ["unclear", 1], topic: ["billing", 0.5] }, 0, () => {
+      ticket.messages = [message(1), ...notes, message(200)];
+    });
 
     await routeConversation(context(store, snoozing), 1, 5);
-    // Message 2 came in just before the snooze, so Chatwoot did not reopen the ticket for it.
-    ticket.status = "snoozed";
-    ticket.messages = [message(1), message(2)];
-    await routeConversation(context(store, snoozing), 1, 5);
+    expect(sent(requests, "POST", `${CW}/toggle_status`)).toEqual([]);
 
-    expect(sent(requests, "POST", `${CW}/toggle_status`).map((r) => JSON.parse(r.body))).toEqual([
-      { status: "snoozed" },
-      { status: "open" },
-      { status: "snoozed" },
-    ]);
+    // Its run gives Jev that message too.
+    await routeConversation(context(store, snoozing), 1, 5);
     const asked = sent(requests, "POST", "api.typesafe.ai/v1/systemone").map((r) => JSON.parse(r.body).state.ticket);
-    expect(asked).toEqual(["Message 1", "Message 1 Message 2"]);
+    expect(asked).toEqual(["Message 1", "Message 1 Message 200"]);
   });
 
   it("asks Jev again instead of applying a decision made before the customer's newest message", async () => {

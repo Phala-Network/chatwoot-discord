@@ -221,7 +221,8 @@ Used inside a ticket post, by Discord users linked in `agents[]` who have a toke
   labels), and **Open**, **Resolve**, and **Snooze** (until the next reply) buttons with the
   current status highlighted. A change is made at once, and the card is drawn again with the
   result; a change someone else makes shows the next time it is drawn. A menu lists at most 25
-  choices (the current assignee and label always among them); assign others with `/assign`, and
+  choices (the current assignee and label among them; a label longer than a menu option can be
+  is named in the menu's placeholder instead); assign others with `/assign`, and
   set priority, "pending", and several labels with `/priority`, `/pending`, and `/label`.
 
 Posts created before the buttons were added have none; the commands work everywhere.
@@ -403,7 +404,10 @@ has no label yet (a ticket has one label, so one an automation rule set stays al
 is clear, Jev is asked again each time the customer adds a message, until one is or three customer
 messages were seen; the ticket then stays for a person. With `snoozeUnclear`, a ticket without a
 clear owner is snoozed until the customer's next message, which reopens it and asks Jev again, so it
-waits for detail instead of escalating; after the third message it stays open. A ticket assigned
+waits for detail instead of escalating; after the third message it stays open. A ticket the customer
+wrote to after the messages Jev was given is not snoozed (a message in the moment between that
+check and the snooze waits for the customer's next one; the support queue lists the ticket
+meanwhile). A ticket assigned
 before its turn (by a person or a Chatwoot automation rule) is left alone, and a routed ticket is
 never routed again, even if someone unassigns it. The decision is recorded, without expiry, before
 it is applied, so a retry applies the same one without asking Jev again. It is applied to the ticket
@@ -433,7 +437,9 @@ reply draft>"}`, signed like a Chatwoot webhook (`x-timestamp`, Unix seconds, an
 `sha256=` and the hex HMAC-SHA256 of `<timestamp>.<body>` with `TRIAGE_HOOK_SECRET`). The Worker
 keeps the draft for 14 days and posts the ticket buttons, led by **Use draft**, right under the
 answer, once per answer (a repeated call adds nothing). Report only answers that have a draft, and only after they
-were sent, so the buttons follow them.
+were sent, so the buttons follow them (right after the answer unless another message came in
+between). The hook is a convenience: if a call is lost, the answer has no buttons of its own, and
+the buttons under the customer's message and **Reply with this** still work.
 
 ## Limits and the Workers Free plan
 
@@ -491,7 +497,8 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
   support volumes are far below its throughput. Jobs run by priority (commands first), failures
   retry with exponential backoff (5 s … 30 min), and a run yields before the subrequest limit.
   A job that Discord rate limits waits as long as Discord asks, without counting an attempt.
-  A job is never dropped, with two exceptions: the support queue posts nothing after its first
+  A job is never dropped, with three exceptions: a command that could not start while Discord's
+  15-minute interaction window left time to report is answered that nothing was done, the support queue posts nothing after its first
   three minutes (Discord's nonce, which keeps a retried post from appearing twice, lasts only a
   few minutes; the next hour's queue lists the same tickets), and a triage answer's Use draft
   button is posted at most once. Otherwise, after a few failures a job's log turns into errors,

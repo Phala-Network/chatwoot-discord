@@ -187,13 +187,15 @@ export class Relay {
 
   /**
    * The triage bot's answer `answerId` has a draft: posts the ticket buttons, led by its Use draft,
-   * right under it (the bot's hook calls once the answer is in the post). Posting unarchived the post, so its state is
-   * marked out of date for the next sync. A post that no longer exists is left.
+   * right under it (the bot's hook calls once the answer is in the post). Posting unarchives the
+   * post, so its state is marked out of date first, for the next sync, however the post ends. A
+   * post that no longer exists is left.
    */
   async postAnswerButtons(accountId: number, conversationId: number, answerId: string): Promise<void> {
     const { store, forum, buttons } = this.options;
     const threadId = store.conversation(accountId, conversationId)?.threadId;
     if (!threadId || !buttons) return;
+    store.updateConversation(accountId, conversationId, { state: OUT_OF_DATE });
     try {
       await forum.execute(
         this.options.target(accountId).forumChannelId,
@@ -207,9 +209,7 @@ export class Relay {
       );
     } catch (error) {
       if (!(error instanceof UnknownThreadError)) throw error;
-      return;
     }
-    store.updateConversation(accountId, conversationId, { state: OUT_OF_DATE });
   }
 
   /**

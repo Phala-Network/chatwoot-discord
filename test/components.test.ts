@@ -42,7 +42,7 @@ describe("ticket menus", () => {
 
   it("name a current label too long for the menu instead of showing it as no label", () => {
     const long = "l".repeat(101);
-    const card = panel("### Acme #1", { assigneeId: null, labels: [long], status: "open" }, [], ["billing"]);
+    const card = panel("### Acme #1", { assigneeId: null, labels: [long], status: "open" }, [], []);
     const menu = panelSelect(card, "panel:labels");
     expect(menu?.placeholder).toMatch(/^🏷️ l+… \(\/label\)$/);
     expect(menu?.options.some((option) => option.default)).toBe(false);

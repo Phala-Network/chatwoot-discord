@@ -136,7 +136,10 @@ app.post("/discord/interactions", bodyLimit({ maxSize: 1024 * 1024 }), async (c)
         const rest = new DiscordRest(settings.secrets.DISCORD_BOT_TOKEN, (request) =>
           fetch(request, { signal: deadline }),
         );
-        return readDraft(rest, threadId, answerId, settings.config.triage.userId);
+        // Not read in time (or rate limited): the answer is linked instead.
+        return readDraft(rest, threadId, answerId, settings.config.triage.userId).catch(() => ({
+          missing: "unreadable" as const,
+        }));
       },
     });
     if (result.job) await stub.enqueueCommand(result.job);

@@ -12,13 +12,18 @@
 // Jev's decision is recorded (without expiry) before it is applied, so a retry applies the same
 // decision without asking Jev again; it is applied to the conversation as it is after Jev answered,
 // so an assignee or topic label someone set meanwhile is kept. A customer message newer than those
-// Jev was given makes the decision stale: the ticket is then not snoozed, a decision not applied
-// yet is made again, and a snooze of ours that the message came just before is lifted, so a new
-// message is always classified. A ticket someone assigned is never routed
-// again, even if unassigned later.
+// Jev was given makes the decision stale: the ticket is then not snoozed, and a decision not applied
+// yet is made again. (A message in the moment between that check and the snooze stays snoozed until
+// the customer's next message reopens the ticket; the support queue lists it meanwhile.)
 
 import { z } from "zod";
-import { type ChatwootClient, type Fetch, messageContent, toRelayConversation } from "./chatwoot/api.ts";
+import {
+  type ChatwootClient,
+  type ChatwootMessage,
+  type Fetch,
+  messageContent,
+  toRelayConversation,
+} from "./chatwoot/api.ts";
 import type { Settings } from "./config.ts";
 import { log } from "./log.ts";
 
@@ -68,8 +73,6 @@ const decisionSchema = z.object({
   messages: z.number().int(),
   /** The newest customer message Jev was given: a newer one makes the decision stale. */
   lastMessageId: z.number().int().default(0),
-  /** The ticket was snoozed for want of an owner (see snoozeUnclear). */
-  snoozed: z.boolean().default(false),
   state: z.enum(["pending", "waiting", "done"]),
 });
 type Decision = z.infer<typeof decisionSchema>;
@@ -135,18 +138,13 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     store.set(key, JSON.stringify({ ...(recorded ?? unassignable()), state: "done" }));
     return;
   }
-  // The customer wrote after the messages Jev was given: a decision not applied yet is made
-  // again, and a snooze of ours that the message came just before is lifted (Chatwoot reopens a
-  // snoozed ticket on a customer message; this one arrived before the snooze).
-  const newer =
-    recorded !== undefined && (await wroteSince(chatwoot, accountId, conversationId, recorded.lastMessageId));
-  const reopen = newer && recorded?.state === "waiting" && recorded.snoozed && conversation.status === "snoozed";
-  if (reopen) await chatwoot.setStatus(accountId, conversationId, { status: "open" });
-  const stale = recorded?.state === "pending" && newer;
+  // The customer wrote after the messages Jev was given: a decision not applied yet is made again.
+  const stale =
+    recorded?.state === "pending" && (await wroteSince(chatwoot, accountId, conversationId, recorded.lastMessageId));
   let decision = recorded?.state === "pending" && !stale ? recorded : undefined;
   let current = conversation;
   if (!decision) {
-    if (conversation.status !== "open" && !reopen) return; // Routed if it opens again unassigned.
+    if (conversation.status !== "open") return; // Routed if it opens again unassigned.
     const { text, messages, lastMessageId } = await customerText(chatwoot, accountId, conversationId, [
       conversation.contact?.name,
       conversation.contact?.email,
@@ -188,7 +186,7 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     routing.snoozeUnclear &&
     !(await wroteSince(chatwoot, accountId, conversationId, decision.lastMessageId));
   if (snooze) await chatwoot.setStatus(accountId, conversationId, { status: "snoozed" });
-  store.set(key, JSON.stringify({ ...decision, snoozed: snooze, state }));
+  store.set(key, JSON.stringify({ ...decision, state }));
   log.info("ticket routed", {
     accountId,
     conversationId,
@@ -204,6 +202,34 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
   });
 }
 
+/** Chatwoot's page of messages after an id (MessageFinder at v4.18.0), and how many are read. */
+const MESSAGES_PER_PAGE = 100;
+const PAGES = 3;
+
+/**
+ * Up to `limit` customer messages after message `messageId` (0: from the start), within the next
+ * PAGES pages of messages (notes and activity lines may come in between); beyond them there are
+ * taken to be none.
+ */
+async function customerMessages(
+  chatwoot: ChatwootClient,
+  accountId: number,
+  conversationId: number,
+  messageId: number,
+  limit: number,
+): Promise<ChatwootMessage[]> {
+  const found: ChatwootMessage[] = [];
+  let after = messageId;
+  for (let page = 0; page < PAGES && found.length < limit; page += 1) {
+    const messages = await chatwoot.listMessages(accountId, conversationId, after);
+    found.push(...messages.filter((message) => message.message_type === 0 && !message.private));
+    const last = messages.at(-1);
+    if (!last || messages.length < MESSAGES_PER_PAGE) break;
+    after = last.id;
+  }
+  return found.slice(0, limit);
+}
+
 /** Whether the customer wrote after message `messageId`. */
 async function wroteSince(
   chatwoot: ChatwootClient,
@@ -211,8 +237,7 @@ async function wroteSince(
   conversationId: number,
   messageId: number,
 ): Promise<boolean> {
-  const messages = await chatwoot.listMessages(accountId, conversationId, messageId);
-  return messages.some((message) => message.message_type === 0 && !message.private);
+  return (await customerMessages(chatwoot, accountId, conversationId, messageId, 1)).length > 0;
 }
 
 /**
@@ -225,10 +250,7 @@ async function customerText(
   conversationId: number,
   identities: Array<string | null | undefined>,
 ): Promise<{ text: string; messages: number; lastMessageId: number }> {
-  // after=0: the oldest page (Chatwoot's default page is the latest messages).
-  const messages = (await chatwoot.listMessages(accountId, conversationId, 0))
-    .filter((message) => message.message_type === 0 && !message.private)
-    .slice(0, MAX_MESSAGES);
+  const messages = await customerMessages(chatwoot, accountId, conversationId, 0, MAX_MESSAGES);
   const subject = messages.map((message) => message.content_attributes?.email?.subject).find(Boolean) ?? "";
   const text = [subject, ...messages.map(messageContent)].filter((part) => part.trim()).join("\n");
   return { text: sanitize(text, identities), messages: messages.length, lastMessageId: messages.at(-1)?.id ?? 0 };
@@ -305,7 +327,6 @@ async function decide(
     topicConfidence: topic.confidence,
     messages,
     lastMessageId,
-    snoozed: false,
     state: "pending",
   };
 }
@@ -318,7 +339,6 @@ function unassignable(): Decision {
     topicConfidence: 0,
     messages: 0,
     lastMessageId: 0,
-    snoozed: false,
     state: "done",
   };
 }
