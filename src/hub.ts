@@ -41,10 +41,24 @@ const payloadSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("message-updated"), accountId: id, conversationId: id, messageId: id }),
   z.object({ type: z.literal("route"), accountId: id, conversationId: id }),
   z.object({ type: z.literal("queue") }),
+  z.object({ type: z.literal("buttons"), accountId: id, conversationId: id }),
 ]);
 type JobPayload = z.infer<typeof payloadSchema>;
 
-const PRIORITY = { command: 0, sweep: 1, conversation: 2, route: 2, "message-updated": 3, queue: 4 } as const;
+const PRIORITY = {
+  command: 0,
+  buttons: 1,
+  sweep: 1,
+  conversation: 2,
+  route: 2,
+  "message-updated": 3,
+  queue: 4,
+} as const;
+/**
+ * The triage bot's hook fires as it finishes its answer, just before the answer is sent: the
+ * buttons wait this long so they land under it.
+ */
+const BUTTONS_DELAY_MS = 3000;
 /** Requests a job may need before it can start without being cut short. */
 const COMMAND_BUDGET = 20;
 const MIN_BUDGET = 2;
@@ -123,6 +137,14 @@ export class Hub extends DurableObject<Env> {
     await this.schedule();
   }
 
+  /** The triage bot answered in a post: its ticket's buttons follow the answer (see Relay.postButtons). */
+  async triageAnswered(threadId: string): Promise<void> {
+    const ticket = this.store.ticketForThread(threadId);
+    if (!ticket) return;
+    this.enqueue({ type: "buttons", ...ticket }, Date.now() + BUTTONS_DELAY_MS);
+    await this.schedule();
+  }
+
   async ticketForThread(threadId: string): Promise<{ accountId: number; conversationId: number } | null> {
     return this.store.ticketForThread(threadId) ?? null;
   }
@@ -192,6 +214,10 @@ export class Hub extends DurableObject<Env> {
           return "done";
         case "queue":
           await postQueue(services);
+          this.store.completeJob(job);
+          return "done";
+        case "buttons":
+          await services.relay.postButtons(payload.accountId, payload.conversationId);
           this.store.completeJob(job);
           return "done";
         case "route":
@@ -378,6 +404,7 @@ function jobKey(payload: JobPayload): string {
       return "queue";
     case "conversation":
     case "route":
+    case "buttons":
       return `${payload.type}:${payload.accountId}:${payload.conversationId}`;
     case "message-updated":
       return `${payload.type}:${payload.accountId}:${payload.conversationId}:${payload.messageId}`;

@@ -183,6 +183,30 @@ export class Relay {
   }
 
   /**
+   * The ticket buttons as a message of their own, posted when the triage bot has answered in the
+   * post (its hook tells the Hub), so they follow its draft. A post that no longer exists is left.
+   */
+  async postButtons(accountId: number, conversationId: number): Promise<void> {
+    const { store, forum, buttons } = this.options;
+    const threadId = store.conversation(accountId, conversationId)?.threadId;
+    if (!threadId || !buttons) return;
+    try {
+      await forum.execute(
+        this.options.target(accountId).forumChannelId,
+        {
+          username: SYSTEM_USERNAME,
+          avatar_url: this.options.avatars.chatwoot,
+          allowed_mentions: { parse: [] },
+          components: buttons,
+        },
+        threadId,
+      );
+    } catch (error) {
+      if (!(error instanceof UnknownThreadError)) throw error;
+    }
+  }
+
+  /**
    * After a run's messages, while an announcement is pending: pings a newly assigned, linked
    * agent in a notice of its own, so the ping follows the latest assignment line and names the
    * current assignee however often the conversation was reassigned in between, and adds them to
@@ -341,9 +365,12 @@ export class Relay {
         allowed_mentions: { parse: [] },
       });
     }
-    // A message ends with the buttons to act on the ticket; an activity line has none.
+    // A message ends with the buttons to act on the ticket; an activity line has none, and a
+    // message the triage bot answers has them after the answer instead (see postButtons).
     const last = parts.at(-1);
-    if (last && this.options.buttons && message.messageType !== "activity") last.components = this.options.buttons;
+    if (last && this.options.buttons && message.messageType !== "activity" && !notification.triaged) {
+      last.components = this.options.buttons;
+    }
     return parts;
   }
 

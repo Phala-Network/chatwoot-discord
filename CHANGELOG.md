@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The ticket buttons follow the triage bot's answer: a customer message that calls the bot has no
+  buttons of its own, and the bot's hook (`POST /triage/answered`, signed with the new
+  `TRIAGE_HOOK_SECRET`) makes the Worker post them under the answer.
+
+### Changed
+
+- Routing adds its topic label only to a ticket without any label, so a ticket has one label.
+
 ## [0.16.0] - 2026-09-30
 
 ### Added

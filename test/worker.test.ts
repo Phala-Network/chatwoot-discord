@@ -226,6 +226,32 @@ async function chatwootWebhook(
   );
 }
 
+/** The triage bot's hook: signed like a Chatwoot webhook, with the shared secret. */
+async function triageHook(payload: unknown, secret = "triage-hook-secret-0123456789abcdef") {
+  const body = JSON.stringify(payload);
+  const ts = String(Math.floor(Date.now() / 1000));
+  return call(
+    new Request("https://relay.example.com/triage/answered", {
+      method: "POST",
+      body,
+      headers: {
+        "content-type": "application/json",
+        "x-timestamp": ts,
+        "x-signature": `sha256=${await hmac(secret, `${ts}.${body}`)}`,
+      },
+    }),
+  );
+}
+
+const ALL_BUTTONS = ["ticket:reply", "ticket:draft", "ticket:take", "ticket:resolve", "ticket:manage"];
+
+/** The custom ids of a posted message's buttons. */
+function buttons(body: unknown): string[] | undefined {
+  return (body as { components?: Array<{ components: Array<{ custom_id: string }> }> }).components?.flatMap((row) =>
+    row.components.map((button) => button.custom_id),
+  );
+}
+
 async function discordInteraction(payload: unknown, tamper = false) {
   const request = await signedInteraction(payload, Math.floor(Date.now() / 1000), tamper);
   return call(request());
@@ -347,13 +373,9 @@ describe("worker", () => {
       content:
         "-# via Live chat · Acme — Product App\n-# jane@example.com\n[Open in Chatwoot](<https://chatwoot.example.com/app/accounts/3/conversations/12>)",
     });
-    // The card and every message carry the ticket buttons; activity lines do not.
-    const buttons = (body: unknown) =>
-      (body as { components?: Array<{ components: Array<{ custom_id: string }> }> }).components?.flatMap((row) =>
-        row.components.map((button) => button.custom_id),
-      );
-    const all = ["ticket:reply", "ticket:draft", "ticket:take", "ticket:resolve", "ticket:manage"];
-    expect(buttons(posts[0]?.body)).toEqual(all);
+    // The card and every message carry the ticket buttons, but a message the triage bot answers
+    // has them after the answer (see the triage hook test); activity lines have none.
+    expect(buttons(posts[0]?.body)).toEqual(ALL_BUTTONS);
     const thread = posts[1]?.thread ?? "";
     expect(thread).toMatch(/^\d{18}$/);
     expect(posts[1]).toMatchObject({
@@ -365,7 +387,7 @@ describe("worker", () => {
         avatar_url: "https://gravatar.com/avatar/?d=mp&f=y&s=256",
       },
     });
-    expect(buttons(posts[1]?.body)).toEqual(all);
+    expect(buttons(posts[1]?.body)).toBeUndefined();
 
     // The post URL is merged into the conversation's attributes; other attributes survive.
     const link = world.requests.find((request) => request.url.pathname.endsWith("/custom_attributes"));
@@ -396,7 +418,32 @@ describe("worker", () => {
         },
       },
     ]);
-    expect(buttons(later[0]?.body)).toEqual(all);
+    expect(buttons(later[0]?.body)).toEqual(ALL_BUTTONS);
+  });
+
+  it("posts the ticket buttons after the triage bot's answer when its signed hook says it answered", async () => {
+    world.conversation(21, [{ id: 701, content: "help", message_type: 0 }]);
+    await chatwootWebhook(created(21));
+    await drain();
+    const thread = world.webhookPosts().at(-1)?.thread ?? "";
+    expect(thread).toMatch(/^\d{18}$/);
+    const before = world.webhookPosts().length;
+
+    expect((await triageHook({ threadId: thread }, "wrong-secret-0123456789abcdef0123")).status).toBe(401);
+    expect((await triageHook({ threadId: "not a thread" })).status).toBe(400);
+    expect((await triageHook({ threadId: thread })).status).toBe(200);
+    // It waits a moment, so the answer (sent right after the hook) lands first.
+    await runInDurableObject(hub(), (_instance, state) => {
+      state.storage.sql.exec("UPDATE jobs SET not_before = 0");
+    });
+    await setAlarmNow();
+    await drain();
+
+    const [bar, ...rest] = world.webhookPosts().slice(before);
+    expect(rest).toEqual([]);
+    expect(bar).toMatchObject({ thread, body: { username: "Chatwoot", allowed_mentions: { parse: [] } } });
+    expect(bar?.body).not.toHaveProperty("content");
+    expect(buttons(bar?.body)).toEqual(ALL_BUTTONS);
   });
 
   it("retries a failed message with backoff without skipping it", async () => {
