@@ -1,0 +1,202 @@
+// The support queue: every hour (the cron run at minute 0), a message in `queue.channelId` lists
+// the open tickets that wait for a reply or have no assignee, longest wait first, and pings their
+// linked assignees. An unassigned ticket whose customer has waited 1, 2, 4, 8, and 16 hours, and
+// every 24 hours after that, also pings `queue.escalationRoleId`, once per step, until someone takes
+// it or replies (a new customer message after a reply starts over). Nothing is posted when the
+// queue is empty.
+//
+// A line shows only the ticket's post (or dashboard link), its wait, and its assignee: no customer
+// text. Mentions are allowed from the tickets' fields (linked assignees, the escalation), never
+// from the message text.
+
+import {
+  type RESTPostAPIChannelMessageJSONBody,
+  type RESTPostAPIChannelMessageResult,
+  Routes,
+} from "discord-api-types/v10";
+import { z } from "zod";
+import { type ChatwootClient, CONVERSATIONS_PER_PAGE } from "./chatwoot/api.ts";
+import { relaysInbox, type Settings } from "./config.ts";
+import type { DiscordRest } from "./discord/rest.ts";
+import { log } from "./log.ts";
+import { QUEUE_MESSAGES, QUEUE_PAGES } from "./queue-limits.ts";
+import { conversationUrl, defused } from "./relay/format.ts";
+
+const ESCALATION_HOURS = [1, 2, 4, 8, 16];
+const ESCALATION_REPEAT_HOURS = 24;
+const CONTENT_LIMIT = 2000;
+/** Room kept in the last message for the note on tickets not listed. */
+const NOTE_ROOM = 40;
+/** Per unassigned waiting ticket ("<account>:<conversation>"): the wait it was escalated for, and how far. */
+const ESCALATIONS_KEY = "queue:escalations";
+
+export interface QueueStore {
+  get(key: string): string | undefined;
+  set(key: string, value: string): void;
+  conversation(accountId: number, conversationId: number): { threadId?: string | undefined } | undefined;
+}
+
+export interface QueueContext {
+  settings: Settings;
+  store: QueueStore;
+  chatwoot: ChatwootClient;
+  rest: DiscordRest;
+}
+
+interface Ticket {
+  accountId: number;
+  accountName: string;
+  conversationId: number;
+  /** Unix seconds since the customer has waited for a reply; 0 when they do not. */
+  waitingSince: number;
+  assignee: { id: number; name: string } | null;
+  escalate: boolean;
+}
+
+interface Chunk {
+  content: string;
+  users: Set<string>;
+  role: boolean;
+}
+
+const escalationsSchema = z.record(z.string(), z.object({ since: z.number(), level: z.number() }));
+type Escalations = z.infer<typeof escalationsSchema>;
+
+/** How many escalation steps (1, 2, 4, 8, 16 h, then every 24 h) a wait has reached. */
+export function escalationLevel(hours: number): number {
+  const last = ESCALATION_HOURS.at(-1) ?? 0;
+  if (hours < last) return ESCALATION_HOURS.filter((step) => hours >= step).length;
+  return ESCALATION_HOURS.length + Math.floor((hours - last) / ESCALATION_REPEAT_HOURS);
+}
+
+export async function postQueue(ctx: QueueContext, now = Date.now()): Promise<void> {
+  const { settings, store, chatwoot, rest } = ctx;
+  const queue = settings.config.queue;
+  if (!queue) return;
+  const nowSeconds = now / 1000;
+  const previous = readEscalations(store.get(ESCALATIONS_KEY));
+  const escalations: Escalations = {};
+  const tickets: Ticket[] = [];
+  let unread = false;
+
+  for (const account of settings.config.accounts) {
+    for (let page = 1; page <= QUEUE_PAGES; page += 1) {
+      const conversations = await chatwoot.listConversations(account.id, page, "open");
+      for (const conversation of conversations) {
+        const conversationId = conversation.id;
+        if (conversationId === undefined || !relaysInbox(account, conversation.inbox_id)) continue;
+        const assignee = conversation.meta?.assignee;
+        const waitingSince = conversation.waiting_since ?? 0;
+        if (assignee && !waitingSince) continue;
+        let escalate = false;
+        if (!assignee && waitingSince && queue.escalationRoleId) {
+          const key = `${account.id}:${conversationId}`;
+          const level = escalationLevel((nowSeconds - waitingSince) / 3600);
+          const reached = previous[key]?.since === waitingSince ? previous[key].level : 0;
+          escalate = level > reached;
+          escalations[key] = { since: waitingSince, level };
+        }
+        tickets.push({
+          accountId: account.id,
+          accountName: account.name,
+          conversationId,
+          waitingSince,
+          assignee: assignee?.id ? { id: assignee.id, name: assignee.name ?? "" } : null,
+          escalate,
+        });
+      }
+      if (conversations.length < CONVERSATIONS_PER_PAGE) break;
+      if (page === QUEUE_PAGES) unread = true;
+    }
+  }
+
+  tickets.sort((a, b) => (a.waitingSince || Number.POSITIVE_INFINITY) - (b.waitingSince || Number.POSITIVE_INFINITY));
+  const chunks = tickets.length > 0 ? messages(ctx, tickets, nowSeconds, unread) : [];
+  for (const [index, chunk] of chunks.entries()) {
+    await post(rest, queue.channelId, chunk, queue.escalationRoleId);
+    // The first message carries any escalation ping: record it at once, so a later part that
+    // fails does not ping again when the job is retried.
+    if (index === 0) store.set(ESCALATIONS_KEY, JSON.stringify(escalations));
+  }
+  if (chunks.length === 0) store.set(ESCALATIONS_KEY, JSON.stringify(escalations));
+  log.info("support queue", {
+    tickets: tickets.length,
+    escalated: tickets.filter((ticket) => ticket.escalate).length,
+    messages: chunks.length,
+  });
+}
+
+function messages(ctx: QueueContext, tickets: Ticket[], nowSeconds: number, unread: boolean): Chunk[] {
+  const roleId = ctx.settings.config.queue?.escalationRoleId;
+  const escalate = roleId !== undefined && tickets.some((ticket) => ticket.escalate);
+  let header = `📋 Support queue <t:${Math.floor(nowSeconds)}:t>`;
+  if (escalate) header += `\n<@&${roleId}> 🔔 tickets have waited with no assignee: please \`/assign\` one.`;
+  const chunks: Chunk[] = [{ content: header, users: new Set(), role: escalate }];
+  let shown = 0;
+  for (const ticket of tickets) {
+    const text = line(ctx, ticket, nowSeconds);
+    const last = chunks.at(-1);
+    if (!last) break;
+    const limit = chunks.length === QUEUE_MESSAGES ? CONTENT_LIMIT - NOTE_ROOM : CONTENT_LIMIT;
+    if (last.content.length + 1 + text.length <= limit) {
+      last.content += `\n${text}`;
+    } else if (chunks.length < QUEUE_MESSAGES) {
+      chunks.push({ content: text, users: new Set(), role: false });
+    } else {
+      break;
+    }
+    const linked = ctx.settings.linkedAgent(ticket.assignee?.id);
+    if (linked) chunks.at(-1)?.users.add(linked.discordUserId);
+    shown += 1;
+  }
+  const hidden = tickets.length - shown;
+  if (hidden > 0 || unread) {
+    const last = chunks.at(-1);
+    if (last) last.content += `\n…and ${hidden > 0 ? `${hidden} more` : "more"}: see Chatwoot.`;
+  }
+  return chunks;
+}
+
+function line(ctx: QueueContext, ticket: Ticket, nowSeconds: number): string {
+  const { settings, store } = ctx;
+  const threadId = store.conversation(ticket.accountId, ticket.conversationId)?.threadId;
+  const url = conversationUrl(settings.frontendUrl, ticket.accountId, ticket.conversationId);
+  const post = threadId ? `<#${threadId}>` : `[${ticket.accountName} #${ticket.conversationId}](<${url}>)`;
+  const waiting = ticket.waitingSince ? `waiting ${duration(nowSeconds - ticket.waitingSince)}` : "replied";
+  const linked = settings.linkedAgent(ticket.assignee?.id);
+  const owner = linked
+    ? `<@${linked.discordUserId}>`
+    : ticket.assignee
+      ? defused(ticket.assignee.name)
+      : "❔ Unassigned";
+  return `${ticket.escalate ? "🔔 " : ""}${post} | ${waiting} | ${owner}`;
+}
+
+function duration(seconds: number): string {
+  const minutes = Math.max(Math.floor(seconds / 60), 0);
+  if (minutes < 60) return `${minutes} min`;
+  if (minutes < 48 * 60) return `${Math.floor(minutes / 60)} h`;
+  return `${Math.floor(minutes / (24 * 60))} d`;
+}
+
+async function post(rest: DiscordRest, channelId: string, chunk: Chunk, roleId: string | undefined): Promise<void> {
+  await rest.post<RESTPostAPIChannelMessageResult, RESTPostAPIChannelMessageJSONBody>(
+    Routes.channelMessages(channelId),
+    {
+      body: {
+        content: chunk.content,
+        allowed_mentions: { parse: [], users: [...chunk.users].sort(), roles: chunk.role && roleId ? [roleId] : [] },
+      },
+    },
+  );
+}
+
+function readEscalations(stored: string | undefined): Escalations {
+  if (stored === undefined) return {};
+  try {
+    const parsed = escalationsSchema.safeParse(JSON.parse(stored));
+    return parsed.success ? parsed.data : {};
+  } catch {
+    return {};
+  }
+}

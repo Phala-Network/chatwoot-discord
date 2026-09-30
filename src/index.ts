@@ -110,8 +110,10 @@ app.onError((error, c) => {
 
 const handler = {
   fetch: app.fetch,
-  async scheduled(_controller, env, ctx) {
+  async scheduled(controller, env, ctx) {
     ctx.waitUntil(hub(env).requestSweep());
+    // The support queue is posted hourly, by the run at minute 0.
+    if (new Date(controller.scheduledTime).getUTCMinutes() === 0) ctx.waitUntil(hub(env).requestQueue());
   },
 } satisfies ExportedHandler<Env>;
 

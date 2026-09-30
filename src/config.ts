@@ -3,6 +3,7 @@
 
 import { z } from "zod";
 import { parseJson } from "./json.ts";
+import { queueBudget } from "./queue-limits.ts";
 import { minimumBudget } from "./relay/limits.ts";
 
 /** Gravatar's built-in "mp" default image, forced (it does not depend on any email). */
@@ -138,6 +139,17 @@ export const configSchema = z
         topics: z.record(z.string().min(1), z.string().min(1).max(1000)).optional(),
       })
       .optional(),
+    /**
+     * The hourly support queue (see src/queue.ts). Unset: off. The cron trigger must fire at minute 0.
+     */
+    queue: z
+      .strictObject({
+        /** Discord channel or forum post the queue is posted in. */
+        channelId: snowflake,
+        /** Role pinged when an unassigned ticket's customer has waited long (see src/queue.ts). Unset: none. */
+        escalationRoleId: snowflake.optional(),
+      })
+      .optional(),
     attachments: z
       .strictObject({
         maxFiles: z.number().int().min(0).max(10).default(10),
@@ -159,6 +171,10 @@ export const configSchema = z
   .refine((config) => config.relay.subrequestBudget >= minimumBudget(config.relay.maxChunks), {
     path: ["relay", "subrequestBudget"],
     message: "must fit a run's setup and one message of relay.maxChunks parts (see src/relay/limits.ts)",
+  })
+  .refine((config) => !config.queue || config.relay.subrequestBudget >= queueBudget(config.accounts.length), {
+    path: ["relay", "subrequestBudget"],
+    message: "must fit the support queue's pages and messages (see src/queue.ts)",
   })
   .refine(
     (config) =>

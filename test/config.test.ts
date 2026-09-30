@@ -84,6 +84,14 @@ describe("configuration", () => {
     expect(buildSettings(config, secrets({ TYPESAFE_API_KEY: "key" })).config.routing?.accounts["1"]).toEqual(owners);
   });
 
+  it("requires a subrequest budget that fits the support queue", () => {
+    const queue = { channelId: "100000000000000900" };
+    const accounts = Array.from({ length: 11 }, (_, i) => ({ ...minimal.accounts[0], id: i + 1 }));
+    expect(configSchema.safeParse({ ...minimal, queue }).success).toBe(true);
+    const result = configSchema.safeParse({ ...minimal, accounts, queue });
+    expect(result.error?.issues.map((issue) => issue.path.join("."))).toEqual(["relay.subrequestBudget"]);
+  });
+
   it("bounds the triage bot's name, which its budget notes repeat", () => {
     expect(configSchema.safeParse({ ...minimal, triage: { name: "x".repeat(101) } }).success).toBe(false);
   });

@@ -44,6 +44,8 @@ Cron (every 5 min) ─▶ Worker ──▶ Hub Durable Object ──▶ sweep: r
   [other commands](#commands). Each runs in Chatwoot as the agent who used it.
 - Customer messages ping the linked assignee, and an optional AI agent (a Discord bot) is called
   on each of them and posts a draft; a human sends it with **Apps → Reply with this**.
+- Optionally, every hour a message lists the tickets waiting for a reply or without an assignee,
+  pings their assignees, and escalates long-unassigned ones to a role ([support queue](#support-queue)).
 - Optionally, a new ticket is assigned to its owner and given a topic by
   [TypeSafe Jev](https://docs.typesafe.ai), a classifier, when it is confident enough
   ([routing](#routing)).
@@ -319,6 +321,9 @@ replace:
 | `relay.subrequestBudget` | integer 20–1000, and ≥ `relay.maxChunks` + 26 | `45` | Outbound requests per alarm invocation (Free plan limit: 50). The minimum fits a run's setup and one message's worst case (`src/relay/limits.ts`). |
 | `avatars.chatwoot` | https URL | `<publicUrl>/favicon-512x512.png` | Avatar of activity lines, cards, notices, agent bots, and agents with neither a linked Discord user nor an https Chatwoot avatar. |
 | `avatars.contact` | https URL | Gravatar "mystery person" | Avatar of customers without an https avatar in Chatwoot. |
+| `queue` | object | unset | The hourly [support queue](#support-queue). Unset: off. Requires `relay.subrequestBudget` ≥ 4 × accounts + 4. |
+| `queue.channelId` | Discord id (17–20 digits) | required | Channel or forum post the queue is posted in. The bot needs *Send Messages* there (*Send Messages in Threads* for a post). |
+| `queue.escalationRoleId` | Discord id (17–20 digits) | unset | Role pinged for tickets unassigned too long. To ping a role that is not mentionable, the bot needs *Mention @everyone, @here, and All Roles* in the channel. Unset: no escalation. |
 | `routing` | object | unset | Assigns new tickets and sets their topic with TypeSafe Jev ([routing](#routing)). Requires the `TYPESAFE_API_KEY` secret. Unset: off. |
 | `routing.model` | non-empty string | `jev-1.13.0` | TypeSafe model. |
 | `routing.minConfidence` | number 0.5–1 | `0.7` | Probability an answer needs before it is applied. |
@@ -342,6 +347,19 @@ Secrets (Worker secrets, never in config), also validated at startup:
 | `CHATWOOT_WEBHOOK_SECRETS` | JSON object, `{"<account id>":"<secret>"}` | Each account's webhook secret. |
 | `CHATWOOT_AGENT_TOKENS` | JSON object, `{"<Discord user id>":"<token>"}`; optional, default `{}` | Each linked agent's own Chatwoot access token; commands act with it. |
 | `TYPESAFE_API_KEY` | non-empty; required with `routing` | TypeSafe API key for routing. |
+
+### Support queue
+
+With `queue`, the cron run at minute 0 of every hour posts a message in `queue.channelId` that
+lists the open tickets of every account whose customer waits for a reply (Chatwoot's
+`waiting_since`) or that have no assignee, longest wait first: each line is the ticket's post (or
+its dashboard link), how long the customer has waited, and its assignee, whom it pings when they
+are a linked agent. A ticket with no assignee pings `queue.escalationRoleId` after its customer has
+waited 1, 2, 4, 8, and 16 hours, and every 24 hours after that, once per step, until someone takes
+it or replies. Nothing is posted when there is no such ticket. A line holds no customer text, and
+mentions are allowed from the tickets' fields only, never from text. The queue reads up to four
+pages (100 tickets) per account and takes at most four messages; tickets beyond that are counted
+at the end.
 
 ### Routing
 

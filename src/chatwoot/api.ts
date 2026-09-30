@@ -117,6 +117,9 @@ const messageSchema = z.object({
 export type ChatwootMessage = z.infer<typeof messageSchema>;
 const messageListSchema = z.object({ payload: z.array(messageSchema) });
 
+/** Conversations per page of the list endpoint (ConversationFinder's CONVERSATION_RESULTS_PER_PAGE default, v4.18.0). */
+export const CONVERSATIONS_PER_PAGE = 25;
+
 /** Chatwoot returns up to 100 messages per `after` page. */
 export const MESSAGE_PAGE_SIZE = 100;
 
@@ -224,14 +227,19 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
     },
 
     /**
-     * One page of conversations of any status and assignee, most recent activity first
-     * (Conversations::SortService's default, `last_activity_at_desc`, at v4.18.0).
+     * One page (CONVERSATIONS_PER_PAGE) of conversations of any assignee and the given status
+     * (default: any), most recent activity first (Conversations::SortService's default,
+     * `last_activity_at_desc`, at v4.18.0).
      */
-    async listConversations(accountId: number, page: number): Promise<ChatwootConversation[]> {
+    async listConversations(
+      accountId: number,
+      page: number,
+      status: "all" | "open" = "all",
+    ): Promise<ChatwootConversation[]> {
       const list = await data(
         "list conversations",
         client.GET("/api/v1/accounts/{account_id}/conversations", {
-          params: { path: { account_id: accountId }, query: { status: "all", assignee_type: "all", page } },
+          params: { path: { account_id: accountId }, query: { status, assignee_type: "all", page } },
         }),
       );
       return list.data?.payload ?? [];
