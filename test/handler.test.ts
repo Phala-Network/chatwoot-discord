@@ -8,14 +8,17 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FAILED } from "../src/commands/common.ts";
 import { COMMANDS, REPLY_WITH_THIS } from "../src/commands/definitions.ts";
+import type { Draft } from "../src/commands/draft.ts";
 import { type HandlerResult, handleInteraction } from "../src/commands/handler.ts";
 import { ALICE, BOB, CAROL, TRIAGE, testSettings } from "./helpers.ts";
 
 const THREAD = "100000000000001500";
 const settings = testSettings();
+let draft: Draft = { text: "Hi, restart the CVM from the dashboard." };
 const deps = {
   settings,
   ticketForThread: async (threadId: string) => (threadId === THREAD ? { accountId: 3, conversationId: 15 } : undefined),
+  latestDraft: async () => draft,
 };
 
 /** A ticket button pressed, or a panel menu changed, in the post. */
@@ -407,10 +410,21 @@ describe("interaction handler", () => {
 });
 
 describe("ticket buttons and the Manage panel", () => {
-  it("Reply opens the editor", async () => {
+  it("Reply opens the editor; Use draft opens it with the triage bot's latest draft", async () => {
     const { response } = await press("ticket:reply");
     expect(response.type === InteractionResponseType.Modal && response.data.custom_id).toBe("reply:777001");
     expect(editorField(response, "content")).not.toHaveProperty("value");
+    expect(editorField((await press("ticket:draft")).response, "content")?.value).toBe(
+      "Hi, restart the CVM from the dashboard.",
+    );
+  });
+
+  it("Use draft says why there is none: not written yet, or not readable without the intent", async () => {
+    draft = { missing: "none" };
+    expect(privateText(await press("ticket:draft"))).toMatch(/no draft in this post yet/);
+    draft = { missing: "unreadable" };
+    expect(privateText(await press("ticket:draft"))).toMatch(/Message Content intent.*Reply with this/);
+    draft = { text: "Hi, restart the CVM from the dashboard." };
   });
 
   it("Take assigns the invoker, Resolve resolves, Manage draws the panel, each answered privately", async () => {
@@ -438,27 +452,9 @@ describe("ticket buttons and the Manage panel", () => {
     expect((await press("panel:status:until_next_reply")).job?.action).toEqual({ type: "status", status: "snoozed" });
   });
 
-  it("changes labels relative to the ones the panel showed", async () => {
-    const shown = {
-      components: [
-        {
-          type: 1,
-          components: [
-            {
-              type: 3,
-              custom_id: "panel:labels",
-              options: [
-                { label: "web3", value: "web3", default: true },
-                { label: "billing", value: "billing", default: false },
-                { label: "vip", value: "vip", default: true },
-              ],
-            },
-          ],
-        },
-      ],
-    };
-    const { job } = await press("panel:labels", ["web3", "billing"], shown);
-    expect(job?.action).toEqual({ type: "labels", add: ["billing"], remove: ["vip"] });
+  it("the label menu gives the ticket one label, or none", async () => {
+    expect((await press("panel:labels", ["billing"])).job?.action).toEqual({ type: "labels", labels: ["billing"] });
+    expect((await press("panel:labels", ["none"])).job?.action).toEqual({ type: "labels", labels: [] });
   });
 
   it("refuses a menu value that is not in it", async () => {

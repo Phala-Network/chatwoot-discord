@@ -45,7 +45,7 @@ export function relayFor(settings: Settings, forum: ForumClient, store: RelaySto
     topicAttribute: settings.config.relay.topicAttribute,
     maxChunks: settings.config.relay.maxChunks,
     triage: triageUserId ? { ...settings.config.triage, userId: triageUserId } : undefined,
-    buttons: ticketButtons(),
+    buttons: ticketButtons(triageUserId !== undefined),
     linkedAgent: settings.linkedAgent,
     // Normally every message is relayed within the sweep's window (by its webhook, or else by
     // the sweep), so an older one is history: a first sync, or a catch-up after downtime.

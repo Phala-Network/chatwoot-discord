@@ -112,10 +112,12 @@ To connect an AI agent, see [Connecting an AI agent](docs/ai-agent.md).
 ### 1. Discord
 
 1. Create an application at <https://discord.com/developers/applications>; note its
-   **Application ID** and **Public Key**, and create a **bot token**. No privileged intents are
-   needed.
+   **Application ID** and **Public Key**, and create a **bot token**. With a triage bot, turn on
+   the **Message Content** intent for **Use draft** (a bot in 100 or more servers, or in a large
+   one, needs Discord's review first); without it the button points to **Reply with this**.
 2. Invite the bot with the `bot` and `applications.commands` scopes.
-3. Create a **forum channel**. Give the bot *View Channels*, *Manage Threads* (tags, archiving),
+3. Create a **forum channel**. Give the bot *View Channels*, *Read Message History* (**Use
+   draft**), *Manage Threads* (tags, archiving),
    and *Manage Webhooks* (it creates a webhook, named `Chatwoot`, that posts the messages; it only
    uses a webhook its own application created).
 4. Create the forum tags you want: one per account, one per status (`Open`, `Pending`,
@@ -201,17 +203,19 @@ are supported); you provide TLS, the cron trigger, and storage persistence.
 Used inside a ticket post, by Discord users linked in `agents[]` who have a token in
 `CHATWOOT_AGENT_TOKENS`. The same actions are buttons, which need no typing:
 
-- **Reply**, **Take**, **Resolve**, and **Manage** are on the ticket card, at the top of the post,
-  and under every message (not activity lines), so they are always close at hand.
-- **Reply** opens the `/reply` editor; to start from the triage bot's draft, use **Reply with
-  this** on its message (a button cannot read another bot's message without the privileged
-  Message Content intent). **Take** assigns the ticket to you; **Resolve** resolves it.
+- **Reply**, **Use draft** (with a triage bot), **Take**, **Resolve**, and **Manage** are on the
+  ticket card, at the top of the post, and under every message (not activity lines), so they are
+  always close at hand.
+- **Reply** opens the `/reply` editor. **Use draft** opens it with the draft of the triage bot's
+  newest message in the post that has one (its last code block, as **Reply with this** takes it);
+  it reads the post's messages, which needs the Message Content intent, and says so when the bot
+  lacks it. **Take** assigns the ticket to you; **Resolve** resolves it.
 - **Manage** opens a card only you see, drawn with the ticket as it is and coloured by its status:
-  menus for its assignee and labels, and **Open**, **Resolve**, and **Snooze** (until the next
-  reply) buttons with the current status highlighted. A change is made at once, and the card is
-  drawn again with the result, so it always shows the ticket's state. A label change adds and
-  removes what you changed in the menu, keeping labels someone else changed meanwhile. Priority
-  and "pending" are set with `/priority` and `/pending`.
+  menus for its assignee and its label (one per ticket: choosing one replaces its labels), and
+  **Open**, **Resolve**, and **Snooze** (until the next reply) buttons with the current status
+  highlighted. A change is made at once, and the card is drawn again with the result, so it
+  always shows the ticket's state. Priority and "pending" are set with `/priority` and
+  `/pending`; several labels with `/label`.
 
 Posts created before the buttons were added have none; the commands work everywhere.
 

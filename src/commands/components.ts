@@ -16,6 +16,7 @@ import {
 /** Custom ids of the ticket buttons. */
 export const BUTTONS = {
   reply: "ticket:reply",
+  draft: "ticket:draft",
   take: "ticket:take",
   resolve: "ticket:resolve",
   manage: "ticket:manage",
@@ -46,13 +47,14 @@ function button(
   return { type: ComponentType.Button, custom_id: customId, label, emoji: { name: emoji }, style };
 }
 
-/** The buttons on the ticket card and under each message. */
-export function ticketButtons(): ActionRow[] {
+/** The buttons on the ticket card and under each message; "Use draft" needs a triage bot. */
+export function ticketButtons(draft: boolean): ActionRow[] {
   return [
     {
       type: ComponentType.ActionRow,
       components: [
         button(BUTTONS.reply, "Reply", "✏️", ButtonStyle.Primary),
+        ...(draft ? [button(BUTTONS.draft, "Use draft", "🤖")] : []),
         button(BUTTONS.take, "Take", "🙋"),
         button(BUTTONS.resolve, "Resolve", "✅", ButtonStyle.Success),
         button(BUTTONS.manage, "Manage", "⚙️"),
@@ -89,7 +91,7 @@ const STATUS_COLORS: Record<string, number> = {
 
 /**
  * The panel for a ticket, a card: its title (and what was just done), menus for its assignee and
- * labels, and a row of buttons for its status, the current one highlighted. (Priority and
+ * label, and a row of buttons for its status, the current one highlighted. (Priority and
  * "pending" are left to the commands.)
  */
 export function panel(
@@ -98,28 +100,15 @@ export function panel(
   agents: Array<{ id: number; name: string }>,
   accountLabels: string[],
 ): APIMessageTopLevelComponent[] {
-  const option = (value: string, label: string, emoji: string, selected: boolean): APISelectMenuOption => ({
+  const option = (value: string, label: string, emoji: string, selected = false): APISelectMenuOption => ({
     value,
     label: Array.from(label).slice(0, MAX_OPTION_TEXT).join("") || value,
     emoji: { name: emoji },
-    default: selected,
+    ...(selected ? { default: true } : {}),
   });
-  const menu = (
-    customId: string,
-    placeholder: string,
-    options: APISelectMenuOption[],
-    multiple = false,
-  ): ActionRow => ({
+  const menu = (customId: string, placeholder: string, options: APISelectMenuOption[]): ActionRow => ({
     type: ComponentType.ActionRow,
-    components: [
-      {
-        type: ComponentType.StringSelect,
-        custom_id: customId,
-        placeholder,
-        options,
-        ...(multiple ? { min_values: 0, max_values: options.length } : {}),
-      },
-    ],
+    components: [{ type: ComponentType.StringSelect, custom_id: customId, placeholder, options }],
   });
   const choices = (
     field: string,
@@ -135,10 +124,13 @@ export function panel(
     option(NONE, "Unassigned", "👤", ticket.assigneeId === null),
     ...agents.map((agent) => option(String(agent.id), agent.name, "👤", agent.id === ticket.assigneeId)),
   ].slice(0, MAX_OPTIONS);
-  // The ticket's own labels first, so they stay in the menu when the account has too many.
-  const labels = [...new Set([...ticket.labels, ...accountLabels])]
-    .slice(0, MAX_OPTIONS)
-    .map((label) => option(label, label, "🏷️", ticket.labels.includes(label)));
+  // A ticket has one label: choosing one replaces the ticket's labels. Its own labels come first,
+  // so they stay in the menu when the account has too many.
+  const current = ticket.labels[0];
+  const labels = [
+    option(NONE, "No label", "🏷️", current === undefined),
+    ...[...new Set([...ticket.labels, ...accountLabels])].map((label) => option(label, label, "🏷️", label === current)),
+  ].slice(0, MAX_OPTIONS);
 
   return [
     {
@@ -147,7 +139,7 @@ export function panel(
       components: [
         { type: ComponentType.TextDisplay, content: heading },
         menu(PANEL.assignee, "👤 Unassigned", people),
-        ...(labels.length > 0 ? [menu(PANEL.labels, "🏷️ No labels", labels, true)] : []),
+        ...(labels.length > 1 ? [menu(PANEL.labels, "🏷️ No label", labels)] : []),
         choices(
           PANEL.status,
           STATUSES.map(([status, value, name, emoji]) => [value, name, emoji, status === ticket.status]),

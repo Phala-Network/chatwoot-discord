@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Use draft** is back on the ticket buttons (with a triage bot): it opens the reply editor with
+  the triage bot's latest draft in the post. It needs the bot's Message Content intent; until the
+  bot has it, the button says so and points to **Reply with this**.
+
+### Changed
+
+- The Manage card's label menu picks one label, replacing the ticket's labels (`/label` still
+  adds and removes single labels). It is a single-select menu, as tall as the assignee menu.
+
 ## [0.15.0] - 2026-09-30
 
 ### Changed
