@@ -20,13 +20,15 @@ import { relaysInbox, type Settings } from "./config.ts";
 import type { DiscordRest } from "./discord/rest.ts";
 import { log } from "./log.ts";
 import { QUEUE_MESSAGES, QUEUE_PAGES } from "./queue-limits.ts";
-import { conversationUrl, defused } from "./relay/format.ts";
+import { clip, conversationUrl, defused } from "./relay/format.ts";
 
 const ESCALATION_HOURS = [1, 2, 4, 8, 16];
 const ESCALATION_REPEAT_HOURS = 24;
 const CONTENT_LIMIT = 2000;
 /** Room kept in the last message for the note on tickets not listed. */
 const NOTE_ROOM = 40;
+/** Longest assignee name shown (an unlinked agent's Chatwoot name). */
+const NAME_LIMIT = 60;
 /** Per unassigned waiting ticket ("<account>:<conversation>"): the wait it was escalated for, and how far. */
 const ESCALATIONS_KEY = "queue:escalations";
 
@@ -112,12 +114,17 @@ export async function postQueue(ctx: QueueContext, now = Date.now()): Promise<vo
 
   tickets.sort((a, b) => (a.waitingSince || Number.POSITIVE_INFINITY) - (b.waitingSince || Number.POSITIVE_INFINITY));
   const chunks = tickets.length > 0 ? messages(ctx, tickets, nowSeconds, unread) : [];
+  // A nonce per hour and part: Discord creates no second message for a retried request it took.
+  const nonce = (index: number) => `queue-${Math.floor(nowSeconds / 3600)}-${index}`;
   const [first, ...more] = chunks;
-  if (first) await post(rest, queue.channelId, first, queue.escalationRoleId);
+  if (first) await post(rest, queue.channelId, first, queue.escalationRoleId, nonce(0));
   // The first message carries any escalation ping: record it at once, so a later part that fails
-  // does not ping again when the job is retried.
-  store.set(ESCALATIONS_KEY, JSON.stringify(escalations));
-  for (const chunk of more) await post(rest, queue.channelId, chunk, queue.escalationRoleId);
+  // does not ping again when the job is retried. Tickets beyond the pages read keep their record
+  // until a complete run no longer sees them.
+  store.set(ESCALATIONS_KEY, JSON.stringify(unread ? { ...previous, ...escalations } : escalations));
+  for (const [index, chunk] of more.entries()) {
+    await post(rest, queue.channelId, chunk, queue.escalationRoleId, nonce(index + 1));
+  }
   log.info("support queue", {
     tickets: tickets.length,
     escalated: tickets.filter((ticket) => ticket.escalate).length,
@@ -149,9 +156,12 @@ function messages(ctx: QueueContext, tickets: Ticket[], nowSeconds: number, unre
     shown += 1;
   }
   const hidden = tickets.length - shown;
-  if (hidden > 0 || unread) {
-    const last = chunks.at(-1);
-    if (last) last.content += `\n…and ${hidden > 0 ? `${hidden} more` : "more"}: see Chatwoot.`;
+  const last = chunks.at(-1);
+  if (last && (hidden > 0 || unread)) {
+    const note = `…and ${hidden > 0 ? `${hidden} more` : "more"}: see Chatwoot.`;
+    // The last allowed message kept NOTE_ROOM for it; an earlier one may be full.
+    if (last.content.length + 1 + note.length <= CONTENT_LIMIT) last.content += `\n${note}`;
+    else chunks.push({ content: note, users: new Set(), role: false });
   }
   return chunks;
 }
@@ -166,7 +176,7 @@ function line(ctx: QueueContext, ticket: Ticket, nowSeconds: number): string {
   const owner = linked
     ? `<@${linked.discordUserId}>`
     : ticket.assignee
-      ? defused(ticket.assignee.name)
+      ? defused(clip(ticket.assignee.name, NAME_LIMIT))
       : "❔ Unassigned";
   return `${ticket.escalate ? "🔔 " : ""}${post} | ${waiting} | ${owner}`;
 }
@@ -178,12 +188,20 @@ function duration(seconds: number): string {
   return `${Math.floor(minutes / (24 * 60))} d`;
 }
 
-async function post(rest: DiscordRest, channelId: string, chunk: Chunk, roleId: string | undefined): Promise<void> {
+async function post(
+  rest: DiscordRest,
+  channelId: string,
+  chunk: Chunk,
+  roleId: string | undefined,
+  nonce: string,
+): Promise<void> {
   await rest.post<RESTPostAPIChannelMessageResult, RESTPostAPIChannelMessageJSONBody>(
     Routes.channelMessages(channelId),
     {
       body: {
         content: chunk.content,
+        nonce,
+        enforce_nonce: true,
         allowed_mentions: { parse: [], users: [...chunk.users].sort(), roles: chunk.role && roleId ? [roleId] : [] },
       },
     },

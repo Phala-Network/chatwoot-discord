@@ -31,7 +31,7 @@ interface Open {
 }
 
 /** Open conversations of account 3 (25 per page, like Chatwoot), none in account 1, and Discord. */
-function world(open: Open[], { failPost = 0 } = {}) {
+function world(open: Open[], { failPost = 0 }: { failPost?: number } = {}) {
   let failures = failPost;
   let posts = 0;
   return mockFetch(
@@ -118,6 +118,49 @@ describe("support queue", () => {
     expect(escalationLevel(40)).toBe(6);
   });
 
+  it("keeps every message within Discord's limit, with the note on what it could not list", async () => {
+    for (const threads of [0, 25, 50, 75, 100]) {
+      vi.restoreAllMocks();
+      const store = new MapStore();
+      const open = Array.from({ length: 100 }, (_, i) => ({
+        id: i + 1,
+        waiting: 2,
+        ...(i % 2 ? { assignee: { id: 99, name: "x".repeat(300) } } : {}),
+      }));
+      for (let i = 1; i <= threads; i += 1) store.threads.set(`3:${i}`, `1000000000000${String(i).padStart(5, "0")}`);
+      const { requests } = world(open);
+
+      await postQueue(context(store), NOW * 1000);
+
+      const messages = posted(requests);
+      expect(messages.every((message) => message.content.length <= 2000)).toBe(true);
+      expect(messages.at(-1).content).toMatch(/…and (\d+ )?more: see Chatwoot\.$/);
+      expect(messages[0].content).not.toContain("x".repeat(61));
+    }
+  });
+
+  it("does not ping again for a ticket that dropped out of the pages read and came back", async () => {
+    const store = new MapStore();
+    const others = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({ id: 1000 + i, waiting: 1, assignee: { id: 43, name: "Bob" } }));
+    const late = { id: 1, waiting: 3 };
+
+    const runs = [
+      [late, ...others(20)],
+      [...others(100), late],
+      [late, ...others(20)],
+    ];
+    const roles: string[][] = [];
+    for (const open of runs) {
+      vi.restoreAllMocks();
+      const { requests } = world(open);
+      await postQueue(context(store), NOW * 1000);
+      roles.push(posted(requests)[0].allowed_mentions.roles);
+    }
+
+    expect(roles).toEqual([[ROLE], [], []]);
+  });
+
   it("posts nothing when the queue is empty", async () => {
     const { requests } = world([{ id: 3, assignee: { id: 43, name: "Bob" } }]);
 
@@ -139,5 +182,8 @@ describe("support queue", () => {
     expect(messages.every((message) => message.content.length <= 2000)).toBe(true);
     expect(messages.at(-1).content).toMatch(/…and (\d+ )?more: see Chatwoot\.$/);
     expect(messages.filter((message) => message.allowed_mentions.roles.length > 0)).toHaveLength(1);
+    // A retry sends the same nonces, so Discord creates no message twice.
+    expect(messages.every((message) => message.enforce_nonce === true)).toBe(true);
+    expect(messages[0].nonce).toBe(messages[2].nonce);
   });
 });
