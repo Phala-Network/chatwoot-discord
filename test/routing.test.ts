@@ -10,7 +10,7 @@ const ROUTING = {
       sales: { assignee: 7, covers: "Sales and GPUs." },
     },
   },
-  topics: { "Technical support": "Something does not work.", Billing: "Payments and invoices." },
+  topics: { "technical-support": "Something does not work.", billing: "Payments and invoices." },
 };
 const CW = "chatwoot.example.com/api/v1/accounts/1/conversations/5";
 
@@ -27,7 +27,7 @@ class MapStore implements RoutingStore {
 interface Ticket {
   assignee?: { id: number; name: string } | null;
   status?: string;
-  topic?: string;
+  labels?: string[];
   messages?: Array<{ id: number; content: string; message_type: number; private?: boolean }>;
 }
 
@@ -43,7 +43,8 @@ function world(
     id: 5,
     status: ticket.status ?? "open",
     inbox_id: 2,
-    custom_attributes: ticket.topic ? { topic: ticket.topic } : {},
+    custom_attributes: {},
+    labels: ticket.labels ?? [],
     meta: { sender: { name: "Jane Doe", email: "jane@example.com" }, assignee: ticket.assignee ?? null },
   });
   const mock = mockFetch(
@@ -65,7 +66,7 @@ function world(
       }
       return json({});
     }),
-    on("POST", `${CW}/custom_attributes`, () => json({})),
+    on("POST", `${CW}/labels`, () => json({})),
     on("POST", "api.typesafe.ai/v1/systemone", () => {
       whileJevAnswers?.();
       return json({
@@ -94,14 +95,14 @@ afterEach(() => {
 });
 
 describe("routeConversation", () => {
-  it("assigns the owner and sets the topic Jev is confident about, sending the text without identifiers", async () => {
-    const { requests } = world({}, { owner: ["cloud", 0.93], topic: ["Technical support", 0.88] });
+  it("assigns the owner and adds the topic label Jev is confident about, sending the text without identifiers", async () => {
+    const { requests } = world({ labels: ["web3"] }, { owner: ["cloud", 0.93], topic: ["technical-support", 0.88] });
 
     await routeConversation(context(), 1, 5);
 
     expect(sent(requests, "POST", `${CW}/assignments`).map((r) => JSON.parse(r.body))).toEqual([{ assignee_id: 6 }]);
-    expect(sent(requests, "POST", `${CW}/custom_attributes`).map((r) => JSON.parse(r.body))).toEqual([
-      { custom_attributes: { topic: "Technical support" }, merge: true },
+    expect(sent(requests, "POST", `${CW}/labels`).map((r) => JSON.parse(r.body))).toEqual([
+      { labels: ["web3", "technical-support"] },
     ]);
     const [jev] = sent(requests, "POST", "api.typesafe.ai/v1/systemone");
     expect(jev?.headers.get("authorization")).toBe("Bearer ts-key");
@@ -113,26 +114,26 @@ describe("routeConversation", () => {
 
   it("leaves an unclear or doubtful ticket unassigned, and asks again only when the customer adds a message", async () => {
     const store = new MapStore();
-    const { requests } = world({}, { owner: ["unclear", 0.9], topic: ["Billing", 0.6] });
+    const { requests } = world({}, { owner: ["unclear", 0.9], topic: ["billing", 0.6] });
 
     await routeConversation(context(store), 1, 5);
     await routeConversation(context(store), 1, 5);
 
     expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
     expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
-    expect(sent(requests, "POST", `${CW}/custom_attributes`)).toEqual([]);
+    expect(sent(requests, "POST", `${CW}/labels`)).toEqual([]);
   });
 
-  it("never routes a ticket someone assigned first, nor overwrites a topic", async () => {
-    const assigned = world({ assignee: { id: 9, name: "Doyle" } }, { owner: ["sales", 1], topic: ["Billing", 1] });
+  it("never routes a ticket someone assigned first, nor adds a second topic label", async () => {
+    const assigned = world({ assignee: { id: 9, name: "Doyle" } }, { owner: ["sales", 1], topic: ["billing", 1] });
     await routeConversation(context(), 1, 5);
     expect(sent(assigned.requests, "POST", "api.typesafe.ai/v1/systemone")).toEqual([]);
     vi.restoreAllMocks();
 
-    const withTopic = world({ topic: "Billing" }, { owner: ["sales", 1], topic: ["Technical support", 1] });
+    const withTopic = world({ labels: ["billing"] }, { owner: ["sales", 1], topic: ["technical-support", 1] });
     await routeConversation(context(), 1, 5);
     expect(sent(withTopic.requests, "POST", `${CW}/assignments`)).toHaveLength(1);
-    expect(sent(withTopic.requests, "POST", `${CW}/custom_attributes`)).toEqual([]);
+    expect(sent(withTopic.requests, "POST", `${CW}/labels`)).toEqual([]);
   });
 
   it("routes on a later customer message when the first one is unclear, and stops once routed", async () => {
@@ -140,7 +141,7 @@ describe("routeConversation", () => {
     const ticket: Ticket = { messages: [{ id: 1, content: "Hello", message_type: 0 }] };
     const jev: { owner: [string, number]; topic: [string, number] } = {
       owner: ["unclear", 1],
-      topic: ["Billing", 0.5],
+      topic: ["billing", 0.5],
     };
     const { requests } = world(ticket, jev);
 
@@ -160,7 +161,7 @@ describe("routeConversation", () => {
     const store = new MapStore();
     const message = (id: number) => ({ id, content: `Message ${id}`, message_type: 0 });
     const ticket: Ticket = { messages: [message(1), message(2), message(3)] };
-    const { requests } = world(ticket, { owner: ["cloud", 0.5], topic: ["Billing", 0.5] });
+    const { requests } = world(ticket, { owner: ["cloud", 0.5], topic: ["billing", 0.5] });
 
     await routeConversation(context(store), 1, 5);
     ticket.messages = [...(ticket.messages ?? []), message(4)];
@@ -174,7 +175,7 @@ describe("routeConversation", () => {
     const later = Array.from({ length: 30 }, (_, i) => ({ id: i + 2, content: "Any news?", message_type: 0 }));
     const { requests } = world(
       { messages: [{ id: 1, content: "My invoice is wrong", message_type: 0 }, ...later] },
-      { owner: ["cloud", 1], topic: ["Billing", 1] },
+      { owner: ["cloud", 1], topic: ["billing", 1] },
     );
 
     await routeConversation(context(), 1, 5);
@@ -183,12 +184,12 @@ describe("routeConversation", () => {
     expect(JSON.parse(jev?.body ?? "{}").state.ticket).toBe("My invoice is wrong Any news? Any news?");
   });
 
-  it("keeps an assignee or topic someone set while Jev was answering, and routes no more", async () => {
+  it("keeps an assignee or topic label someone set while Jev was answering, and routes no more", async () => {
     const store = new MapStore();
     const ticket: Ticket = {};
-    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["Billing", 1] }, 0, () => {
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1] }, 0, () => {
       ticket.assignee = { id: 9, name: "Doyle" };
-      ticket.topic = "Other";
+      ticket.labels = ["billing"];
     });
 
     await routeConversation(context(store), 1, 5);
@@ -196,13 +197,13 @@ describe("routeConversation", () => {
     await routeConversation(context(store), 1, 5);
 
     expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
-    expect(sent(requests, "POST", `${CW}/custom_attributes`)).toEqual([]);
+    expect(sent(requests, "POST", `${CW}/labels`)).toEqual([]);
     expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
   });
 
   it("waits for a customer message before asking", async () => {
     const store = new MapStore();
-    const { requests } = world({ messages: [] }, { owner: ["cloud", 1], topic: ["Billing", 1] });
+    const { requests } = world({ messages: [] }, { owner: ["cloud", 1], topic: ["billing", 1] });
 
     await routeConversation(context(store), 1, 5);
 
@@ -212,7 +213,7 @@ describe("routeConversation", () => {
 
   it("applies the recorded decision on a retry instead of asking Jev again", async () => {
     const store = new MapStore();
-    const { requests } = world({}, { owner: ["sales", 0.95], topic: ["Billing", 0.95] }, 1);
+    const { requests } = world({}, { owner: ["sales", 0.95], topic: ["billing", 0.95] }, 1);
 
     await expect(routeConversation(context(store), 1, 5)).rejects.toThrow();
     await routeConversation(context(store), 1, 5);

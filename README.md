@@ -324,13 +324,13 @@ replace:
 | `queue` | object | unset | The hourly [support queue](#support-queue). Unset: off. Requires `relay.subrequestBudget` ≥ 4 × accounts + 4. |
 | `queue.channelId` | Discord id (17–20 digits) | required | Channel or forum post the queue is posted in. The bot needs *Send Messages* there (*Send Messages in Threads* for a post). |
 | `queue.escalationRoleId` | Discord id (17–20 digits) | unset | Role pinged for tickets unassigned too long. To ping a role that is not mentionable, the bot needs *Mention @everyone, @here, and All Roles* in the channel. Unset: no escalation. |
-| `routing` | object | unset | Assigns new tickets and sets their topic with TypeSafe Jev ([routing](#routing)). Requires the `TYPESAFE_API_KEY` secret. Unset: off. |
+| `routing` | object | unset | Assigns new tickets and adds their topic label with TypeSafe Jev ([routing](#routing)). Requires the `TYPESAFE_API_KEY` secret. Unset: off. |
 | `routing.model` | non-empty string | `jev-1.13.0` | TypeSafe model. |
 | `routing.minConfidence` | number 0.5–1 | `0.7` | Probability an answer needs before it is applied. |
 | `routing.accounts` | object: account id → (owner name → owner) | required | Routed accounts (configured in `accounts[]`) and the owners Jev chooses from. Owner names are 1–40 lower-case letters, digits, or `_`; `unclear` is reserved. |
 | `routing.accounts.<id>.<name>.assignee` | integer > 0 | required | Chatwoot user id to assign. |
 | `routing.accounts.<id>.<name>.covers` | 1–1000 characters | required | What the owner handles: Jev's criterion for choosing them. |
-| `routing.topics` | object: topic value → what it covers | unset | Values of `relay.topicAttribute` Jev chooses from, set when a ticket has none. Unset: no topic. |
+| `routing.topics` | object: label → what it covers | unset | Topic labels (Chatwoot label names, lower case) Jev chooses from; one is added when a ticket has none of them. Show them as forum tags with `label:<label>` keys in `forumTags`. Unset: no topic. |
 | `reconcile.lookbackSeconds` | integer ≥ 60 | `3600` | Minimum sweep window (conversations with activity within it are checked). Messages older than this are relayed without notifications. |
 | `reconcile.maxCatchUpSeconds` | integer ≥ 60 | `604800` (7 days) | Maximum sweep window after downtime. |
 | `attachments.maxFiles` | integer 0–10 | `10` | Files per `/reply` or `/note` (0 hides the editor's upload field). |
@@ -370,16 +370,16 @@ three customer messages. Before they leave the Worker, emails, URLs, hex and bas
 long tokens, phone numbers, IP addresses, @handles, and the contact's name are replaced with
 `[REDACTED]`. This is best-effort redaction of common identifiers, not anonymization: other
 personal details in the text still reach TypeSafe, so check that its data policy suits you. An
-owner at `minConfidence` or above is assigned, and a topic at or above it is set when the ticket
-has none. When no owner is clear, Jev is asked again each time the customer adds a message, until
-one is or three customer messages were seen; the ticket then stays for a person. A ticket assigned
-before its turn (by a person or a Chatwoot automation rule) is left alone, and a routed ticket is
-never routed again, even if someone unassigns it. The decision is recorded, without expiry, before
-it is applied, so a retry applies the same one without asking Jev again. It is applied to the
-ticket as it is after Jev answered: an assignee or topic someone set meanwhile is kept. Routing
-acts with `CHATWOOT_RELAY_TOKEN`, whose user must be an agent in the routed inboxes; Chatwoot
-records the assignment as made by that user. The sweep queues routing for open, unassigned tickets
-in its window, so a missed webhook only delays it.
+owner at `minConfidence` or above is assigned, and a topic at or above it is added as a label when
+the ticket has none of the topic labels. When no owner is clear, Jev is asked again each time the
+customer adds a message, until one is or three customer messages were seen; the ticket then stays
+for a person. A ticket assigned before its turn (by a person or a Chatwoot automation rule) is
+left alone, and a routed ticket is never routed again, even if someone unassigns it. The decision
+is recorded, without expiry, before it is applied, so a retry applies the same one without asking
+Jev again. It is applied to the ticket as it is after Jev answered: an assignee or topic label
+someone set meanwhile is kept. Routing acts with `CHATWOOT_RELAY_TOKEN`, whose user must be an
+agent in the routed inboxes; Chatwoot records the assignment as made by that user. The sweep
+queues routing for open, unassigned tickets in its window, so a missed webhook only delays it.
 
 ```jsonc
 "routing": {
@@ -389,7 +389,7 @@ in its window, so a missed webhook only delays it.
       "sales": { "assignee": 7, "covers": "Sales and partnerships: pricing, capacity, volume deals." }
     }
   },
-  "topics": { "Technical support": "Something does not work.", "Billing": "Payments, invoices, refunds." }
+  "topics": { "technical-support": "Something does not work.", "billing": "Payments, invoices, refunds." }
 }
 ```
 

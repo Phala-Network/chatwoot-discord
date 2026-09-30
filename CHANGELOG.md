@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking for `routing.topics`:** routing adds the topic as a Chatwoot label (the keys are now
+  label names, lower case) instead of setting the `relay.topicAttribute` attribute, so topics
+  show in Chatwoot's conversation list and label reports. A ticket that already has one of the
+  topic labels gets none. Map the labels to forum tags with `label:<label>` keys in `forumTags`.
+
 ## [0.7.1] - 2026-09-30
 
 ### Changed
