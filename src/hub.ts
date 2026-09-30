@@ -43,8 +43,8 @@ const PRIORITY = { command: 0, sweep: 1, conversation: 2, route: 2, "message-upd
 /** Requests a job may need before it can start without being cut short. */
 const COMMAND_BUDGET = 20;
 const MIN_BUDGET = 2;
-/** Reading the conversation and its messages, asking Jev, assigning, and setting the topic. */
-const ROUTE_BUDGET = 5;
+/** Reading the conversation and its messages, asking Jev, reading the conversation again, assigning, and setting the topic. */
+const ROUTE_BUDGET = 6;
 /** Pages of conversations (25 each by default) a sweep run reads; a longer pass continues in the next run. */
 const SWEEP_PAGES = 10;
 /** A sweep pass left unfinished this long (e.g. its account was removed) is started over. */

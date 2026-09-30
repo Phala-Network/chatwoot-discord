@@ -7,8 +7,10 @@
 // keys, phone numbers, IP addresses, handles, and the contact's name) removed. An owner below
 // `minConfidence`, or "unclear", is not assigned: Jev is asked again when the customer adds a
 // message, until an owner is found or MAX_MESSAGES were seen; then the ticket stays for a person.
-// Jev's decision is recorded before it is applied, so a retry applies the same decision without
-// asking Jev again. A ticket someone assigned is never routed again, even if unassigned later.
+// Jev's decision is recorded (without expiry) before it is applied, so a retry applies the same
+// decision without asking Jev again; it is applied to the conversation as it is after Jev answered,
+// so an assignee or topic someone set meanwhile is kept. A ticket someone assigned is never routed
+// again, even if unassigned later.
 
 import { z } from "zod";
 import { type ChatwootClient, type Fetch, messageContent, toRelayConversation } from "./chatwoot/api.ts";
@@ -21,7 +23,6 @@ const UNCLEAR_CRITERION =
   "The message has no concrete request, mixes several of the other areas, concerns another product, or cannot be " +
   "assigned to exactly one of them.";
 const JEV_URL = "https://api.typesafe.ai/v1/systemone";
-const DECISION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_MESSAGES = 3;
 const MAX_TEXT = 1600;
 
@@ -129,10 +130,11 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
   const conversation = toRelayConversation(conversationId, raw);
   if (conversation.assignee && recorded?.state !== "pending") {
     // Assigned by a person or an automation rule: nothing to decide, ever.
-    store.set(key, JSON.stringify({ ...(recorded ?? unassignable()), state: "done" }), DECISION_TTL_MS);
+    store.set(key, JSON.stringify({ ...(recorded ?? unassignable()), state: "done" }));
     return;
   }
   let decision = recorded?.state === "pending" ? recorded : undefined;
+  let current = conversation;
   if (!decision) {
     if (conversation.status !== "open") return; // Routed if it opens again unassigned.
     const { text, messages } = await customerText(chatwoot, accountId, conversationId, [
@@ -142,23 +144,28 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     // Nothing new since the last answer (or no customer message yet): a later message routes it.
     if (messages <= (recorded?.messages ?? 0)) return;
     decision = await decide(ctx, owners, text, messages);
-    store.set(key, JSON.stringify(decision), DECISION_TTL_MS);
+    store.set(key, JSON.stringify(decision));
+    // Asking Jev takes a moment: apply the decision to the conversation as it is now.
+    const now = await chatwoot.getConversation(accountId, conversationId);
+    if (!now) return;
+    current = toRelayConversation(conversationId, now);
   }
 
   const owner =
     decision.owner !== null && decision.ownerConfidence >= routing.minConfidence ? owners[decision.owner] : undefined;
-  const assign = owner !== undefined && conversation.status === "open" && !conversation.assignee;
+  const assign = owner !== undefined && current.status === "open" && !current.assignee;
   if (assign) await chatwoot.assign(accountId, conversationId, owner.assignee);
 
   const topicAttribute = settings.config.relay.topicAttribute;
   const topic =
-    decision.topicConfidence >= routing.minConfidence && !conversation.customAttributes[topicAttribute]
+    decision.topicConfidence >= routing.minConfidence && !current.customAttributes[topicAttribute]
       ? decision.topic
       : null;
   if (topic !== null) await chatwoot.setCustomAttribute(accountId, conversationId, topicAttribute, topic);
 
-  const state: RoutingState = owner !== undefined || decision.messages >= MAX_MESSAGES ? "done" : "waiting";
-  store.set(key, JSON.stringify({ ...decision, state }), DECISION_TTL_MS);
+  const final = owner !== undefined || current.assignee != null || decision.messages >= MAX_MESSAGES;
+  const state: RoutingState = final ? "done" : "waiting";
+  store.set(key, JSON.stringify({ ...decision, state }));
   log.info("ticket routed", {
     accountId,
     conversationId,
@@ -180,7 +187,8 @@ async function customerText(
   conversationId: number,
   identities: Array<string | null | undefined>,
 ): Promise<{ text: string; messages: number }> {
-  const messages = (await chatwoot.listMessages(accountId, conversationId))
+  // after=0: the oldest page (Chatwoot's default page is the latest messages).
+  const messages = (await chatwoot.listMessages(accountId, conversationId, 0))
     .filter((message) => message.message_type === 0 && !message.private)
     .slice(0, MAX_MESSAGES);
   const subject = messages.map((message) => message.content_attributes?.email?.subject).find(Boolean) ?? "";

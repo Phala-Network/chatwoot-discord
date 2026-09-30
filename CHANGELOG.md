@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Routing sent Jev the first customer messages of the latest page, not of the conversation, so a
+  ticket with more than 20 messages was judged on recent ones.
+- Routing decisions expired after 30 days, after which a ticket could be routed again.
+- An assignee or topic set while Jev was answering could be overwritten; the decision is now
+  applied to the conversation as it is after Jev answered.
+
 ## [0.6.0] - 2026-09-29
 
 ### Changed
