@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `triage.draftLabels` is removed; delete it from `CONFIG`. **Reply with this** on a
+  triage bot message takes its last code block, whatever the headings, so the bot's prompt no
+  longer has to write a fixed label; a triage message without a code block has no draft.
+
 ## [0.8.1] - 2026-09-30
 
 ### Fixed

@@ -279,23 +279,14 @@ export function tagKeys(accountId: number, conversation: RelayConversation, topi
   ];
 }
 
-/**
- * Extracts the draft a triage bot wrote after one of `labels`: the first code block whose
- * previous non-blank line contains a label, e.g. "**Draft**:\n```\n...\n```".
- */
-export function draftFromTriage(content: string, labels: readonly string[]): string | undefined {
-  const usable = labels.filter((label) => label !== "");
-  const lines = content.split("\n");
-  for (const block of codeBlocks(lines)) {
-    const before = lines.slice(0, block.line).findLast((line) => line.trim() !== "");
-    if (before !== undefined && usable.some((label) => before.includes(label))) return block.text.trim();
-  }
-  return undefined;
+/** The last fenced code block of a message, if it has one. */
+export function lastCodeBlock(content: string): string | undefined {
+  return codeBlocks(content.split("\n")).at(-1)?.text.trim();
 }
 
 /** The last fenced code block of a message, or the whole message when it has none. */
 export function draftFromMessage(content: string): string {
-  return (codeBlocks(content.split("\n")).at(-1)?.text ?? content).trim();
+  return lastCodeBlock(content) ?? content.trim();
 }
 
 /**
