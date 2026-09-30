@@ -7,6 +7,8 @@
 // keys, phone numbers, IP addresses, handles, and the contact's name) removed. An owner below
 // `minConfidence`, or "unclear", is not assigned: Jev is asked again when the customer adds a
 // message, until an owner is found or MAX_MESSAGES were seen; then the ticket stays for a person.
+// Customer messages are looked for in the next PAGES pages of messages (notes and activity lines
+// count too): one beyond them is not seen, and the ticket is then not snoozed.
 // With `snoozeUnclear`, such a ticket is snoozed until the customer's next message (which reopens
 // it), so it waits for more detail instead of escalating; once MAX_MESSAGES were seen it stays open.
 // Jev's decision is recorded (without expiry) before it is applied, so a retry applies the same
@@ -207,9 +209,9 @@ const MESSAGES_PER_PAGE = 100;
 const PAGES = 3;
 
 /**
- * Up to `limit` customer messages after message `messageId` (0: from the start), within the next
- * PAGES pages of messages (notes and activity lines may come in between); beyond them there are
- * taken to be none.
+ * Up to `limit` customer messages after message `messageId` (0: from the start), and whether that
+ * is all there are: notes and activity lines may come in between, and only PAGES pages of messages
+ * are read.
  */
 async function customerMessages(
   chatwoot: ChatwootClient,
@@ -217,27 +219,28 @@ async function customerMessages(
   conversationId: number,
   messageId: number,
   limit: number,
-): Promise<ChatwootMessage[]> {
+): Promise<{ messages: ChatwootMessage[]; complete: boolean }> {
   const found: ChatwootMessage[] = [];
   let after = messageId;
   for (let page = 0; page < PAGES && found.length < limit; page += 1) {
     const messages = await chatwoot.listMessages(accountId, conversationId, after);
     found.push(...messages.filter((message) => message.message_type === 0 && !message.private));
     const last = messages.at(-1);
-    if (!last || messages.length < MESSAGES_PER_PAGE) break;
+    if (!last || messages.length < MESSAGES_PER_PAGE) return { messages: found.slice(0, limit), complete: true };
     after = last.id;
   }
-  return found.slice(0, limit);
+  return { messages: found.slice(0, limit), complete: found.length >= limit };
 }
 
-/** Whether the customer wrote after message `messageId`. */
+/** Whether the customer wrote after message `messageId`; beyond the pages read, taken as yes. */
 async function wroteSince(
   chatwoot: ChatwootClient,
   accountId: number,
   conversationId: number,
   messageId: number,
 ): Promise<boolean> {
-  return (await customerMessages(chatwoot, accountId, conversationId, messageId, 1)).length > 0;
+  const { messages, complete } = await customerMessages(chatwoot, accountId, conversationId, messageId, 1);
+  return messages.length > 0 || !complete;
 }
 
 /**
@@ -250,7 +253,7 @@ async function customerText(
   conversationId: number,
   identities: Array<string | null | undefined>,
 ): Promise<{ text: string; messages: number; lastMessageId: number }> {
-  const messages = await customerMessages(chatwoot, accountId, conversationId, 0, MAX_MESSAGES);
+  const { messages } = await customerMessages(chatwoot, accountId, conversationId, 0, MAX_MESSAGES);
   const subject = messages.map((message) => message.content_attributes?.email?.subject).find(Boolean) ?? "";
   const text = [subject, ...messages.map(messageContent)].filter((part) => part.trim()).join("\n");
   return { text: sanitize(text, identities), messages: messages.length, lastMessageId: messages.at(-1)?.id ?? 0 };

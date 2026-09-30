@@ -19,7 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (Message Content intent), else links to it for **Reply with this**.
 - Routing does not snooze a ticket the customer has written to since the messages Jev was given,
   and asks Jev again instead of applying a decision made before them. It reads past pages of
-  notes and activity lines to find the customer's messages.
+  notes and activity lines to find the customer's messages, and does not snooze a ticket
+  when it cannot read far enough to tell.
 - **Use draft** links to the answer when Discord cannot give it back in time, and the Manage
   card keeps its label menu when the ticket's only label is too long for it.
 - The Manage card's menus keep the current assignee and label among their 25 choices, a label may

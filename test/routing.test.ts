@@ -246,6 +246,19 @@ describe("routeConversation", () => {
     expect(asked).toEqual(["Message 1", "Message 1 Message 200"]);
   });
 
+  it("does not snooze when it cannot read far enough to tell whether the customer wrote", async () => {
+    const message = (id: number) => ({ id, content: `Message ${id}`, message_type: 0 });
+    const ticket: Ticket = { messages: [message(1)] };
+    const notes = Array.from({ length: 300 }, (_, i) => ({ id: i + 2, content: "note", message_type: 2 }));
+    const { requests } = world(ticket, { owner: ["unclear", 1], topic: ["billing", 0.5] }, 0, () => {
+      ticket.messages = [message(1), ...notes, message(400)];
+    });
+
+    await routeConversation(context(new MapStore(), { ...ROUTING, snoozeUnclear: true }), 1, 5);
+
+    expect(sent(requests, "POST", `${CW}/toggle_status`)).toEqual([]);
+  });
+
   it("asks Jev again instead of applying a decision made before the customer's newest message", async () => {
     const store = new MapStore();
     const message = (id: number) => ({ id, content: `Message ${id}`, message_type: 0 });

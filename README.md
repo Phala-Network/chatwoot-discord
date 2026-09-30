@@ -407,7 +407,8 @@ clear owner is snoozed until the customer's next message, which reopens it and a
 waits for detail instead of escalating; after the third message it stays open. A ticket the customer
 wrote to after the messages Jev was given is not snoozed (a message in the moment between that
 check and the snooze waits for the customer's next one; the support queue lists the ticket
-meanwhile). A ticket assigned
+meanwhile). Customer messages are looked for among the next 300 messages (notes and activity lines count
+too): one beyond them is not seen, and the ticket is then not snoozed but left for a person. A ticket assigned
 before its turn (by a person or a Chatwoot automation rule) is left alone, and a routed ticket is
 never routed again, even if someone unassigns it. The decision is recorded, without expiry, before
 it is applied, so a retry applies the same one without asking Jev again. It is applied to the ticket
