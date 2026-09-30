@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-09-30
+
 ### Changed
 
 - The ticket buttons are three rows: answering (**Reply**), who owns the ticket (**Take**,
@@ -404,7 +406,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-invocation subrequest budget, and a cron reconciliation sweep for missed webhooks.
 - Verification of Chatwoot webhook HMAC signatures and Discord Ed25519 interaction signatures.
 
-[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.14.0...v0.15.0
