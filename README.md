@@ -208,8 +208,8 @@ Used inside a ticket post, by Discord users linked in `agents[]` who have a toke
 - The ticket card (at the top of the post) and every message (not activity lines) end with three
   rows of buttons: answering (**Reply**), who owns the ticket (**Take**, **Assign to…**), and its
   state (**Resolve**, **Snooze** until the next reply, **Block**, and **Manage**).
-- Right under a triage bot's answer with a draft, **Use draft** (highlighted) and **Reply**, when
-  the bot's hook reports the answer (see [Triage bot hook](#triage-bot-hook)). **Use draft** opens
+- Right under a triage bot's answer with a draft come the same buttons, led by **Use draft**
+  (highlighted), when the bot's hook reports the answer (see [Triage bot hook](#triage-bot-hook)). **Use draft** opens
   the `/reply` editor with that answer's draft: the one the hook sent, or else the answer's last
   code block read from Discord, which needs the Message Content intent; without it, it links to
   the answer for **Reply with this**, which works on any message.
@@ -431,8 +431,8 @@ not see Discord messages. So the bot's side reports each answer once it is in th
 /triage/answered` with `{"threadId":"<post id>","answerId":"<answer message id>","draft":"<the
 reply draft>"}`, signed like a Chatwoot webhook (`x-timestamp`, Unix seconds, and `x-signature`,
 `sha256=` and the hex HMAC-SHA256 of `<timestamp>.<body>` with `TRIAGE_HOOK_SECRET`). The Worker
-keeps the draft for 14 days and posts **Use draft** and **Reply** right under the answer, once per
-answer (a repeated call adds nothing). Report only answers that have a draft, and only after they
+keeps the draft for 14 days and posts the ticket buttons, led by **Use draft**, right under the
+answer, once per answer (a repeated call adds nothing). Report only answers that have a draft, and only after they
 were sent, so the buttons follow them.
 
 ## Limits and the Workers Free plan

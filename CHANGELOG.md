@@ -14,8 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   message again, the customer's included.
 - **Breaking:** the triage bot hook (`POST /triage/answered`) takes
   `{"threadId", "answerId", "draft"}` and is called once the answer is in the post: the Worker
-  keeps the draft and posts **Use draft** (highlighted) and **Reply** right under that answer, at
-  once and once per answer. **Use draft** takes the draft the hook sent, else reads the answer
+  keeps the draft and posts the ticket buttons, led by **Use draft** (highlighted), right under
+  that answer, at once and once per answer. **Use draft** takes the draft the hook sent, else reads the answer
   (Message Content intent), else links to it for **Reply with this**.
 - Routing does not snooze a ticket the customer has written to since the messages Jev was given,
   asks Jev again instead of applying a decision made before them, and lifts its own snooze when

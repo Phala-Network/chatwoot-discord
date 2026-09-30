@@ -186,8 +186,8 @@ export class Relay {
   }
 
   /**
-   * The triage bot's answer `answerId` has a draft: posts its Use draft button right under it (the
-   * bot's hook calls once the answer is in the post). Posting unarchived the post, so its state is
+   * The triage bot's answer `answerId` has a draft: posts the ticket buttons, led by its Use draft,
+   * right under it (the bot's hook calls once the answer is in the post). Posting unarchived the post, so its state is
    * marked out of date for the next sync. A post that no longer exists is left.
    */
   async postAnswerButtons(accountId: number, conversationId: number, answerId: string): Promise<void> {

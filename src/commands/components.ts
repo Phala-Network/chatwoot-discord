@@ -16,7 +16,7 @@ import {
 /** Custom ids of the ticket buttons and the menus they show. */
 export const BUTTONS = {
   reply: "ticket:reply",
-  /** Followed by ":<answer message id>": under a triage bot's answer (see answerButtons). */
+  /** Followed by ":<answer message id>": under a triage bot's answer with a draft. */
   draft: "ticket:draft",
   take: "ticket:take",
   assign: "ticket:assign",
@@ -74,29 +74,27 @@ function option(value: string, label: string, emoji: string, selected: boolean):
 }
 
 /**
- * The ticket buttons, a row per concern: answering (Reply), who owns the ticket (Take; Assign to,
+ * The ticket buttons, a row per concern: answering (Reply; under a triage bot's answer with a
+ * draft, led by Use draft for that answer, highlighted), who owns the ticket (Take; Assign to,
  * which shows a menu of agents), and its state (Resolve, Snooze until the next reply, Block, and
  * Manage for the panel).
  */
-export function ticketButtons(): ActionRow[] {
+export function ticketButtons(answerId?: string): ActionRow[] {
   return [
-    row([button(BUTTONS.reply, "Reply", "✏️", ButtonStyle.Primary)]),
+    row(
+      answerId
+        ? [
+            button(`${BUTTONS.draft}:${answerId}`, "Use draft", "🤖", ButtonStyle.Primary),
+            button(BUTTONS.reply, "Reply", "✏️"),
+          ]
+        : [button(BUTTONS.reply, "Reply", "✏️", ButtonStyle.Primary)],
+    ),
     row([button(BUTTONS.take, "Take", "🙋"), button(BUTTONS.assign, "Assign to…", "👤")]),
     row([
       button(BUTTONS.resolve, "Resolve", "✅", ButtonStyle.Success),
       button(BUTTONS.snooze, "Snooze", "💤"),
       button(BUTTONS.block, "Block", "🚫", ButtonStyle.Danger),
       button(BUTTONS.manage, "Manage", "⚙️"),
-    ]),
-  ];
-}
-
-/** Right under a triage bot's answer with a draft: Use draft (that answer's), and Reply. */
-export function answerButtons(answerId: string): ActionRow[] {
-  return [
-    row([
-      button(`${BUTTONS.draft}:${answerId}`, "Use draft", "🤖", ButtonStyle.Primary),
-      button(BUTTONS.reply, "Reply", "✏️"),
     ]),
   ];
 }

@@ -445,7 +445,7 @@ describe("worker", () => {
     expect(bar).toHaveLength(1);
     expect(bar[0]).toMatchObject({ thread, body: { username: "Chatwoot", allowed_mentions: { parse: [] } } });
     expect(bar[0]?.body).not.toHaveProperty("content");
-    expect(buttons(bar[0]?.body)).toEqual([[`ticket:draft:${answerId}`, "ticket:reply"]]);
+    expect(buttons(bar[0]?.body)).toEqual([[`ticket:draft:${answerId}`, "ticket:reply"], OWNER, STATE]);
 
     // Use draft opens the editor with the draft the hook sent: no Discord read, no intent needed.
     const pressed = await discordInteraction({
