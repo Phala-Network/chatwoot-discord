@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-30
+
 ### Changed
 
 - Routing no longer reads decisions in 0.5.0's format (0.5.0 ran briefly before 0.6.0); a ticket
@@ -258,7 +260,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-invocation subrequest budget, and a cron reconciliation sweep for missed webhooks.
 - Verification of Chatwoot webhook HMAC signatures and Discord Ed25519 interaction signatures.
 
-[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.5.0...v0.6.0
