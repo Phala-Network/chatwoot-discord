@@ -9,6 +9,8 @@
 
 import { DurableObject } from "cloudflare:workers";
 import {
+  type APIMessageTopLevelComponent,
+  MessageFlags,
   type RESTPatchAPIWebhookWithTokenMessageJSONBody,
   type RESTPatchAPIWebhookWithTokenMessageResult,
   Routes,
@@ -17,7 +19,6 @@ import { z } from "zod";
 import { Budget, BudgetExhaustedError } from "./budget.ts";
 import { chatwootClient, toRelayConversation } from "./chatwoot/api.ts";
 import { executeCommand } from "./commands/actions.ts";
-import type { ActionRow } from "./commands/components.ts";
 import { type CommandJob, commandJobSchema } from "./commands/job.ts";
 import { loadSettings, relaysInbox, type Settings } from "./config.ts";
 import { DiscordForum } from "./discord/forum.ts";
@@ -346,14 +347,20 @@ export class Hub extends DurableObject<Env> {
 }
 
 /**
- * Replaces the invoker's "thinking…" with `content`, or the Manage panel the job came from with
- * the panel drawn again. Without `components`, a panel keeps its menus (e.g. after an error).
+ * Replaces the invoker's "thinking…" with `content`, or with `components` as a Components V2
+ * message: the Manage panel (the one the job came from, or a new one).
  */
-async function respond(rest: DiscordRest, job: CommandJob, content: string, components?: ActionRow[]): Promise<void> {
+async function respond(
+  rest: DiscordRest,
+  job: CommandJob,
+  content: string,
+  components?: APIMessageTopLevelComponent[],
+): Promise<void> {
+  const body = components ? { flags: MessageFlags.IsComponentsV2, components } : { content };
   try {
     await rest.patch<RESTPatchAPIWebhookWithTokenMessageResult, RESTPatchAPIWebhookWithTokenMessageJSONBody>(
       Routes.webhookMessage(job.applicationId, job.token, "@original"),
-      { body: { content, allowed_mentions: { parse: [] }, ...(components ? { components } : {}) }, auth: false },
+      { body: { ...body, allowed_mentions: { parse: [] } }, auth: false },
     );
   } catch (error) {
     log.error("command follow-up failed", { interactionId: job.interactionId, ...errorFields(error) });

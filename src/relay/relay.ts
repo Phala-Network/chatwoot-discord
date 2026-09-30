@@ -121,8 +121,8 @@ export interface RelayOptions {
   triage?: TriageOptions | undefined;
   /** The agent linked to a Chatwoot user id, if any. */
   linkedAgent?: ((chatwootUserId: number) => LinkedAgent | undefined) | undefined;
-  /** Buttons on the ticket card, and under each customer message. */
-  buttons?: { card: MessageComponents; message: MessageComponents } | undefined;
+  /** Buttons on the ticket card and under each message (not activity lines). */
+  buttons?: MessageComponents | undefined;
   /** Messages created longer ago than this are relayed without notifications. */
   liveSeconds: number;
   now?: () => Date;
@@ -341,11 +341,9 @@ export class Relay {
         allowed_mentions: { parse: [] },
       });
     }
-    // The customer's message ends with the buttons to act on it.
+    // A message ends with the buttons to act on the ticket; an activity line has none.
     const last = parts.at(-1);
-    if (last && this.options.buttons && message.messageType === "incoming" && !message.private) {
-      last.components = this.options.buttons.message;
-    }
+    if (last && this.options.buttons && message.messageType !== "activity") last.components = this.options.buttons;
     return parts;
   }
 
@@ -386,7 +384,7 @@ export class Relay {
     };
     const tags = this.postTags(accountId, conversation);
     if (tags.length > 0) post.applied_tags = tags;
-    if (this.options.buttons) post.components = this.options.buttons.card;
+    if (this.options.buttons) post.components = this.options.buttons;
     const { channelId: threadId } = await forum.execute(target.forumChannelId, post);
     store.updateConversation(accountId, conversation.id, {
       threadId,

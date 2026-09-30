@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The ticket buttons (**Reply**, **Take**, **Resolve**, **Manage**) are under every message, not
+  only customer messages; activity lines have none.
+- The Manage panel shows a heading above each menu (Assignee, Labels, Priority, Status). It is a
+  Components V2 message.
+
 ## [0.13.1] - 2026-09-30
 
 ### Removed

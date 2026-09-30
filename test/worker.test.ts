@@ -347,12 +347,13 @@ describe("worker", () => {
       content:
         "-# via Live chat · Acme — Product App\n-# jane@example.com\n[Open in Chatwoot](<https://chatwoot.example.com/app/accounts/3/conversations/12>)",
     });
-    // The card carries every ticket button; the customer's message, the ones to answer it.
+    // The card and every message carry the ticket buttons; activity lines do not.
     const buttons = (body: unknown) =>
       (body as { components?: Array<{ components: Array<{ custom_id: string }> }> }).components?.flatMap((row) =>
         row.components.map((button) => button.custom_id),
       );
-    expect(buttons(posts[0]?.body)).toEqual(["ticket:reply", "ticket:take", "ticket:resolve", "ticket:manage"]);
+    const all = ["ticket:reply", "ticket:take", "ticket:resolve", "ticket:manage"];
+    expect(buttons(posts[0]?.body)).toEqual(all);
     const thread = posts[1]?.thread ?? "";
     expect(thread).toMatch(/^\d{18}$/);
     expect(posts[1]).toMatchObject({
@@ -364,7 +365,7 @@ describe("worker", () => {
         avatar_url: "https://gravatar.com/avatar/?d=mp&f=y&s=256",
       },
     });
-    expect(buttons(posts[1]?.body)).toEqual(["ticket:reply", "ticket:manage"]);
+    expect(buttons(posts[1]?.body)).toEqual(all);
 
     // The post URL is merged into the conversation's attributes; other attributes survive.
     const link = world.requests.find((request) => request.url.pathname.endsWith("/custom_attributes"));
@@ -383,7 +384,8 @@ describe("worker", () => {
       ?.messages.push({ id: 502, content: "Try again", message_type: 1, sender: { name: "Sam", type: "user" } });
     await chatwootWebhook(created(12));
     await drain();
-    expect(world.webhookPosts().slice(2)).toEqual([
+    const later = world.webhookPosts().slice(2);
+    expect(later).toMatchObject([
       {
         thread,
         body: {
@@ -394,6 +396,7 @@ describe("worker", () => {
         },
       },
     ]);
+    expect(buttons(later[0]?.body)).toEqual(all);
   });
 
   it("retries a failed message with backoff without skipping it", async () => {
