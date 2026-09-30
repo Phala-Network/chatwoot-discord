@@ -29,8 +29,8 @@ const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("unassign") }),
   /** Adds or removes one label, by its name (Chatwoot's label names are lower-case). */
   z.object({ type: z.literal("label"), change: z.enum(["add", "remove"]), label: z.string().min(1) }),
-  /** Adds and removes labels, keeping the others (the Manage panel's label menu). */
-  z.object({ type: z.literal("labels"), add: z.array(z.string().min(1)), remove: z.array(z.string().min(1)) }),
+  /** Sets the conversation's labels, replacing the others (the Manage panel's one-label menu). */
+  z.object({ type: z.literal("labels"), labels: z.array(z.string().min(1)) }),
   /** Only draws the Manage panel. */
   z.object({ type: z.literal("panel") }),
   z.object({

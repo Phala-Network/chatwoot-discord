@@ -49,14 +49,11 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
       case "panel":
         break;
       case "labels": {
-        // Relative to what the panel showed, so labels someone changed meanwhile are kept.
-        const current = await chatwoot.conversationLabels(accountId, conversationId);
         const known = await chatwoot.listLabels(accountId);
-        const unknown = action.add.find((label) => !known.includes(label));
+        const unknown = action.labels.find((label) => !known.includes(label));
         if (unknown !== undefined) throw new UserError(`There is no label "${unknown}" in this Chatwoot account.`);
-        const labels = [...new Set([...current, ...action.add])].filter((label) => !action.remove.includes(label));
-        await chatwoot.setLabels(accountId, conversationId, labels);
-        message = labelsMessage(action.add, action.remove);
+        await chatwoot.setLabels(accountId, conversationId, action.labels);
+        message = action.labels.length > 0 ? `Label set to ${action.labels.join(", ")}.` : "Labels removed.";
         break;
       }
       case "status": {
@@ -221,14 +218,6 @@ async function drawPanel(
     agents.flatMap((agent) => (agent.id === undefined ? [] : [{ id: agent.id, name: agent.name ?? `#${agent.id}` }])),
     labels,
   );
-}
-
-function labelsMessage(added: string[], removed: string[]): string {
-  const parts = [
-    ...(added.length > 0 ? [`added ${added.join(", ")}`] : []),
-    ...(removed.length > 0 ? [`removed ${removed.join(", ")}`] : []),
-  ];
-  return parts.length > 0 ? `Labels ${parts.join("; ")}.` : "Labels unchanged.";
 }
 
 function statusMessage(status: StatusChange["status"], snoozedUntil: number | undefined): string {

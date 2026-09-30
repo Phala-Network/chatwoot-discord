@@ -352,7 +352,7 @@ describe("worker", () => {
       (body as { components?: Array<{ components: Array<{ custom_id: string }> }> }).components?.flatMap((row) =>
         row.components.map((button) => button.custom_id),
       );
-    const all = ["ticket:reply", "ticket:take", "ticket:resolve", "ticket:manage"];
+    const all = ["ticket:reply", "ticket:draft", "ticket:take", "ticket:resolve", "ticket:manage"];
     expect(buttons(posts[0]?.body)).toEqual(all);
     const thread = posts[1]?.thread ?? "";
     expect(thread).toMatch(/^\d{18}$/);

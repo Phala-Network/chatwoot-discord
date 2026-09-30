@@ -344,15 +344,13 @@ describe("executeCommand", () => {
       expect(await missing.result).toBe('❌ This conversation has no label "vip".');
     });
 
-    it("adds and removes several, keeping labels the change does not name", async () => {
-      const { result, requests } = run(
-        { type: "labels", add: ["vip"], remove: ["refund"] },
-        on("GET", `${conversation}/labels`, () => json({ payload: ["refund", "web3"] })),
-        accountLabels,
-        setLabels,
-      );
-      expect(await result).toBe("✅ Labels added vip; removed refund.");
-      expect(sent(requests)).toEqual([{ labels: ["web3", "vip"] }]);
+    it("sets the ticket's one label, or removes them all", async () => {
+      const set = run({ type: "labels", labels: ["vip"] }, accountLabels, setLabels);
+      expect(await set.result).toBe("✅ Label set to vip.");
+      expect(sent(set.requests)).toEqual([{ labels: ["vip"] }]);
+      const cleared = run({ type: "labels", labels: [] }, accountLabels, setLabels);
+      expect(await cleared.result).toBe("✅ Labels removed.");
+      expect(sent(cleared.requests)).toEqual([{ labels: [] }]);
     });
   });
 

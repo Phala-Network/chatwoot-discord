@@ -7,8 +7,10 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { eventTarget, isFreshTimestamp, verifyChatwootSignature } from "./chatwoot/webhook.ts";
 import { FAILED } from "./commands/common.ts";
+import { latestDraft } from "./commands/draft.ts";
 import { handleInteraction, privately } from "./commands/handler.ts";
 import { ConfigError, loadSettings } from "./config.ts";
+import { DiscordRest } from "./discord/rest.ts";
 import { HUB_NAME } from "./hub.ts";
 import { errorFields, log } from "./log.ts";
 
@@ -92,6 +94,12 @@ app.post("/discord/interactions", bodyLimit({ maxSize: 1024 * 1024 }), async (c)
     const result = await handleInteraction(interaction, {
       settings,
       ticketForThread: async (threadId) => (await stub.ticketForThread(threadId)) ?? undefined,
+      latestDraft: (threadId) =>
+        latestDraft(
+          new DiscordRest(settings.secrets.DISCORD_BOT_TOKEN, (request) => fetch(request)),
+          threadId,
+          settings.config.triage.userId,
+        ),
     });
     if (result.job) await stub.enqueueCommand(result.job);
     return c.json(result.response);

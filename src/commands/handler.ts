@@ -22,6 +22,7 @@ import { draftFromMessage, lastCodeBlock } from "../relay/format.ts";
 import { filesTooLarge, fileTooLarge, isDiscordAttachmentUrl, NOT_LINKED, UserError } from "./common.ts";
 import { BUTTONS, NONE, PANEL } from "./components.ts";
 import { CONTENT_MAX, REPLY_WITH_THIS } from "./definitions.ts";
+import type { Draft } from "./draft.ts";
 import { type AttachmentRef, type CommandAction, type CommandJob, prioritySchema } from "./job.ts";
 
 interface Ticket {
@@ -33,6 +34,8 @@ interface HandlerDeps {
   settings: Settings;
   /** The conversation the relay mapped to this forum post, if any. */
   ticketForThread(threadId: string): Promise<Ticket | undefined>;
+  /** The triage bot's latest draft in the post. */
+  latestDraft(threadId: string): Promise<Draft>;
 }
 
 export interface HandlerResult {
@@ -54,7 +57,9 @@ export async function handleInteraction(interaction: APIInteraction, deps: Handl
     const threadId = interaction.channel?.id ?? interaction.channel_id;
     const ticket = threadId ? await deps.ticketForThread(threadId) : undefined;
     const account = ticket && deps.settings.account(ticket.accountId);
-    if (!ticket || !account) return privately("Use this command inside a ticket post in the Chatwoot forum.");
+    if (!threadId || !ticket || !account) {
+      return privately("Use this command inside a ticket post in the Chatwoot forum.");
+    }
 
     const userId = invokerId(interaction);
     if (!userId || !deps.settings.chatwootUserFor(userId) || !deps.settings.agentToken(userId))
@@ -64,6 +69,7 @@ export async function handleInteraction(interaction: APIInteraction, deps: Handl
       deps,
       interaction,
       userId,
+      threadId,
       ticket,
       title: `${account.name} #${ticket.conversationId}`,
       panel: interaction.type === InteractionType.MessageComponent && interaction.data.custom_id.startsWith("panel:"),
@@ -72,7 +78,7 @@ export async function handleInteraction(interaction: APIInteraction, deps: Handl
       case InteractionType.ModalSubmit:
         return submit(context, interaction);
       case InteractionType.MessageComponent:
-        return component(context, interaction);
+        return await component(context, interaction);
       default:
         return command(context, interaction);
     }
@@ -86,6 +92,7 @@ interface Context {
   deps: HandlerDeps;
   interaction: APIApplicationCommandInteraction | APIModalSubmitInteraction | APIMessageComponentInteraction;
   userId: string;
+  threadId: string;
   ticket: Ticket;
   title: string;
   /** From the Manage panel: the job draws the panel again in place of a confirmation. */
@@ -364,11 +371,18 @@ function defer(context: Context, action: CommandAction): HandlerResult {
 }
 
 /** A ticket button, or a change in the Manage panel. */
-function component(context: Context, interaction: APIMessageComponentInteraction): HandlerResult {
+async function component(context: Context, interaction: APIMessageComponentInteraction): Promise<HandlerResult> {
   const { data } = interaction;
   switch (data.custom_id) {
     case BUTTONS.reply:
       return { response: editor(context, "reply", undefined) };
+    case BUTTONS.draft: {
+      const draft = await context.deps.latestDraft(context.threadId);
+      if ("text" in draft) return { response: editor(context, "reply", draft.text) };
+      return privately(
+        draft.missing === "unreadable" ? DRAFT_UNREADABLE : "The triage bot has no draft in this post yet.",
+      );
+    }
     case BUTTONS.take: {
       const chatwootUserId = context.deps.settings.chatwootUserFor(context.userId);
       if (chatwootUserId === undefined) return privately(NOT_LINKED);
@@ -393,11 +407,8 @@ function component(context: Context, interaction: APIMessageComponentInteraction
       return agent === NONE ? defer(context, { type: "unassign" }) : defer(context, assignee(agent));
     }
     case PANEL.labels: {
-      // The panel was drawn with the ticket's labels selected: the change is what differs.
-      const shown = shownLabels(interaction);
-      const add = values.filter((label) => !shown.includes(label));
-      const remove = shown.filter((label) => !values.includes(label));
-      return defer(context, { type: "labels", add, remove });
+      const [label = NONE] = values;
+      return defer(context, { type: "labels", labels: label === NONE ? [] : [label] });
     }
     default:
       return privately("Unknown menu.");
@@ -411,22 +422,8 @@ function assignee(value: string): CommandAction {
   return { type: "assign", chatwootUserId };
 }
 
-/** The labels the panel's label menu was drawn with (its default options). */
-function shownLabels(interaction: APIMessageComponentInteraction): string[] {
-  // The panel is a card (a container) of rows.
-  const rows = (interaction.message.components ?? []).flatMap((part) =>
-    part.type === ComponentType.Container ? part.components : [part],
-  );
-  for (const row of rows) {
-    if (row.type !== ComponentType.ActionRow) continue;
-    for (const menu of row.components) {
-      if (menu.type === ComponentType.StringSelect && menu.custom_id === PANEL.labels) {
-        return menu.options.filter((option) => option.default).map((option) => option.value);
-      }
-    }
-  }
-  return [];
-}
+const DRAFT_UNREADABLE =
+  "This bot cannot read the triage bot's messages yet (it needs Discord's Message Content intent). Right-click the draft and choose Apps → Reply with this.";
 
 export function privately(content: string): HandlerResult {
   return {
