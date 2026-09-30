@@ -206,10 +206,12 @@ Used inside a ticket post, by Discord users linked in `agents[]` who have a toke
 - **Reply** opens the `/reply` editor; to start from the triage bot's draft, use **Reply with
   this** on its message (a button cannot read another bot's message without the privileged
   Message Content intent). **Take** assigns the ticket to you; **Resolve** resolves it.
-- **Manage** opens a panel only you see, drawn with the ticket as it is: a menu under a heading
-  for each of its assignee, labels, priority, and status (snooze included). A change is made at once, and the panel is drawn
-  again with the result, so it always shows the ticket's state. A label change adds and removes
-  what you changed in the menu, keeping labels someone else changed meanwhile.
+- **Manage** opens a card only you see, drawn with the ticket as it is and coloured by its status:
+  menus for its assignee and labels, and **Open**, **Resolve**, and **Snooze** (until the next
+  reply) buttons with the current status highlighted. A change is made at once, and the card is
+  drawn again with the result, so it always shows the ticket's state. A label change adds and
+  removes what you changed in the menu, keeping labels someone else changed meanwhile. Priority
+  and "pending" are set with `/priority` and `/pending`.
 
 Posts created before the buttons were added have none; the commands work everywhere.
 

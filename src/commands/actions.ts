@@ -5,6 +5,7 @@ import type { APIMessageTopLevelComponent } from "discord-api-types/v10";
 import { type ChatwootClient, ChatwootError, chatwootClient, type Fetch, type StatusChange } from "../chatwoot/api.ts";
 import type { Settings } from "../config.ts";
 import { errorFields, log } from "../log.ts";
+import { clip, defused } from "../relay/format.ts";
 import { downloadAttachment } from "./attachments.ts";
 import { FAILED, filesTooLarge, NOT_LINKED, UserError } from "./common.ts";
 import { panel, text } from "./components.ts";
@@ -156,11 +157,10 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
     }
     log.info("command done", { action: action.type, discordUserId: job.discordUserId, accountId, conversationId });
     if (isPanel(job)) {
-      const title = `### ⚙️ ${settings.account(accountId)?.name ?? "Ticket"} #${conversationId}`;
-      const heading = message ? `${title}\n✅ ${message}` : title;
+      const ticket = `${settings.account(accountId)?.name ?? "Ticket"} #${conversationId}`;
       return {
-        content: heading,
-        components: await drawPanel(chatwoot, accountId, conversationId, heading),
+        content: message ? `✅ ${message}` : ticket,
+        components: await drawPanel(chatwoot, accountId, conversationId, ticket, message),
         conversationGone: false,
       };
     }
@@ -189,6 +189,9 @@ function failure(error: unknown, { action, accountId, conversationId }: CommandJ
 const TIMED_OUT =
   "❌ Chatwoot or Discord did not answer in time. Check in Chatwoot whether it was done before trying again.";
 
+/** Longest customer name in the panel's title. */
+const CUSTOMER_NAME_LIMIT = 60;
+
 /** Whether the job's response is the Manage panel. */
 function isPanel(job: CommandJob): boolean {
   return job.panel === true || job.action.type === "panel";
@@ -199,17 +202,20 @@ async function drawPanel(
   chatwoot: ChatwootClient,
   accountId: number,
   conversationId: number,
-  heading: string,
+  ticket: string,
+  done: string,
 ): Promise<APIMessageTopLevelComponent[]> {
   const conversation = await existing(chatwoot.getConversation(accountId, conversationId));
   const agents = await chatwoot.listAgents(accountId);
   const labels = await chatwoot.listLabels(accountId);
+  // The customer's name is their own text: it must not mention anyone.
+  const customer = defused(clip(conversation.meta?.sender?.name ?? "", CUSTOMER_NAME_LIMIT));
+  const title = `### ${customer ? `${ticket} · ${customer}` : ticket}`;
   return panel(
-    heading,
+    done ? `${title}\n✅ ${done}` : title,
     {
       assigneeId: conversation.meta?.assignee?.id ?? null,
       labels: conversation.labels ?? [],
-      priority: conversation.priority ?? null,
       status: conversation.status ?? "open",
     },
     agents.flatMap((agent) => (agent.id === undefined ? [] : [{ id: agent.id, name: agent.name ?? `#${agent.id}` }])),
