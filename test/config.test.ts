@@ -62,6 +62,14 @@ describe("configuration", () => {
     expect(forumTags({ "status:open": "Open" })).toBe(false);
   });
 
+  it("escalates the queue to a role or a user, not both", () => {
+    const queue = (escalation: object) =>
+      configSchema.safeParse({ ...minimal, queue: { channelId: "100000000000000900", ...escalation } }).success;
+    expect(queue({ escalationRoleId: "100000000000000901" })).toBe(true);
+    expect(queue({ escalationUserId: "100000000000000902" })).toBe(true);
+    expect(queue({ escalationRoleId: "100000000000000901", escalationUserId: "100000000000000902" })).toBe(false);
+  });
+
   it("routes only configured accounts, and only with a TypeSafe key", () => {
     const owners = { cloud: { assignee: 6, covers: "Cloud support." } };
     const routing = (accounts: Record<string, unknown>) =>

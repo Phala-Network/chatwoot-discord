@@ -58,8 +58,8 @@ function world(open: Open[], { failPost = 0 }: { failPost?: number } = {}) {
   );
 }
 
-function context(store = new MapStore()) {
-  const settings = testSettings({ queue: { channelId: CHANNEL, escalationRoleId: ROLE } });
+function context(store = new MapStore(), escalation: object = { escalationRoleId: ROLE }) {
+  const settings = testSettings({ queue: { channelId: CHANNEL, ...escalation } });
   const fetch = (request: Request) => globalThis.fetch(request);
   return {
     settings,
@@ -102,6 +102,18 @@ describe("support queue", () => {
       "[Acme #4](<https://chatwoot.example.com/app/accounts/3/conversations/4>) | replied | ❔ Unassigned",
     ]);
     expect(message.allowed_mentions).toEqual({ parse: [], users: [ALICE], roles: [ROLE] });
+  });
+
+  it("escalates to a user instead of a role", async () => {
+    const { requests } = world([{ id: 1, waiting: 3 }]);
+
+    await postQueue(context(new MapStore(), { escalationUserId: ALICE }), NOW * 1000);
+
+    const [message] = posted(requests);
+    expect(message.content.split("\n")[1]).toBe(
+      `<@${ALICE}> 🔔 tickets have waited with no assignee: please \`/assign\` one.`,
+    );
+    expect(message.allowed_mentions).toEqual({ parse: [], users: [ALICE], roles: [] });
   });
 
   it("escalates an unassigned ticket once per step of its wait", async () => {

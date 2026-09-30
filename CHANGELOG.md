@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `queue.escalationUserId`: the support queue can escalate to one user instead of a role.
+
 ## [0.10.0] - 2026-09-30
 
 ### Added
