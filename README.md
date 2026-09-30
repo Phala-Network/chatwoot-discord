@@ -112,10 +112,10 @@ To connect an AI agent, see [Connecting an AI agent](docs/ai-agent.md).
 ### 1. Discord
 
 1. Create an application at <https://discord.com/developers/applications>; note its
-   **Application ID** and **Public Key**, and create a **bot token**. With a triage bot, turn on
-   the **Message Content** intent for **Use draft** (an app in 100 or more servers, or exposed to
-   a large one, needs Discord's review first); without it the button links to the bot's answer,
-   whose draft **Reply with this** takes.
+   **Application ID** and **Public Key**, and create a **bot token**. No privileged intent is
+   needed; with a triage bot whose hook does not send its drafts, turn on the **Message Content**
+   intent for **Use draft** (an app in 100 or more servers, or exposed to a large one, needs
+   Discord's review first).
 2. Invite the bot with the `bot` and `applications.commands` scopes.
 3. Create a **forum channel**. Give the bot *View Channels*, *Read Message History* (**Use
    draft**), *Manage Threads* (tags, archiving),
@@ -171,6 +171,7 @@ npx wrangler secret put CHATWOOT_RELAY_TOKEN
 npx wrangler secret put CHATWOOT_WEBHOOK_SECRETS   # {} for now; filled in step 4
 npx wrangler secret put CHATWOOT_AGENT_TOKENS      # {"<discord user id>":"<chatwoot token>"}
 npx wrangler secret put TYPESAFE_API_KEY           # only with routing
+npx wrangler secret put TRIAGE_HOOK_SECRET         # only with a triage bot hook (see Triage bot hook)
 npm run deploy
 ```
 
@@ -205,15 +206,14 @@ Used inside a ticket post, by Discord users linked in `agents[]` who have a toke
 `CHATWOOT_AGENT_TOKENS`. The same actions are buttons, which need no typing:
 
 - The ticket card (at the top of the post) and every message (not activity lines) end with three
-  rows of buttons: answering (**Reply**, and **Use draft** under a customer message the triage
-  bot is asked to answer), who owns the ticket (**Take**, **Assign to…**), and its state
-  (**Resolve**, **Snooze** until the next reply, **Block**, and **Manage**).
-- **Reply** opens the `/reply` editor. **Use draft** opens it with the draft (the last code
-  block, as **Reply with this** takes it) of the triage bot's answer to that message: the bot
-  answers as a Discord reply, so the answer is the one that replies to it. Reading the answer's
-  text needs the Message Content intent; without it the button links to the answer instead, for
-  **Reply with this**. It also says when the bot has not answered yet or its answer has no draft.
-  **Take** assigns the ticket to you; **Assign to…** shows you a menu of the account's
+  rows of buttons: answering (**Reply**), who owns the ticket (**Take**, **Assign to…**), and its
+  state (**Resolve**, **Snooze** until the next reply, **Block**, and **Manage**).
+- Right under a triage bot's answer with a draft, **Use draft** (highlighted) and **Reply**, when
+  the bot's hook reports the answer (see [Triage bot hook](#triage-bot-hook)). **Use draft** opens
+  the `/reply` editor with that answer's draft: the one the hook sent, or else the answer's last
+  code block read from Discord, which needs the Message Content intent; without it, it links to
+  the answer for **Reply with this**, which works on any message.
+- **Reply** opens the `/reply` editor. **Take** assigns the ticket to you; **Assign to…** shows you a menu of the account's
   agents, and the menu turns into the result. **Resolve** resolves it. **Block** asks you to
   confirm first (only you see the question), then blocks the contact as `/block` does.
 - **Manage** opens a card only you see, drawn with the ticket as it is and coloured by its status:
@@ -373,6 +373,7 @@ Secrets (Worker secrets, never in config), also validated at startup:
 | `CHATWOOT_WEBHOOK_SECRETS` | JSON object, `{"<account id>":"<secret>"}` | Each account's webhook secret. |
 | `CHATWOOT_AGENT_TOKENS` | JSON object, `{"<Discord user id>":"<token>"}`; optional, default `{}` | Each linked agent's own Chatwoot access token; commands act with it. |
 | `TYPESAFE_API_KEY` | non-empty; required with `routing` | TypeSafe API key for routing. |
+| `TRIAGE_HOOK_SECRET` | 32+ characters; optional | Signs the triage bot's hook ([triage bot hook](#triage-bot-hook)). Unset: the route is off. |
 
 ### Support queue
 
@@ -422,6 +423,17 @@ window, so a missed webhook only delays it.
   "topics": { "technical-support": "Something does not work.", "billing": "Payments, invoices, refunds." }
 }
 ```
+
+### Triage bot hook
+
+A triage bot's answer is its own message, which only it can put buttons on, and the Worker does
+not see Discord messages. So the bot's side reports each answer once it is in the post: `POST
+/triage/answered` with `{"threadId":"<post id>","answerId":"<answer message id>","draft":"<the
+reply draft>"}`, signed like a Chatwoot webhook (`x-timestamp`, Unix seconds, and `x-signature`,
+`sha256=` and the hex HMAC-SHA256 of `<timestamp>.<body>` with `TRIAGE_HOOK_SECRET`). The Worker
+keeps the draft for 14 days and posts **Use draft** and **Reply** right under the answer, once per
+answer (a repeated call adds nothing). Report only answers that have a draft, and only after they
+were sent, so the buttons follow them.
 
 ## Limits and the Workers Free plan
 
@@ -479,8 +491,11 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
   support volumes are far below its throughput. Jobs run by priority (commands first), failures
   retry with exponential backoff (5 s … 30 min), and a run yields before the subrequest limit.
   A job that Discord rate limits waits as long as Discord asks, without counting an attempt.
-  A job is never dropped: after a few failures its log turns into errors, and it keeps retrying
-  at most every 30 minutes, so an outage of any length loses no work. Every outbound request
+  A job is never dropped, with two exceptions: the support queue posts nothing after its first
+  three minutes (Discord's nonce, which keeps a retried post from appearing twice, lasts only a
+  few minutes; the next hour's queue lists the same tickets), and a triage answer's Use draft
+  button is posted at most once. Otherwise, after a few failures a job's log turns into errors,
+  and it keeps retrying at most every 30 minutes, so an outage of any length loses no work. Every outbound request
   times out after 60 seconds, which counts as a failed attempt. While a conversation's job is
   backing off, new events for it wait for its next attempt.
 - **Relaying** (`src/relay/`): a webhook only queues "sync conversation N" (conversation events

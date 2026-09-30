@@ -125,6 +125,12 @@ describe("support queue", () => {
     expect(message.allowed_mentions).toEqual({ parse: [], users: [], roles: [ROLE] });
   });
 
+  it("posts nothing once its deadline has passed, so a late retry cannot post it twice", async () => {
+    const { requests } = world([{ id: 1, waiting: 3 }]);
+    await postQueue(context(), NOW * 1000, Date.now() - 1);
+    expect(posted(requests)).toEqual([]);
+  });
+
   it("escalates to a user instead of a role", async () => {
     const { requests } = world([{ id: 1, waiting: 3 }]);
 

@@ -661,6 +661,15 @@ describe("Relay", () => {
     expect(replies[2]).toMatch(/^-# Message truncated/);
   });
 
+  it("puts the buttons on the part the triage bot is called on, not on the truncation note", async () => {
+    const buttons = { message: [{ type: 1, components: [] }], answer: () => [] };
+    ({ relay, forum } = relayWith({ triage, maxChunks: 2, buttons }));
+    await relay.relay(message({ content: `${"x".repeat(1900)}\n`.repeat(4) }));
+    const replies = forum.calls.slice(1).map(([, payload]) => payload);
+    expect(replies.map((reply) => reply.components !== undefined)).toEqual([false, true, false]);
+    expect(replies[1]?.content?.endsWith(`\n-# <@${TRIAGE}>`)).toBe(true);
+  });
+
   it("pings linked agents mentioned in a private note, where they are mentioned", async () => {
     const note = message({
       messageType: "outgoing",

@@ -16,7 +16,7 @@ import {
 /** Custom ids of the ticket buttons and the menus they show. */
 export const BUTTONS = {
   reply: "ticket:reply",
-  /** Under a customer message the triage bot is asked to answer (see draft.ts). */
+  /** Followed by ":<answer message id>": under a triage bot's answer (see answerButtons). */
   draft: "ticket:draft",
   take: "ticket:take",
   assign: "ticket:assign",
@@ -74,22 +74,29 @@ function option(value: string, label: string, emoji: string, selected: boolean):
 }
 
 /**
- * The ticket buttons, a row per concern: answering (Reply, and Use draft under a customer message
- * the triage bot answers), who owns the ticket (Take; Assign to, which shows a menu of agents),
- * and its state (Resolve, Snooze until the next reply, Block, and Manage for the panel).
+ * The ticket buttons, a row per concern: answering (Reply), who owns the ticket (Take; Assign to,
+ * which shows a menu of agents), and its state (Resolve, Snooze until the next reply, Block, and
+ * Manage for the panel).
  */
-export function ticketButtons(draft: boolean): ActionRow[] {
+export function ticketButtons(): ActionRow[] {
   return [
-    row([
-      button(BUTTONS.reply, "Reply", "✏️", ButtonStyle.Primary),
-      ...(draft ? [button(BUTTONS.draft, "Use draft", "🤖")] : []),
-    ]),
+    row([button(BUTTONS.reply, "Reply", "✏️", ButtonStyle.Primary)]),
     row([button(BUTTONS.take, "Take", "🙋"), button(BUTTONS.assign, "Assign to…", "👤")]),
     row([
       button(BUTTONS.resolve, "Resolve", "✅", ButtonStyle.Success),
       button(BUTTONS.snooze, "Snooze", "💤"),
       button(BUTTONS.block, "Block", "🚫", ButtonStyle.Danger),
       button(BUTTONS.manage, "Manage", "⚙️"),
+    ]),
+  ];
+}
+
+/** Right under a triage bot's answer with a draft: Use draft (that answer's), and Reply. */
+export function answerButtons(answerId: string): ActionRow[] {
+  return [
+    row([
+      button(`${BUTTONS.draft}:${answerId}`, "Use draft", "🤖", ButtonStyle.Primary),
+      button(BUTTONS.reply, "Reply", "✏️"),
     ]),
   ];
 }
@@ -168,7 +175,7 @@ export function panel(
     row([{ type: ComponentType.StringSelect, custom_id: customId, placeholder, options }]);
 
   // The ticket's own label first, so it stays in the menu when the account has too many. A label
-  // longer than an option value can be is left to /label.
+  // longer than an option value can be is left to /label; the menu still names the current one.
   const current = ticket.labels[0];
   const labels = [
     option(NONE, "No label", "🏷️", current === undefined),
@@ -176,6 +183,8 @@ export function panel(
       .filter((label) => label.length <= MAX_OPTION_TEXT)
       .map((label) => option(label, label, "🏷️", label === current)),
   ].slice(0, MAX_OPTIONS);
+  const unlisted = current !== undefined && current.length > MAX_OPTION_TEXT;
+  const labelPlaceholder = unlisted ? `🏷️ ${Array.from(current).slice(0, 80).join("")}… (/label)` : "🏷️ No label";
   const statuses = STATUSES.map(([status, value, name, emoji]) =>
     button(
       `${PANEL.status}:${value}`,
@@ -192,7 +201,7 @@ export function panel(
       components: [
         { type: ComponentType.TextDisplay, content: heading },
         menu(PANEL.assignee, "👤 Unassigned", agentOptions(agents, ticket.assigneeId)),
-        ...(labels.length > 1 ? [menu(PANEL.labels, "🏷️ No label", labels)] : []),
+        ...(labels.length > 1 ? [menu(PANEL.labels, labelPlaceholder, labels)] : []),
         row(statuses),
       ],
     },

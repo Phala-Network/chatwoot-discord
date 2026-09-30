@@ -73,7 +73,15 @@ export function escalationLevel(hours: number): number {
   return ESCALATION_HOURS.length + Math.floor((hours - last) / ESCALATION_REPEAT_HOURS);
 }
 
-export async function postQueue(ctx: QueueContext, now = Date.now()): Promise<void> {
+/**
+ * Posts the queue as of `now`. Nothing is posted after `deadline`: a run past it is dropped,
+ * whole or from the message it reached (see Hub).
+ */
+export async function postQueue(
+  ctx: QueueContext,
+  now = Date.now(),
+  deadline = Number.POSITIVE_INFINITY,
+): Promise<void> {
   const { settings, store, chatwoot, rest } = ctx;
   const queue = settings.config.queue;
   if (!queue) return;
@@ -127,13 +135,22 @@ export async function postQueue(ctx: QueueContext, now = Date.now()): Promise<vo
   const chunks = tickets.length > 0 ? messages(ctx, tickets, nowSeconds, unread) : [];
   // A nonce per hour and part: Discord creates no second message for a retried request it took.
   const nonce = (index: number) => `queue-${Math.floor(nowSeconds / 3600)}-${index}`;
+  const late = () => {
+    const over = Date.now() > deadline;
+    if (over) log.warn("support queue past its deadline; not posted", { messages: chunks.length });
+    return over;
+  };
   const [first, ...more] = chunks;
-  if (first) await post(rest, queue.channelId, first, queue.escalationRoleId, nonce(0));
+  if (first) {
+    if (late()) return;
+    await post(rest, queue.channelId, first, queue.escalationRoleId, nonce(0));
+  }
   // The first message carries any escalation ping: record it at once, so a later part that fails
   // does not ping again when the job is retried. Tickets beyond the pages read keep their record
   // until a complete run no longer sees them.
   store.set(ESCALATIONS_KEY, JSON.stringify(unread ? { ...previous, ...escalations } : escalations));
   for (const [index, chunk] of more.entries()) {
+    if (late()) return;
     await post(rest, queue.channelId, chunk, queue.escalationRoleId, nonce(index + 1));
   }
   log.info("support queue", {

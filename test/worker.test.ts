@@ -226,12 +226,27 @@ async function chatwootWebhook(
   );
 }
 
+/** The triage bot's hook: signed like a Chatwoot webhook, with the shared secret. */
+async function triageHook(payload: unknown, secret = "triage-hook-secret-0123456789abcdef") {
+  const body = JSON.stringify(payload);
+  const ts = String(Math.floor(Date.now() / 1000));
+  return call(
+    new Request("https://relay.example.com/triage/answered", {
+      method: "POST",
+      body,
+      headers: {
+        "content-type": "application/json",
+        "x-timestamp": ts,
+        "x-signature": `sha256=${await hmac(secret, `${ts}.${body}`)}`,
+      },
+    }),
+  );
+}
+
 /** The ticket buttons: the answering row, then who owns it, then its state. */
 const OWNER = ["ticket:take", "ticket:assign"];
 const STATE = ["ticket:resolve", "ticket:snooze", "ticket:block", "ticket:manage"];
 const ALL_BUTTONS = [["ticket:reply"], OWNER, STATE];
-/** Under a customer message the triage bot is asked to answer. */
-const TRIAGED_BUTTONS = [["ticket:reply", "ticket:draft"], OWNER, STATE];
 
 /** The custom ids of a posted message's buttons, row by row. */
 function buttons(body: unknown): string[][] | undefined {
@@ -361,8 +376,7 @@ describe("worker", () => {
       content:
         "-# via Live chat · Acme — Product App\n-# jane@example.com\n[Open in Chatwoot](<https://chatwoot.example.com/app/accounts/3/conversations/12>)",
     });
-    // The card and every message carry the ticket buttons (with Use draft under a customer message
-    // the triage bot is asked to answer); activity lines have none.
+    // The card and every message carry the ticket buttons; activity lines have none.
     expect(buttons(posts[0]?.body)).toEqual(ALL_BUTTONS);
     const thread = posts[1]?.thread ?? "";
     expect(thread).toMatch(/^\d{18}$/);
@@ -375,7 +389,7 @@ describe("worker", () => {
         avatar_url: "https://gravatar.com/avatar/?d=mp&f=y&s=256",
       },
     });
-    expect(buttons(posts[1]?.body)).toEqual(TRIAGED_BUTTONS);
+    expect(buttons(posts[1]?.body)).toEqual(ALL_BUTTONS);
 
     // The post URL is merged into the conversation's attributes; other attributes survive.
     const link = world.requests.find((request) => request.url.pathname.endsWith("/custom_attributes"));
@@ -407,6 +421,50 @@ describe("worker", () => {
       },
     ]);
     expect(buttons(later[0]?.body)).toEqual(ALL_BUTTONS);
+  });
+
+  it("puts Use draft right under the triage bot's answer when its signed hook says the answer is in", async () => {
+    world.conversation(21, [{ id: 701, content: "help", message_type: 0 }]);
+    await chatwootWebhook(created(21));
+    await drain();
+    const thread = world.webhookPosts().at(-1)?.thread ?? "";
+    const before = world.webhookPosts().length;
+    const answerId = "100000000000009100";
+    const answer = { threadId: thread, answerId, draft: "Hi, restart the agent from the dashboard." };
+
+    expect((await triageHook(answer, "wrong-secret-0123456789abcdef0123")).status).toBe(401);
+    expect((await triageHook({ threadId: thread, answerId })).status).toBe(400);
+    expect((await triageHook(null)).status).toBe(400);
+    expect((await triageHook(answer)).status).toBe(200);
+    await drain();
+    // The same answer again (a replayed call) adds nothing.
+    expect((await triageHook(answer)).status).toBe(200);
+    await drain();
+
+    const bar = world.webhookPosts().slice(before);
+    expect(bar).toHaveLength(1);
+    expect(bar[0]).toMatchObject({ thread, body: { username: "Chatwoot", allowed_mentions: { parse: [] } } });
+    expect(bar[0]?.body).not.toHaveProperty("content");
+    expect(buttons(bar[0]?.body)).toEqual([[`ticket:draft:${answerId}`, "ticket:reply"]]);
+
+    // Use draft opens the editor with the draft the hook sent: no Discord read, no intent needed.
+    const pressed = await discordInteraction({
+      id: "900211",
+      application_id: "100000000000000001",
+      token: "interaction-token",
+      type: 3,
+      channel_id: thread,
+      channel: { id: thread, type: 11 },
+      member: { user: { id: ALICE } },
+      message: { id: "100000000000009101", components: [] },
+      data: { custom_id: `ticket:draft:${answerId}`, component_type: 2 },
+    });
+    const modal = (await pressed.json()) as {
+      type: number;
+      data: { components: Array<{ component: { value?: string } }> };
+    };
+    expect(modal.type).toBe(9);
+    expect(modal.data.components[0]?.component.value).toBe(answer.draft);
   });
 
   it("retries a failed message with backoff without skipping it", async () => {

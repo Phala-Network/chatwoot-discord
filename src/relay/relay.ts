@@ -122,10 +122,10 @@ export interface RelayOptions {
   /** The agent linked to a Chatwoot user id, if any. */
   linkedAgent?: ((chatwootUserId: number) => LinkedAgent | undefined) | undefined;
   /**
-   * The ticket buttons: on the card and under each message (not activity lines); under a customer
-   * message the triage bot is asked to answer, with Use draft (`triaged`).
+   * The ticket buttons, on the card and under each message (not activity lines), and those right
+   * under a triage bot's answer with a draft (see postAnswerButtons).
    */
-  buttons?: { message: MessageComponents; triaged: MessageComponents } | undefined;
+  buttons?: { message: MessageComponents; answer(answerId: string): MessageComponents } | undefined;
   /** Messages created longer ago than this are relayed without notifications. */
   liveSeconds: number;
   now?: () => Date;
@@ -183,6 +183,33 @@ export class Relay {
     }
     this.unarchived(accountId, conversation);
     if (this.notifier.notifies(message)) store.updateConversation(accountId, conversation.id, { announcePending: 1 });
+  }
+
+  /**
+   * The triage bot's answer `answerId` has a draft: posts its Use draft button right under it (the
+   * bot's hook calls once the answer is in the post). Posting unarchived the post, so its state is
+   * marked out of date for the next sync. A post that no longer exists is left.
+   */
+  async postAnswerButtons(accountId: number, conversationId: number, answerId: string): Promise<void> {
+    const { store, forum, buttons } = this.options;
+    const threadId = store.conversation(accountId, conversationId)?.threadId;
+    if (!threadId || !buttons) return;
+    try {
+      await forum.execute(
+        this.options.target(accountId).forumChannelId,
+        {
+          username: SYSTEM_USERNAME,
+          avatar_url: this.options.avatars.chatwoot,
+          allowed_mentions: { parse: [] },
+          components: buttons.answer(answerId),
+        },
+        threadId,
+      );
+    } catch (error) {
+      if (!(error instanceof UnknownThreadError)) throw error;
+      return;
+    }
+    store.updateConversation(accountId, conversationId, { state: OUT_OF_DATE });
   }
 
   /**
@@ -344,11 +371,11 @@ export class Relay {
         allowed_mentions: { parse: [] },
       });
     }
-    // A message ends with the buttons to act on the ticket; an activity line has none.
-    const { buttons } = this.options;
-    const last = parts.at(-1);
-    if (last && buttons && message.messageType !== "activity") {
-      last.components = notification.triaged ? buttons.triaged : buttons.message;
+    // A message's last part (the one the triage bot is called on and answers, before any
+    // truncation note) carries the buttons to act on the ticket; an activity line has none.
+    const last = parts[kept.length - 1];
+    if (last && this.options.buttons && message.messageType !== "activity") {
+      last.components = this.options.buttons.message;
     }
     return parts;
   }

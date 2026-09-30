@@ -5,17 +5,19 @@ import type { APIInteraction } from "discord-api-types/v10";
 import { verifyKey } from "discord-interactions";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { z } from "zod";
 import { eventTarget, isFreshTimestamp, verifyChatwootSignature } from "./chatwoot/webhook.ts";
 import { FAILED } from "./commands/common.ts";
-import { draftFor } from "./commands/draft.ts";
+import { CONTENT_MAX } from "./commands/definitions.ts";
+import { readDraft } from "./commands/draft.ts";
 import { handleInteraction, privately } from "./commands/handler.ts";
 import { ConfigError, loadSettings } from "./config.ts";
 import { DiscordRest } from "./discord/rest.ts";
 import { HUB_NAME } from "./hub.ts";
 import { errorFields, log } from "./log.ts";
 
-/** Use draft looks up the triage bot's answer while Discord waits for the reply editor. */
-const DRAFT_TIMEOUT_MS = 2000;
+/** Use draft may look up the triage bot's answer this long, while Discord waits for the reply editor. */
+const DRAFT_DEADLINE_MS = 2000;
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -73,6 +75,35 @@ app.post("/chatwoot/webhook", bodyLimit({ maxSize: 2 * 1024 * 1024 }), async (c)
   return c.json({ ok: true });
 });
 
+// The triage bot's hook, signed like Chatwoot's webhooks: its answer `answerId` is in the post
+// `threadId`, with the reply `draft` it proposes (see Hub.triageAnswered).
+const answerSchema = z.strictObject({
+  threadId: z.string().regex(/^\d{17,20}$/),
+  answerId: z.string().regex(/^\d{17,20}$/),
+  draft: z.string().trim().min(1).max(CONTENT_MAX),
+});
+
+app.post("/triage/answered", bodyLimit({ maxSize: 64 * 1024 }), async (c) => {
+  const secret = loadSettings(c.env).secrets.TRIAGE_HOOK_SECRET;
+  if (!secret) return c.text("not found", 404);
+  const timestamp = c.req.header("x-timestamp");
+  if (!timestamp || !isFreshTimestamp(timestamp, Math.floor(Date.now() / 1000))) {
+    return c.text("invalid or stale timestamp", 401);
+  }
+  const body = new Uint8Array(await c.req.arrayBuffer());
+  if (!(await verifyChatwootSignature(secret, timestamp, body, c.req.header("x-signature")))) {
+    return c.text("invalid signature", 401);
+  }
+  let answer: z.infer<typeof answerSchema>;
+  try {
+    answer = answerSchema.parse(JSON.parse(new TextDecoder().decode(body)));
+  } catch {
+    return c.text("bad request", 400);
+  }
+  await hub(c.env).triageAnswered(answer.threadId, answer.answerId, answer.draft);
+  return c.json({ ok: true });
+});
+
 app.post("/discord/interactions", bodyLimit({ maxSize: 1024 * 1024 }), async (c) => {
   const settings = loadSettings(c.env);
   const signature = c.req.header("x-signature-ed25519");
@@ -92,23 +123,21 @@ app.post("/discord/interactions", bodyLimit({ maxSize: 1024 * 1024 }), async (c)
     return c.text("bad request", 400);
   }
 
+  const deadline = AbortSignal.timeout(DRAFT_DEADLINE_MS);
   const stub = hub(c.env);
   try {
     const result = await handleInteraction(interaction, {
       settings,
       ticketForThread: async (threadId) => (await stub.ticketForThread(threadId)) ?? undefined,
-      // Discord waits 3 s for the editor: the lookup fails fast rather than waiting out a rate limit.
-      draftFor: (threadId, messageId) =>
-        draftFor(
-          new DiscordRest(
-            settings.secrets.DISCORD_BOT_TOKEN,
-            (request) => fetch(request, { signal: AbortSignal.timeout(DRAFT_TIMEOUT_MS) }),
-            () => Promise.reject(new Error("rate limited")),
-          ),
-          threadId,
-          messageId,
-          settings.config.triage.userId,
-        ),
+      draftOf: async (threadId, answerId) => {
+        const kept = await stub.answerDraft(answerId);
+        if (kept !== null) return { text: kept };
+        // Discord waits 3 s for the editor, counted from the interaction: one deadline for all of it.
+        const rest = new DiscordRest(settings.secrets.DISCORD_BOT_TOKEN, (request) =>
+          fetch(request, { signal: deadline }),
+        );
+        return readDraft(rest, threadId, answerId, settings.config.triage.userId);
+      },
     });
     if (result.job) await stub.enqueueCommand(result.job);
     return c.json(result.response);

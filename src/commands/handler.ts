@@ -34,8 +34,8 @@ interface HandlerDeps {
   settings: Settings;
   /** The conversation the relay mapped to this forum post, if any. */
   ticketForThread(threadId: string): Promise<Ticket | undefined>;
-  /** The draft of the triage bot's answer to a customer message in the post. */
-  draftFor(threadId: string, messageId: string): Promise<Draft>;
+  /** The draft of a triage bot's answer in the post: the one its hook sent, else read from the answer. */
+  draftOf(threadId: string, answerId: string): Promise<Draft>;
 }
 
 export interface HandlerResult {
@@ -373,23 +373,17 @@ function defer(context: Context, action: CommandAction): HandlerResult {
 /** A ticket button, or a change in the Manage panel. */
 async function component(context: Context, interaction: APIMessageComponentInteraction): Promise<HandlerResult> {
   const { data } = interaction;
+  // Use draft carries its answer: "ticket:draft:<answer message id>".
+  const answerId = data.custom_id.startsWith(`${BUTTONS.draft}:`) ? data.custom_id.slice(BUTTONS.draft.length + 1) : "";
+  if (/^\d{17,20}$/.test(answerId)) {
+    const draft = await context.deps.draftOf(context.threadId, answerId);
+    if ("text" in draft) return { response: editor(context, "reply", draft.text) };
+    if (draft.missing === "none") return privately("That answer has no draft.");
+    return privately(
+      `This bot cannot read the triage bot's messages (it needs Discord's Message Content intent). Right-click [the answer](https://discord.com/channels/${interaction.guild_id ?? "@me"}/${context.threadId}/${answerId}) and choose Apps → ${REPLY_WITH_THIS}.`,
+    );
+  }
   switch (data.custom_id) {
-    case BUTTONS.draft: {
-      // The button is under the customer message whose answer it takes.
-      const draft = await context.deps.draftFor(context.threadId, interaction.message.id);
-      if ("text" in draft) return { response: editor(context, "reply", draft.text) };
-      switch (draft.missing) {
-        case "unanswered":
-          return privately("The triage bot has not answered this message yet.");
-        case "none":
-          return privately("The triage bot's answer to this message has no draft.");
-        case "unreadable":
-          return privately(
-            `This bot cannot read the triage bot's messages yet (it needs Discord's Message Content intent). Right-click [the answer](https://discord.com/channels/${interaction.guild_id ?? "@me"}/${context.threadId}/${draft.answerId}) and choose Apps → ${REPLY_WITH_THIS}.`,
-          );
-      }
-      break;
-    }
     case BUTTONS.reply:
       return { response: editor(context, "reply", undefined) };
     case BUTTONS.take: {

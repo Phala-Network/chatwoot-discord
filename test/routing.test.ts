@@ -70,11 +70,12 @@ function world(
       return json({});
     }),
     on("POST", `${CW}/labels`, () => json({})),
-    on("POST", `${CW}/toggle_status`, () => {
+    on("POST", `${CW}/toggle_status`, (request) => {
       if ((ticket.failSnooze ?? 0) > 0) {
         ticket.failSnooze = (ticket.failSnooze ?? 0) - 1;
         return json({ error: "unavailable" }, { status: 503 });
       }
+      ticket.status = JSON.parse(request.body).status;
       return json({});
     }),
     on("POST", "api.typesafe.ai/v1/systemone", () => {
@@ -193,6 +194,8 @@ describe("routeConversation", () => {
     const snoozing = { ...ROUTING, snoozeUnclear: true };
 
     await routeConversation(context(store, snoozing), 1, 5);
+    // The customer's next messages reopen the snoozed ticket (Chatwoot does).
+    ticket.status = "open";
     ticket.messages = [message(1), message(2), message(3)];
     await routeConversation(context(store, snoozing), 1, 5);
 
@@ -209,8 +212,10 @@ describe("routeConversation", () => {
     const message = (id: number) => ({ id, content: `Message ${id}`, message_type: 0 });
     const ticket: Ticket = { messages: [message(1)] };
     const snoozing = { ...ROUTING, snoozeUnclear: true };
+    // The new message is followed by an agent's private note: it is still the customer's news.
+    const note = { id: 3, content: "checking", message_type: 1, private: true };
     const { requests } = world(ticket, { owner: ["unclear", 1], topic: ["billing", 0.5] }, 0, () => {
-      if (ticket.messages?.length === 1) ticket.messages = [message(1), message(2)];
+      if (ticket.messages?.length === 1) ticket.messages = [message(1), message(2), note];
     });
 
     await routeConversation(context(store, snoozing), 1, 5);
@@ -220,6 +225,28 @@ describe("routeConversation", () => {
     const asked = sent(requests, "POST", "api.typesafe.ai/v1/systemone").map((r) => JSON.parse(r.body).state.ticket);
     expect(asked).toEqual(["Message 1", "Message 1 Message 2"]);
     expect(sent(requests, "POST", `${CW}/toggle_status`)).toHaveLength(1);
+  });
+
+  it("lifts its snooze when the customer wrote just before it, and asks Jev again", async () => {
+    const store = new MapStore();
+    const message = (id: number) => ({ id, content: `Message ${id}`, message_type: 0 });
+    const ticket: Ticket = { messages: [message(1)] };
+    const snoozing = { ...ROUTING, snoozeUnclear: true };
+    const { requests } = world(ticket, { owner: ["unclear", 1], topic: ["billing", 0.5] });
+
+    await routeConversation(context(store, snoozing), 1, 5);
+    // Message 2 came in just before the snooze, so Chatwoot did not reopen the ticket for it.
+    ticket.status = "snoozed";
+    ticket.messages = [message(1), message(2)];
+    await routeConversation(context(store, snoozing), 1, 5);
+
+    expect(sent(requests, "POST", `${CW}/toggle_status`).map((r) => JSON.parse(r.body))).toEqual([
+      { status: "snoozed" },
+      { status: "open" },
+      { status: "snoozed" },
+    ]);
+    const asked = sent(requests, "POST", "api.typesafe.ai/v1/systemone").map((r) => JSON.parse(r.body).state.ticket);
+    expect(asked).toEqual(["Message 1", "Message 1 Message 2"]);
   });
 
   it("asks Jev again instead of applying a decision made before the customer's newest message", async () => {

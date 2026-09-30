@@ -14,12 +14,13 @@ import { ALICE, BOB, CAROL, TRIAGE, testSettings } from "./helpers.ts";
 
 const THREAD = "100000000000001500";
 const settings = testSettings();
+const ANSWER = "100000000000009100";
 let draft: Draft = { text: "Hi, restart the CVM from the dashboard." };
 const deps = {
   settings,
   ticketForThread: async (threadId: string) => (threadId === THREAD ? { accountId: 3, conversationId: 15 } : undefined),
-  draftFor: async (threadId: string, messageId: string) =>
-    threadId === THREAD && messageId === "900" ? draft : { missing: "unanswered" as const },
+  draftOf: async (threadId: string, answerId: string) =>
+    threadId === THREAD && answerId === ANSWER ? draft : { missing: "none" as const },
 };
 
 /** A ticket button pressed, or a panel menu changed, in the post. */
@@ -411,27 +412,26 @@ describe("interaction handler", () => {
 });
 
 describe("ticket buttons and the Manage panel", () => {
-  it("Reply opens the editor; Use draft opens it with the triage bot's draft for the message it is under", async () => {
+  it("Reply opens the editor; Use draft opens it with the draft of the answer it is under", async () => {
     const { response } = await press("ticket:reply");
     expect(response.type === InteractionResponseType.Modal && response.data.custom_id).toBe("reply:777001");
     expect(editorField(response, "content")).not.toHaveProperty("value");
-    expect(editorField((await press("ticket:draft")).response, "content")?.value).toBe(
+    expect(editorField((await press(`ticket:draft:${ANSWER}`)).response, "content")?.value).toBe(
       "Hi, restart the CVM from the dashboard.",
     );
   });
 
-  it("Use draft says why there is none, and links an answer it cannot read for Reply with this", async () => {
-    draft = { missing: "unanswered" };
-    expect(privateText(await press("ticket:draft"))).toMatch(/has not answered this message yet/);
+  it("Use draft says when the answer has no draft, and links one it cannot read for Reply with this", async () => {
     draft = { missing: "none" };
-    expect(privateText(await press("ticket:draft"))).toMatch(/answer to this message has no draft/);
-    draft = { missing: "unreadable", answerId: "100000000000009100" };
-    expect(privateText(await press("ticket:draft"))).toMatch(
+    expect(privateText(await press(`ticket:draft:${ANSWER}`))).toMatch(/has no draft/);
+    draft = { missing: "unreadable" };
+    expect(privateText(await press(`ticket:draft:${ANSWER}`))).toMatch(
       new RegExp(
-        `Message Content intent.*\\(https://discord\\.com/channels/[^/]+/${THREAD}/100000000000009100\\).*Reply with this`,
+        `Message Content intent.*\\(https://discord\\.com/channels/[^/]+/${THREAD}/${ANSWER}\\).*Reply with this`,
       ),
     );
     draft = { text: "Hi, restart the CVM from the dashboard." };
+    expect(privateText(await press("ticket:draft:not-an-id"))).toMatch(/Unknown button/);
   });
 
   it("Take assigns the invoker, Resolve resolves, Manage draws the panel, each answered privately", async () => {

@@ -53,6 +53,8 @@ interface DiscordRequest<Body = never, Query extends object = never> {
   query?: Query;
   /** Webhook and interaction-token routes authenticate by URL; send no bot token. */
   auth?: boolean;
+  /** false: a rate limit fails the request at once, for one someone is waiting on. */
+  retry?: boolean;
 }
 
 export class DiscordRest {
@@ -116,7 +118,9 @@ export class DiscordRest {
 
     for (let attempt = 1; ; attempt += 1) {
       const wait = Math.max(this.globalReset, this.resets.get(this.bucketKey(route, path)) ?? 0) - Date.now();
-      if (wait > MAX_WAIT_MS) throw new DiscordHttpError(429, undefined, "rate limited", wait);
+      if (wait > MAX_WAIT_MS || (wait > 0 && request.retry === false)) {
+        throw new DiscordHttpError(429, undefined, "rate limited", wait);
+      }
       if (wait > 0) await this.sleep(wait);
 
       const response = await this.fetch(
@@ -148,7 +152,7 @@ export class DiscordRest {
           this.resets.set(key, retryAt);
         }
         const wait = Math.max(0, retryAt - Date.now());
-        if (attempt < MAX_ATTEMPTS && wait <= MAX_WAIT_MS) continue;
+        if (request.retry !== false && attempt < MAX_ATTEMPTS && wait <= MAX_WAIT_MS) continue;
         throw new DiscordHttpError(429, errorCode(data), errorMessage(data, response.statusText), wait);
       }
       throw new DiscordHttpError(response.status, errorCode(data), errorMessage(data, response.statusText));

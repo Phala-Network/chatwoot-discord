@@ -1,14 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { assigneeMenu, panel } from "../src/commands/components.ts";
 
-type Menu = { custom_id: string; options: Array<{ value: string; default?: boolean }> };
+type Menu = { custom_id: string; placeholder?: string; options: Array<{ value: string; default?: boolean }> };
 type Row = { type: number; components: Menu[] };
+
+/** The panel's menu `customId`. */
+function panelSelect(components: unknown, customId: string): Menu | undefined {
+  const [card] = components as [{ components: Row[] }];
+  return card.components.flatMap((part) => part.components ?? []).find((item) => item.custom_id === customId);
+}
 
 /** The options of the panel's menu `customId`. */
 function panelMenu(components: unknown, customId: string): Menu["options"] {
-  const [card] = components as [{ components: Row[] }];
-  const menu = card.components.flatMap((part) => part.components ?? []).find((item) => item.custom_id === customId);
-  return menu?.options ?? [];
+  return panelSelect(components, customId)?.options ?? [];
 }
 
 const agents = Array.from({ length: 30 }, (_, index) => ({ id: index + 1, name: `Agent ${index + 1}` }));
@@ -34,5 +38,13 @@ describe("ticket menus", () => {
       "none*",
       "billing",
     ]);
+  });
+
+  it("name a current label too long for the menu instead of showing it as no label", () => {
+    const long = "l".repeat(101);
+    const card = panel("### Acme #1", { assigneeId: null, labels: [long], status: "open" }, [], ["billing"]);
+    const menu = panelSelect(card, "panel:labels");
+    expect(menu?.placeholder).toMatch(/^🏷️ l+… \(\/label\)$/);
+    expect(menu?.options.some((option) => option.default)).toBe(false);
   });
 });

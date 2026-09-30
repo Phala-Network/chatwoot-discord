@@ -10,28 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The ticket buttons are three rows: answering (**Reply**), who owns the ticket (**Take**,
-  **Assign to…**), and its state (**Resolve**, **Snooze**, **Block**, **Manage**). They are under
-  every message again, the customer's included.
-- **Use draft** is under a customer message the triage bot is asked to answer, and takes the draft
-  of the bot's answer to it (the answer that replies to the message), read when pressed. Without
-  the Message Content intent it links to that answer, for **Reply with this**.
-- Routing does not snooze a ticket the customer wrote to while Jev was answering, and asks Jev
-  again instead of applying a decision made before the customer's newest message.
-- The Manage card's menus keep the current assignee and label among their 25 choices, and a label
-  may be called `none`; a label longer than a menu value can be is left to `/label`.
+  **Assign to…**), and its state (**Resolve**, **Snooze**, **Block**, **Manage**), under every
+  message again, the customer's included.
+- **Breaking:** the triage bot hook (`POST /triage/answered`) takes
+  `{"threadId", "answerId", "draft"}` and is called once the answer is in the post: the Worker
+  keeps the draft and posts **Use draft** (highlighted) and **Reply** right under that answer, at
+  once and once per answer. **Use draft** takes the draft the hook sent, else reads the answer
+  (Message Content intent), else links to it for **Reply with this**.
+- Routing does not snooze a ticket the customer has written to since the messages Jev was given,
+  asks Jev again instead of applying a decision made before them, and lifts its own snooze when
+  a customer message came just before it.
+- The Manage card's menus keep the current assignee and label among their 25 choices, a label may
+  be called `none`, and a current label too long for a menu is named in its placeholder.
 - A failed change from the Manage card shows in the card, which is a Components V2 message.
-- The support queue is retried for three minutes at most, while Discord's nonce check can drop a
-  repeated post; a later retry is dropped rather than risk posting the queue twice.
+- The support queue posts nothing after its first three minutes, however it is retried or
+  deferred, so it cannot be posted twice; a run keeps the queue's due time for its nonces.
+- The buttons of a very long message are on the part the triage bot is called on, not on the
+  truncation note.
 
 ### Added
 
 - **Assign to…**, **Snooze** (until the next reply), and **Block** buttons. **Assign to…** shows
   a menu of the account's agents; **Block** asks to confirm first. Both turn into the result.
-
-### Removed
-
-- **Breaking:** the triage bot hook (`POST /triage/answered`) and the `TRIAGE_HOOK_SECRET` secret:
-  it could not place the buttons after the bot's answer reliably. Delete the secret.
 
 ## [0.17.0] - 2026-09-30
 
