@@ -32,7 +32,12 @@ interface Ticket {
 }
 
 /** Chatwoot conversation 5 of account 1 and Jev, faked at the fetch boundary. */
-function world(ticket: Ticket, jev: { owner: [string, number]; topic: [string, number] }, failAssign = 0) {
+function world(
+  ticket: Ticket,
+  jev: { owner: [string, number]; topic: [string, number] },
+  failAssign = 0,
+  whileJevAnswers?: () => void,
+) {
   let failures = failAssign;
   const conversation = () => ({
     id: 5,
@@ -43,14 +48,16 @@ function world(ticket: Ticket, jev: { owner: [string, number]; topic: [string, n
   });
   const mock = mockFetch(
     on("GET", CW, () => json(conversation())),
-    on("GET", `${CW}/messages`, () =>
-      json({
-        payload: ticket.messages ?? [
-          { id: 1, content: "My CVM will not start, says Jane Doe (jane@example.com)", message_type: 0 },
-          { id: 2, content: "Looking into it", message_type: 1 },
-        ],
-      }),
-    ),
+    on("GET", `${CW}/messages`, (request) => {
+      const all = ticket.messages ?? [
+        { id: 1, content: "My CVM will not start, says Jane Doe (jane@example.com)", message_type: 0 },
+        { id: 2, content: "Looking into it", message_type: 1 },
+      ];
+      // Chatwoot's MessageFinder: the latest 20 without `after`, else up to 100 after that id.
+      const after = request.url.searchParams.get("after");
+      const payload = after === null ? all.slice(-20) : all.filter((m) => m.id > Number(after)).slice(0, 100);
+      return json({ payload });
+    }),
     on("POST", `${CW}/assignments`, () => {
       if (failures > 0) {
         failures -= 1;
@@ -59,15 +66,16 @@ function world(ticket: Ticket, jev: { owner: [string, number]; topic: [string, n
       return json({});
     }),
     on("POST", `${CW}/custom_attributes`, () => json({})),
-    on("POST", "api.typesafe.ai/v1/systemone", () =>
-      json({
+    on("POST", "api.typesafe.ai/v1/systemone", () => {
+      whileJevAnswers?.();
+      return json({
         model: "jev-1.13.0",
         answers: {
           owner: { type: "choice", choice: jev.owner[0], probabilities: { [jev.owner[0]]: jev.owner[1] } },
           topic: { type: "choice", choice: jev.topic[0], probabilities: { [jev.topic[0]]: jev.topic[1] } },
         },
-      }),
-    ),
+      });
+    }),
   );
   return mock;
 }
@@ -171,6 +179,36 @@ describe("routeConversation", () => {
     await routeConversation(context(store), 1, 5);
 
     expect(requests).toEqual([]);
+  });
+
+  it("sends the first customer messages, however long the conversation", async () => {
+    const later = Array.from({ length: 30 }, (_, i) => ({ id: i + 2, content: "Any news?", message_type: 0 }));
+    const { requests } = world(
+      { messages: [{ id: 1, content: "My invoice is wrong", message_type: 0 }, ...later] },
+      { owner: ["cloud", 1], topic: ["Billing", 1] },
+    );
+
+    await routeConversation(context(), 1, 5);
+
+    const [jev] = sent(requests, "POST", "api.typesafe.ai/v1/systemone");
+    expect(JSON.parse(jev?.body ?? "{}").state.ticket).toBe("My invoice is wrong Any news? Any news?");
+  });
+
+  it("keeps an assignee or topic someone set while Jev was answering, and routes no more", async () => {
+    const store = new MapStore();
+    const ticket: Ticket = {};
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["Billing", 1] }, 0, () => {
+      ticket.assignee = { id: 9, name: "Doyle" };
+      ticket.topic = "Other";
+    });
+
+    await routeConversation(context(store), 1, 5);
+    ticket.assignee = null;
+    await routeConversation(context(store), 1, 5);
+
+    expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
+    expect(sent(requests, "POST", `${CW}/custom_attributes`)).toEqual([]);
+    expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
   });
 
   it("waits for a customer message before asking", async () => {
