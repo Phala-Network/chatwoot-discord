@@ -34,8 +34,8 @@ interface HandlerDeps {
   settings: Settings;
   /** The conversation the relay mapped to this forum post, if any. */
   ticketForThread(threadId: string): Promise<Ticket | undefined>;
-  /** The triage bot's latest draft in the post. */
-  latestDraft(threadId: string): Promise<Draft>;
+  /** The draft of the triage bot's answer nearest above a message (a Use draft button's). */
+  draftAbove(threadId: string, messageId: string): Promise<Draft>;
 }
 
 export interface HandlerResult {
@@ -377,11 +377,9 @@ async function component(context: Context, interaction: APIMessageComponentInter
     case BUTTONS.reply:
       return { response: editor(context, "reply", undefined) };
     case BUTTONS.draft: {
-      const draft = await context.deps.latestDraft(context.threadId);
+      const draft = await context.deps.draftAbove(context.threadId, interaction.message.id);
       if ("text" in draft) return { response: editor(context, "reply", draft.text) };
-      return privately(
-        draft.missing === "unreadable" ? DRAFT_UNREADABLE : "The triage bot has no draft in this post yet.",
-      );
+      return privately(draft.missing === "unreadable" ? DRAFT_UNREADABLE : "The answer above has no draft.");
     }
     case BUTTONS.take: {
       const chatwootUserId = context.deps.settings.chatwootUserFor(context.userId);

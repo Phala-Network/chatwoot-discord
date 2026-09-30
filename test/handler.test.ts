@@ -18,7 +18,7 @@ let draft: Draft = { text: "Hi, restart the CVM from the dashboard." };
 const deps = {
   settings,
   ticketForThread: async (threadId: string) => (threadId === THREAD ? { accountId: 3, conversationId: 15 } : undefined),
-  latestDraft: async () => draft,
+  draftAbove: async () => draft,
 };
 
 /** A ticket button pressed, or a panel menu changed, in the post. */
@@ -421,7 +421,7 @@ describe("ticket buttons and the Manage panel", () => {
 
   it("Use draft says why there is none: not written yet, or not readable without the intent", async () => {
     draft = { missing: "none" };
-    expect(privateText(await press("ticket:draft"))).toMatch(/no draft in this post yet/);
+    expect(privateText(await press("ticket:draft"))).toMatch(/answer above has no draft/);
     draft = { missing: "unreadable" };
     expect(privateText(await press("ticket:draft"))).toMatch(/Message Content intent.*Reply with this/);
     draft = { text: "Hi, restart the CVM from the dashboard." };
