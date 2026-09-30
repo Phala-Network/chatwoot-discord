@@ -204,7 +204,7 @@ Used inside a ticket post, by Discord users linked in `agents[]` who have a toke
 | Command | Effect in Chatwoot |
 |---|---|
 | `/reply [message] [attachment]` | Without options, an editor with a message field and an optional upload field; with either option, sends it at once. Sends to the customer; an unassigned conversation is assigned to the sender. Refused when the channel does not accept a reply (Chatwoot's `can_reply`, e.g. after WhatsApp's 24-hour window). |
-| Apps → **Reply with this** (message menu) | The `/reply` editor, prefilled: from the triage bot, the code block after a draft label; from anyone else, the last code block or the whole message. |
+| Apps → **Reply with this** (message menu) | The `/reply` editor, prefilled: from the triage bot, the last code block of its message (none: no draft); from anyone else, the last code block or the whole message. |
 | `/note [message] [attachment]` | Like `/reply`, for a private note. |
 | `/resolve`, `/reopen` | Change the status. |
 | `/pending` | Like Chatwoot's "Mark as pending". |
