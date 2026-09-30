@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-30
+
 ### Changed
 
 - **Breaking:** `triage.draftLabels` is removed; delete it from `CONFIG`. **Reply with this** on a
@@ -287,7 +289,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-invocation subrequest budget, and a cron reconciliation sweep for missed webhooks.
 - Verification of Chatwoot webhook HMAC signatures and Discord Ed25519 interaction signatures.
 
-[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.7.0...v0.7.1
