@@ -170,17 +170,6 @@ describe("routeConversation", () => {
     expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
   });
 
-  it("keeps a decision recorded by 0.5.0 final", async () => {
-    const store = new MapStore();
-    const legacy = { owner: null, ownerConfidence: 1, topic: null, topicConfidence: 0, applied: true };
-    store.set("route:1:5", JSON.stringify(legacy));
-    const { requests } = world({}, { owner: ["cloud", 1], topic: ["Billing", 1] });
-
-    await routeConversation(context(store), 1, 5);
-
-    expect(requests).toEqual([]);
-  });
-
   it("sends the first customer messages, however long the conversation", async () => {
     const later = Array.from({ length: 30 }, (_, i) => ({ id: i + 2, content: "Any news?", message_type: 0 }));
     const { requests } = world(

@@ -112,13 +112,12 @@ export async function postQueue(ctx: QueueContext, now = Date.now()): Promise<vo
 
   tickets.sort((a, b) => (a.waitingSince || Number.POSITIVE_INFINITY) - (b.waitingSince || Number.POSITIVE_INFINITY));
   const chunks = tickets.length > 0 ? messages(ctx, tickets, nowSeconds, unread) : [];
-  for (const [index, chunk] of chunks.entries()) {
-    await post(rest, queue.channelId, chunk, queue.escalationRoleId);
-    // The first message carries any escalation ping: record it at once, so a later part that
-    // fails does not ping again when the job is retried.
-    if (index === 0) store.set(ESCALATIONS_KEY, JSON.stringify(escalations));
-  }
-  if (chunks.length === 0) store.set(ESCALATIONS_KEY, JSON.stringify(escalations));
+  const [first, ...more] = chunks;
+  if (first) await post(rest, queue.channelId, first, queue.escalationRoleId);
+  // The first message carries any escalation ping: record it at once, so a later part that fails
+  // does not ping again when the job is retried.
+  store.set(ESCALATIONS_KEY, JSON.stringify(escalations));
+  for (const chunk of more) await post(rest, queue.channelId, chunk, queue.escalationRoleId);
   log.info("support queue", {
     tickets: tickets.length,
     escalated: tickets.filter((ticket) => ticket.escalate).length,

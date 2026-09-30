@@ -39,7 +39,7 @@ const REDACTIONS = [
 
 export interface RoutingStore {
   get(key: string): string | undefined;
-  set(key: string, value: string, ttlMs?: number): void;
+  set(key: string, value: string): void;
 }
 
 export interface RoutingContext {
@@ -54,24 +54,17 @@ export interface RoutingContext {
  * `pending`: decided, not applied yet. `waiting`: applied without an owner; Jev is asked again on a
  * new customer message. `done`: final.
  */
-type RoutingState = "pending" | "waiting" | "done";
-const decisionSchema = z
-  .object({
-    owner: z.string().nullable(),
-    ownerConfidence: z.number(),
-    topic: z.string().nullable(),
-    topicConfidence: z.number(),
-    /** Customer messages the decision was made on; 0.5.0 recorded none, and its decisions are final. */
-    messages: z.number().int().default(MAX_MESSAGES),
-    state: z.enum(["pending", "waiting", "done"]).optional(),
-    /** 0.5.0's state: applied or pending. */
-    applied: z.boolean().optional(),
-  })
-  .transform(({ applied, state, ...decision }) => ({
-    ...decision,
-    state: state ?? ((applied ? "done" : "pending") satisfies RoutingState),
-  }));
+const decisionSchema = z.object({
+  owner: z.string().nullable(),
+  ownerConfidence: z.number(),
+  topic: z.string().nullable(),
+  topicConfidence: z.number(),
+  /** Customer messages the decision was made on. */
+  messages: z.number().int(),
+  state: z.enum(["pending", "waiting", "done"]),
+});
 type Decision = z.infer<typeof decisionSchema>;
+type RoutingState = Decision["state"];
 
 const jevResponseSchema = z.object({
   answers: z.record(
@@ -84,14 +77,14 @@ const jevResponseSchema = z.object({
   ),
 });
 
-export class JevError extends Error {
+class JevError extends Error {
   constructor(detail: string) {
     super(`TypeSafe Jev: ${detail}`);
     this.name = "JevError";
   }
 }
 
-export function routingKey(accountId: number, conversationId: number): string {
+function routingKey(accountId: number, conversationId: number): string {
   return `route:${accountId}:${conversationId}`;
 }
 

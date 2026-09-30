@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Routing no longer reads decisions in 0.5.0's format (0.5.0 ran briefly before 0.6.0); a ticket
+  with such a record would be routed again. Internal cleanup of routing and the support queue.
+
 ## [0.7.0] - 2026-09-30
 
 ### Added
