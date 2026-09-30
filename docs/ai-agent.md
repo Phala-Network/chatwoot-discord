@@ -63,9 +63,8 @@ The agent must:
 
 ## What the agent posts
 
-The agent answers in the same post with its analysis and, when it has one, a proposed reply: a
-line containing a draft label, followed on the next line by a fenced code block with the reply
-text. For example:
+The agent answers in the same post with its analysis and, when it has one, a proposed reply as
+the last fenced code block of its message. Headings are up to the agent. For example:
 
 ````markdown
 Likely cause: the invoice was generated before the address change on March 3.
@@ -77,13 +76,11 @@ I have issued a corrected copy; you will find it under Billing → Invoices.
 ```
 ````
 
-- Only the first code block after a draft label counts, so the agent may post other code
-  blocks (logs, progress) in the same or other messages.
+- Only the message's last code block counts: put the draft last, and keep logs or progress in
+  other messages. A message without a code block has no draft.
 - Code blocks follow CommonMark: a fence of three or more backticks or tildes, closed by the same
   character, at least as many, on a line of its own. When the draft itself contains a code block,
   fence it with more backticks (`` ```` ``) or with tildes (`~~~`).
-- The label may be decorated (`**Draft**:`, `Draft (English):`); any configured label in
-  `triage.draftLabels` works.
 - Keep the draft under 4,000 characters, the reply editor's limit.
 
 A human agent then uses **Apps → Reply with this** on that message. It opens the `/reply` editor
