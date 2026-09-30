@@ -3,7 +3,8 @@
 // linked assignees. An unassigned ticket whose customer has waited 1, 2, 4, 8, and 16 hours, and
 // every 24 hours after that, also pings `queue.escalationRoleId` (or `escalationUserId`), once per
 // step, until someone takes it or replies (a new customer message after a reply starts over).
-// Nothing is posted when the queue is empty.
+// Snoozed tickets that match are listed last, marked 💤, and ping no one. Nothing is posted when the
+// queue is empty.
 //
 // A line shows only the ticket's post (or dashboard link), its wait, and its assignee: no customer
 // text. Mentions are allowed from the tickets' fields (linked assignees, the escalation), never
@@ -19,7 +20,7 @@ import { type ChatwootClient, CONVERSATIONS_PER_PAGE } from "./chatwoot/api.ts";
 import { relaysInbox, type Settings } from "./config.ts";
 import type { DiscordRest } from "./discord/rest.ts";
 import { log } from "./log.ts";
-import { QUEUE_MESSAGES, QUEUE_PAGES } from "./queue-limits.ts";
+import { QUEUE_MESSAGES, QUEUE_PAGES, SNOOZED_PAGES } from "./queue-limits.ts";
 import { clip, conversationUrl, defused } from "./relay/format.ts";
 
 const ESCALATION_HOURS = [1, 2, 4, 8, 16];
@@ -53,6 +54,7 @@ interface Ticket {
   waitingSince: number;
   assignee: { id: number; name: string } | null;
   escalate: boolean;
+  snoozed: boolean;
 }
 
 interface Chunk {
@@ -81,38 +83,47 @@ export async function postQueue(ctx: QueueContext, now = Date.now()): Promise<vo
   const tickets: Ticket[] = [];
   let unread = false;
 
+  const reads = [
+    { status: "open", pages: QUEUE_PAGES },
+    { status: "snoozed", pages: SNOOZED_PAGES },
+  ] as const;
   for (const account of settings.config.accounts) {
-    for (let page = 1; page <= QUEUE_PAGES; page += 1) {
-      const conversations = await chatwoot.listConversations(account.id, page, "open");
-      for (const conversation of conversations) {
-        const conversationId = conversation.id;
-        if (conversationId === undefined || !relaysInbox(account, conversation.inbox_id)) continue;
-        const assignee = conversation.meta?.assignee;
-        const waitingSince = conversation.waiting_since ?? 0;
-        if (assignee && !waitingSince) continue;
-        let escalate = false;
-        if (!assignee && waitingSince && (queue.escalationRoleId ?? queue.escalationUserId)) {
-          const key = `${account.id}:${conversationId}`;
-          const level = escalationLevel((nowSeconds - waitingSince) / 3600);
-          const reached = previous[key]?.since === waitingSince ? previous[key].level : 0;
-          escalate = level > reached;
-          escalations[key] = { since: waitingSince, level };
+    for (const { status, pages } of reads) {
+      for (let page = 1; page <= pages; page += 1) {
+        const conversations = await chatwoot.listConversations(account.id, page, status);
+        for (const conversation of conversations) {
+          const conversationId = conversation.id;
+          if (conversationId === undefined || !relaysInbox(account, conversation.inbox_id)) continue;
+          const assignee = conversation.meta?.assignee;
+          const waitingSince = conversation.waiting_since ?? 0;
+          if (assignee && !waitingSince) continue;
+          const snoozed = status === "snoozed";
+          let escalate = false;
+          if (!snoozed && !assignee && waitingSince && (queue.escalationRoleId ?? queue.escalationUserId)) {
+            const key = `${account.id}:${conversationId}`;
+            const level = escalationLevel((nowSeconds - waitingSince) / 3600);
+            const reached = previous[key]?.since === waitingSince ? previous[key].level : 0;
+            escalate = level > reached;
+            escalations[key] = { since: waitingSince, level };
+          }
+          tickets.push({
+            accountId: account.id,
+            accountName: account.name,
+            conversationId,
+            waitingSince,
+            assignee: assignee?.id ? { id: assignee.id, name: assignee.name ?? "" } : null,
+            escalate,
+            snoozed,
+          });
         }
-        tickets.push({
-          accountId: account.id,
-          accountName: account.name,
-          conversationId,
-          waitingSince,
-          assignee: assignee?.id ? { id: assignee.id, name: assignee.name ?? "" } : null,
-          escalate,
-        });
+        if (conversations.length < CONVERSATIONS_PER_PAGE) break;
+        if (page === pages) unread = true;
       }
-      if (conversations.length < CONVERSATIONS_PER_PAGE) break;
-      if (page === QUEUE_PAGES) unread = true;
     }
   }
 
-  tickets.sort((a, b) => (a.waitingSince || Number.POSITIVE_INFINITY) - (b.waitingSince || Number.POSITIVE_INFINITY));
+  const wait = (ticket: Ticket) => ticket.waitingSince || Number.POSITIVE_INFINITY;
+  tickets.sort((a, b) => Number(a.snoozed) - Number(b.snoozed) || wait(a) - wait(b));
   const chunks = tickets.length > 0 ? messages(ctx, tickets, nowSeconds, unread) : [];
   // A nonce per hour and part: Discord creates no second message for a retried request it took.
   const nonce = (index: number) => `queue-${Math.floor(nowSeconds / 3600)}-${index}`;
@@ -155,7 +166,7 @@ function messages(ctx: QueueContext, tickets: Ticket[], nowSeconds: number, unre
     } else {
       break;
     }
-    const linked = ctx.settings.linkedAgent(ticket.assignee?.id);
+    const linked = ticket.snoozed ? undefined : ctx.settings.linkedAgent(ticket.assignee?.id);
     if (linked) chunks.at(-1)?.users.add(linked.discordUserId);
     shown += 1;
   }
@@ -176,13 +187,14 @@ function line(ctx: QueueContext, ticket: Ticket, nowSeconds: number): string {
   const url = conversationUrl(settings.frontendUrl, ticket.accountId, ticket.conversationId);
   const post = threadId ? `<#${threadId}>` : `[${ticket.accountName} #${ticket.conversationId}](<${url}>)`;
   const waiting = ticket.waitingSince ? `waiting ${duration(nowSeconds - ticket.waitingSince)}` : "replied";
-  const linked = settings.linkedAgent(ticket.assignee?.id);
+  const linked = ticket.snoozed ? undefined : settings.linkedAgent(ticket.assignee?.id);
   const owner = linked
     ? `<@${linked.discordUserId}>`
     : ticket.assignee
       ? defused(clip(ticket.assignee.name, NAME_LIMIT))
       : "❔ Unassigned";
-  return `${ticket.escalate ? "🔔 " : ""}${post} | ${waiting} | ${owner}`;
+  const mark = ticket.escalate ? "🔔 " : ticket.snoozed ? "💤 " : "";
+  return `${mark}${post} | ${waiting} | ${owner}`;
 }
 
 function duration(seconds: number): string {

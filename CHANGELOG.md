@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `routing.snoozeUnclear`: a ticket without a clear owner is snoozed until the customer's next
+  message, which reopens it and routes it again.
+- The support queue also lists snoozed tickets, last and marked 💤, without pinging or escalating.
+  It reads one more page per account: `relay.subrequestBudget` must be at least 5 × accounts + 4.
+
 ## [0.11.0] - 2026-09-30
 
 ### Added

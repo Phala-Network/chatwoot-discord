@@ -28,19 +28,22 @@ interface Open {
   id: number;
   waiting?: number; // hours
   assignee?: { id: number; name: string };
+  snoozed?: boolean;
 }
 
-/** Open conversations of account 3 (25 per page, like Chatwoot), none in account 1, and Discord. */
+/** Open or snoozed conversations of account 3 (25 per page, like Chatwoot), none in account 1, and Discord. */
 function world(open: Open[], { failPost = 0 }: { failPost?: number } = {}) {
   let failures = failPost;
   let posts = 0;
   return mockFetch(
     on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations", (request) => {
       const page = Number(request.url.searchParams.get("page"));
-      const payload = open.slice((page - 1) * 25, page * 25).map((c) => ({
+      const status = request.url.searchParams.get("status");
+      const listed = open.filter((c) => (c.snoozed ? "snoozed" : "open") === status);
+      const payload = listed.slice((page - 1) * 25, page * 25).map((c) => ({
         id: c.id,
         inbox_id: 2,
-        status: "open",
+        status,
         waiting_since: c.waiting === undefined ? 0 : NOW - c.waiting * HOUR,
         meta: { assignee: c.assignee ?? null },
       }));
@@ -102,6 +105,24 @@ describe("support queue", () => {
       "[Acme #4](<https://chatwoot.example.com/app/accounts/3/conversations/4>) | replied | ❔ Unassigned",
     ]);
     expect(message.allowed_mentions).toEqual({ parse: [], users: [ALICE], roles: [ROLE] });
+  });
+
+  it("lists snoozed tickets last, marked, without pinging anyone or escalating", async () => {
+    const { requests } = world([
+      { id: 1, waiting: 30, snoozed: true },
+      { id: 2, waiting: 2, snoozed: true, assignee: { id: 42, name: "Alice" } },
+      { id: 3, waiting: 1 },
+    ]);
+
+    await postQueue(context(), NOW * 1000);
+
+    const [message] = posted(requests);
+    expect(message.content.split("\n").slice(2)).toEqual([
+      "🔔 [Acme #3](<https://chatwoot.example.com/app/accounts/3/conversations/3>) | waiting 1 h | ❔ Unassigned",
+      "💤 [Acme #1](<https://chatwoot.example.com/app/accounts/3/conversations/1>) | waiting 30 h | ❔ Unassigned",
+      "💤 [Acme #2](<https://chatwoot.example.com/app/accounts/3/conversations/2>) | waiting 2 h | Alice",
+    ]);
+    expect(message.allowed_mentions).toEqual({ parse: [], users: [], roles: [ROLE] });
   });
 
   it("escalates to a user instead of a role", async () => {
