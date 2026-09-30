@@ -38,6 +38,15 @@ export function message(overrides: Overrides = {}): RelayMessage {
   };
 }
 
+// Discord ids from the time of the relay tests' clock (2026-09-27T20:00:00Z) on.
+let lastSnowflake = (BigInt(Date.parse("2026-09-27T20:00:00Z")) - 1420070400000n) << 22n;
+
+/** A new Discord id, greater than every one before it, as Discord's grow with time. */
+export function snowflake(): string {
+  lastSnowflake += 1n;
+  return String(lastSnowflake);
+}
+
 export class MemoryStore implements RelayStore {
   rows = new Map<string, Partial<PostFields>>();
   parts = new Map<string, string[]>();
@@ -48,7 +57,21 @@ export class MemoryStore implements RelayStore {
     const row = this.rows.get(`${a}:${c}`);
     if (!row) return undefined;
     const { threadId, state, announcedAssignee, announcePending, titleSubject, title, titleMessageId } = row;
-    return { threadId, state, announcedAssignee, announcePending, titleSubject, title, titleMessageId };
+    const { cardId, cardCovered, answerId, answerSourceId, customerMessageId } = row;
+    return {
+      threadId,
+      state,
+      announcedAssignee,
+      announcePending,
+      titleSubject,
+      title,
+      titleMessageId,
+      cardId,
+      cardCovered,
+      answerId,
+      answerSourceId,
+      customerMessageId,
+    };
   }
   updateConversation(a: number, c: number, patch: Partial<PostFields>) {
     this.rows.set(`${a}:${c}`, { ...this.rows.get(`${a}:${c}`), ...patch });
@@ -58,6 +81,12 @@ export class MemoryStore implements RelayStore {
   }
   postedParts(a: number, c: number, messageId: number) {
     return this.parts.get(`${a}:${c}:${messageId}`) ?? [];
+  }
+  firstPart(a: number, c: number, discordId: string) {
+    for (const [key, parts] of this.parts) {
+      if (key.startsWith(`${a}:${c}:`) && parts.includes(discordId)) return parts[0];
+    }
+    return undefined;
   }
   savePostedPart(a: number, c: number, messageId: number, part: number, discordId: string) {
     const parts = this.postedParts(a, c, messageId);
@@ -93,11 +122,15 @@ type ThreadPatch = { archived: boolean; applied_tags?: string[]; name?: string }
 
 /**
  * Records webhook executions like Discord would: a new post gets channel id "thread-<n>" and
- * every message id "message-<n>". Like Discord, posting into an archived post unarchives it, and
+ * every message a new Discord id (see snowflake). Like Discord, posting into an archived post unarchives it, and
  * an archived post's tags cannot change unless the same update unarchives it.
  */
 export class FakeForum implements ForumClient {
   calls: Array<[string | undefined, WebhookMessage]> = [];
+  /** The id of each call's message. */
+  ids: string[] = [];
+  /** Message edits, as [messageId, payload]. */
+  edits: Array<[string, WebhookMessage]> = [];
   patches: Array<[string, ThreadPatch]> = [];
   deleted: string[] = [];
   archived = new Set<string>();
@@ -107,6 +140,10 @@ export class FakeForum implements ForumClient {
   failThreadWith: "gone" | "error" | undefined;
   /** Fails the next execution into a thread after this many succeed. */
   failAfter: number | undefined;
+  /** Posts the next message into a thread but loses Discord's answer. */
+  loseAnswer = false;
+  /** Fails the next request that archives a post. */
+  failArchive = false;
 
   constructor(public guildId = "100000000000000044") {}
 
@@ -125,7 +162,13 @@ export class FakeForum implements ForumClient {
     }
     this.calls.push([threadId, payload]);
     if (threadId) this.archived.delete(threadId);
-    return { channelId: threadId ?? `thread-${this.calls.length}`, messageId: `message-${this.calls.length}` };
+    const messageId = snowflake();
+    this.ids.push(messageId);
+    if (threadId && this.loseAnswer) {
+      this.loseAnswer = false;
+      throw new Error("Discord's answer was lost");
+    }
+    return { channelId: threadId ?? `thread-${this.calls.length}`, messageId };
   }
 
   async updateThread(_forum: string, threadId: string, patch: ThreadPatch) {
@@ -133,12 +176,33 @@ export class FakeForum implements ForumClient {
       this.failThreadWith = undefined;
       throw new UnknownThreadError(threadId);
     }
+    if (patch.archived && this.failArchive) {
+      this.failArchive = false;
+      throw new Error("Discord HTTP 500");
+    }
     if (this.archived.has(threadId) && patch.archived !== false) {
       throw new Error("Discord HTTP 400: Thread is archived");
     }
     this.patches.push([threadId, patch]);
     if (patch.archived) this.archived.add(threadId);
     else this.archived.delete(threadId);
+  }
+
+  async editMessage(_forum: string, threadId: string, messageId: string, payload: WebhookMessage) {
+    // Like Discord, which refuses changes in an archived post.
+    if (this.archived.has(threadId)) throw new Error("Discord HTTP 400: Thread is archived");
+    if (this.deleted.includes(messageId)) return false;
+    this.edits.push([messageId, payload]);
+    return true;
+  }
+
+  async cardsAfter(_forum: string, threadId: string, after: string) {
+    const cards = this.calls.flatMap(([thread, payload], index) => {
+      const id = this.ids[index] ?? "";
+      const live = thread === threadId && payload.flags === 1 << 15 && !this.deleted.includes(id);
+      return live && BigInt(id) > BigInt(after) ? [id] : [];
+    });
+    return { cards };
   }
 
   async deleteMessage(_forum: string, _threadId: string, messageId: string) {
@@ -162,6 +226,11 @@ export class FakeForum implements ForumClient {
 
   contents(): string[] {
     return this.calls.map(([, payload]) => payload.content ?? "");
+  }
+
+  /** The messages posted, cards left out. */
+  messages(): Array<[string | undefined, WebhookMessage]> {
+    return this.calls.filter(([, payload]) => payload.content !== undefined);
   }
 }
 

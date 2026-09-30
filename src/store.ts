@@ -3,7 +3,7 @@
 // counters, and a small cache.
 
 import type { Cache } from "./discord/forum.ts";
-import type { PostFields, RelayStore } from "./relay/relay.ts";
+import { type PostFields, type RelayStore, unknownCards } from "./relay/relay.ts";
 
 export const MIGRATIONS: string[] = [
   `CREATE TABLE conversations (
@@ -81,6 +81,13 @@ export const MIGRATIONS: string[] = [
      PRIMARY KEY (account_id, conversation_id, message_id, discord_message_id)
    );
    ALTER TABLE conversations ADD COLUMN title_message_id INTEGER;`,
+  // A post's card: its message, whether messages were posted after it, the triage bot's latest
+  // answer and the message it answers, and the customer's latest message (see Relay.sync).
+  `ALTER TABLE conversations ADD COLUMN card_id TEXT;
+   ALTER TABLE conversations ADD COLUMN card_covered INTEGER;
+   ALTER TABLE conversations ADD COLUMN answer_id TEXT;
+   ALTER TABLE conversations ADD COLUMN answer_source_id TEXT;
+   ALTER TABLE conversations ADD COLUMN customer_message_id TEXT;`,
 ];
 
 const COUNTER_TTL_MS = 2 * 60 * 60 * 1000;
@@ -104,6 +111,11 @@ const COLUMNS: ReadonlyArray<readonly [keyof ConversationFields, string]> = [
   ["titleSubject", "title_subject"],
   ["title", "title"],
   ["titleMessageId", "title_message_id"],
+  ["cardId", "card_id"],
+  ["cardCovered", "card_covered"],
+  ["answerId", "answer_id"],
+  ["answerSourceId", "answer_source_id"],
+  ["customerMessageId", "customer_message_id"],
 ];
 
 export interface Job {
@@ -145,6 +157,11 @@ export class Store implements RelayStore, Cache {
         title_subject: string | null;
         title: string | null;
         title_message_id: number | null;
+        card_id: string | null;
+        card_covered: number | null;
+        answer_id: string | null;
+        answer_source_id: string | null;
+        customer_message_id: string | null;
       }>(
         `SELECT ${COLUMNS.map(([, column]) => column).join(", ")} FROM conversations
          WHERE account_id = ? AND conversation_id = ?`,
@@ -162,6 +179,11 @@ export class Store implements RelayStore, Cache {
       titleSubject: row.title_subject ?? undefined,
       title: row.title ?? undefined,
       titleMessageId: row.title_message_id ?? undefined,
+      cardId: row.card_id ?? undefined,
+      cardCovered: row.card_covered ?? undefined,
+      answerId: row.answer_id ?? undefined,
+      answerSourceId: row.answer_source_id ?? undefined,
+      customerMessageId: row.customer_message_id ?? undefined,
     };
   }
 
@@ -187,6 +209,30 @@ export class Store implements RelayStore, Cache {
       )
       .toArray()[0];
     return row ? { accountId: row.account_id, conversationId: row.conversation_id } : undefined;
+  }
+
+  /**
+   * Up to `limit` of the account's posts that have no card, whose ticket was not resolved when
+   * last synced (`state` is Relay.stateOf, which starts with the status), and that were not taken
+   * in the last `retryMs`; each is taken (see backfillCards in hub.ts).
+   */
+  takePostsWithoutCard(accountId: number, limit: number, retryMs: number): number[] {
+    const ids = this.sql
+      .exec<{ conversation_id: number }>(
+        `SELECT c.conversation_id FROM conversations c
+         LEFT JOIN cache taken ON taken.key = 'card-backfill:' || c.account_id || ':' || c.conversation_id
+           AND (taken.expires_at IS NULL OR taken.expires_at > ?)
+         WHERE c.account_id = ? AND c.thread_id IS NOT NULL AND c.card_id IS NULL AND taken.key IS NULL
+           AND (c.state IS NULL OR c.state NOT LIKE '["resolved"%')
+         ORDER BY c.conversation_id DESC LIMIT ?`,
+        this.now(),
+        accountId,
+        limit,
+      )
+      .toArray()
+      .map((row) => row.conversation_id);
+    for (const id of ids) this.set(`card-backfill:${accountId}:${id}`, "1", retryMs);
+    return ids;
   }
 
   setCursor(accountId: number, conversationId: number, cursor: number): void {
@@ -217,13 +263,17 @@ export class Store implements RelayStore, Cache {
 
   /** Maps a conversation to an existing post that no other conversation is mapped to. */
   adoptThread(accountId: number, conversationId: number, threadId: string): void {
+    // The adopted post may hold cards anywhere: they are looked for before one is posted.
     this.sql.exec(
-      `INSERT INTO conversations (account_id, conversation_id, thread_id) VALUES (?, ?, ?)
+      `INSERT INTO conversations (account_id, conversation_id, thread_id, card_id) VALUES (?, ?, ?, ?)
        ON CONFLICT (account_id, conversation_id) DO UPDATE SET thread_id = excluded.thread_id, state = NULL,
-         announced_assignee = NULL, announce_pending = NULL, title_subject = NULL, title = NULL, title_message_id = NULL`,
+         announced_assignee = NULL, announce_pending = NULL, title_subject = NULL, title = NULL, title_message_id = NULL,
+         card_id = excluded.card_id, card_covered = NULL, answer_id = NULL, answer_source_id = NULL,
+         customer_message_id = NULL`,
       accountId,
       conversationId,
       threadId,
+      unknownCards(threadId),
     );
   }
 
@@ -239,6 +289,20 @@ export class Store implements RelayStore, Cache {
       )
       .toArray()
       .map((row) => row.discord_message_id);
+  }
+
+  firstPart(accountId: number, conversationId: number, discordId: string): string | undefined {
+    return this.sql
+      .exec<{ discord_message_id: string }>(
+        `SELECT first.discord_message_id FROM posted_messages part
+           JOIN posted_messages first ON first.account_id = part.account_id
+             AND first.conversation_id = part.conversation_id AND first.message_id = part.message_id AND first.part = 0
+           WHERE part.account_id = ? AND part.conversation_id = ? AND part.discord_message_id = ?`,
+        accountId,
+        conversationId,
+        discordId,
+      )
+      .toArray()[0]?.discord_message_id;
   }
 
   savePostedPart(accountId: number, conversationId: number, messageId: number, part: number, discordId: string): void {
@@ -289,7 +353,8 @@ export class Store implements RelayStore, Cache {
   forgetThread(accountId: number, conversationId: number): void {
     this.sql.exec(
       `UPDATE conversations SET thread_id = NULL, state = NULL, announced_assignee = NULL, announce_pending = NULL,
-         title_subject = NULL, title = NULL, title_message_id = NULL
+         title_subject = NULL, title = NULL, title_message_id = NULL, card_id = NULL, card_covered = NULL, answer_id = NULL,
+         answer_source_id = NULL, customer_message_id = NULL
        WHERE account_id = ? AND conversation_id = ?`,
       accountId,
       conversationId,

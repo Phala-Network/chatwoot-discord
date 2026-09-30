@@ -11,7 +11,7 @@ import {
   toRelayConversation,
   toRelayMessage,
 } from "../chatwoot/api.ts";
-import { ticketButtons } from "../commands/components.ts";
+import { ticketCard } from "../commands/components.ts";
 import { relaysInbox, type Settings } from "../config.ts";
 import { type DiscordRest, isInvalidRequest } from "../discord/rest.ts";
 import { fetchAvatarUrl } from "../discord/users.ts";
@@ -45,7 +45,7 @@ export function relayFor(settings: Settings, forum: ForumClient, store: RelaySto
     topicAttribute: settings.config.relay.topicAttribute,
     maxChunks: settings.config.relay.maxChunks,
     triage: triageUserId ? { ...settings.config.triage, userId: triageUserId } : undefined,
-    buttons: { message: ticketButtons(), answer: ticketButtons },
+    card: ticketCard,
     linkedAgent: settings.linkedAgent,
     // Normally every message is relayed within the sweep's window (by its webhook, or else by
     // the sweep), so an older one is history: a first sync, or a catch-up after downtime.
@@ -235,7 +235,7 @@ export function latestMessageId(conversation: ChatwootConversation): number | un
   return ids.length === 0 ? undefined : Math.max(...ids);
 }
 
-/** The inbox name for a new post's ticket card; omitted when Chatwoot will not say. */
+/** The inbox name for a new post's ticket header; omitted when Chatwoot will not say. */
 async function cachedInboxName(
   { store, chatwoot }: ProcessorContext,
   accountId: number,

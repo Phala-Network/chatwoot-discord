@@ -2,13 +2,19 @@
 // name, and its guild (for post links).
 
 import {
+  MessageFlags,
   type RESTDeleteAPIWebhookWithTokenMessageQuery,
   type RESTDeleteAPIWebhookWithTokenMessageResult,
+  type RESTGetAPIChannelMessagesQuery,
+  type RESTGetAPIChannelMessagesResult,
   type RESTGetAPIChannelResult,
   type RESTGetAPIChannelWebhooksResult,
   type RESTGetCurrentApplicationResult,
   type RESTPatchAPIChannelJSONBody,
   type RESTPatchAPIChannelResult,
+  type RESTPatchAPIWebhookWithTokenMessageJSONBody,
+  type RESTPatchAPIWebhookWithTokenMessageQuery,
+  type RESTPatchAPIWebhookWithTokenMessageResult,
   type RESTPostAPIChannelWebhookJSONBody,
   type RESTPostAPIChannelWebhookResult,
   type RESTPostAPIWebhookWithTokenJSONBody,
@@ -27,6 +33,8 @@ const UNKNOWN_WEBHOOK = 10015;
 const UNKNOWN_MESSAGE = 10008;
 const UNKNOWN_TAG = 10087;
 const APPLICATION_KEY = "discord:application";
+/** Messages per page when looking for a post's cards (Discord's maximum). */
+const CARD_PAGE = 100;
 
 export interface Cache {
   get(key: string): string | undefined;
@@ -55,7 +63,8 @@ export class DiscordForum implements ForumClient {
           RESTPostAPIWebhookWithTokenQuery
         >(Routes.webhook(webhook.id, webhook.token), {
           body: tags ? { ...message, applied_tags: tags } : message,
-          query: { wait: true, ...(threadId ? { thread_id: threadId } : {}) },
+          // The webhook is this application's, so with_components lets it post any components.
+          query: { wait: true, with_components: true, ...(threadId ? { thread_id: threadId } : {}) },
           auth: false,
         }),
       );
@@ -88,6 +97,60 @@ export class DiscordForum implements ForumClient {
       if (error instanceof DiscordHttpError && error.status === 404 && error.code !== UNKNOWN_TAG) {
         throw new UnknownThreadError(threadId);
       }
+      throw error;
+    }
+  }
+
+  async editMessage(
+    forumChannelId: string,
+    threadId: string,
+    messageId: string,
+    message: WebhookMessage,
+  ): Promise<boolean> {
+    const webhook = await this.webhook(forumChannelId);
+    try {
+      await this.rest.patch<
+        RESTPatchAPIWebhookWithTokenMessageResult,
+        RESTPatchAPIWebhookWithTokenMessageJSONBody,
+        RESTPatchAPIWebhookWithTokenMessageQuery
+      >(Routes.webhookMessage(webhook.id, webhook.token, messageId), {
+        body: message,
+        query: { thread_id: threadId, with_components: true },
+        auth: false,
+      });
+      return true;
+    } catch (error) {
+      if (error instanceof DiscordHttpError && error.status === 404) {
+        if (error.code === UNKNOWN_MESSAGE) return false;
+        if (error.code === UNKNOWN_WEBHOOK) this.cache.delete(webhookKey(forumChannelId));
+        else throw new UnknownThreadError(threadId);
+      }
+      throw error;
+    }
+  }
+
+  async cardsAfter(
+    forumChannelId: string,
+    threadId: string,
+    after: string,
+  ): Promise<{ cards: string[]; next?: string }> {
+    const webhook = await this.webhook(forumChannelId);
+    try {
+      // A message's author and flags are given without the Message Content intent.
+      const messages = await this.rest.get<RESTGetAPIChannelMessagesResult, RESTGetAPIChannelMessagesQuery>(
+        Routes.channelMessages(threadId),
+        { query: { after, limit: CARD_PAGE } },
+      );
+      const cards = messages
+        .filter(
+          (message) => message.webhook_id === webhook.id && ((message.flags ?? 0) & MessageFlags.IsComponentsV2) !== 0,
+        )
+        .map((message) => message.id);
+      if (messages.length < CARD_PAGE) return { cards };
+      const next = messages.map((message) => BigInt(message.id)).reduce((a, b) => (a > b ? a : b));
+      return { cards, next: String(next) };
+    } catch (error) {
+      if (error instanceof DiscordHttpError && error.status === 404) throw new UnknownThreadError(threadId);
       throw error;
     }
   }

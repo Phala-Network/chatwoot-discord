@@ -29,6 +29,7 @@ import { errorFields, log } from "./log.ts";
 import { postQueue } from "./queue.ts";
 import { queueBudget } from "./queue-limits.ts";
 import { latestMessageId, type ProcessorContext, processConversation, relayFor } from "./relay/processor.ts";
+import { isUnknownCard } from "./relay/relay.ts";
 import { processMessageUpdate } from "./relay/updates.ts";
 import { awaitsRouting, routeConversation, routesAccount } from "./routing.ts";
 import { type Job, Store } from "./store.ts";
@@ -43,7 +44,7 @@ const payloadSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("message-updated"), accountId: id, conversationId: id, messageId: id }),
   z.object({ type: z.literal("route"), accountId: id, conversationId: id }),
   z.object({ type: z.literal("queue") }),
-  z.object({ type: z.literal("answer"), accountId: id, conversationId: id, answerId: z.string() }),
+  z.object({ type: z.literal("answer"), accountId: id, conversationId: id, answerId: z.string(), replyTo: z.string() }),
 ]);
 type JobPayload = z.infer<typeof payloadSchema>;
 
@@ -69,6 +70,9 @@ const ROUTE_BUDGET = 14;
 const SWEEP_PAGES = 10;
 /** A sweep pass left unfinished this long (e.g. its account was removed) is started over. */
 const SWEEP_PASS_TTL_MS = 24 * 60 * 60 * 1000;
+/** Posts without a card a sweep queues at most, and how long before one is queued again. */
+const CARD_BACKFILL_PER_SWEEP = 10;
+const CARD_BACKFILL_RETRY_MS = 24 * 60 * 60 * 1000;
 const sweepPassSchema = z.object({ cutoff: z.number(), page: z.number().int().positive(), startedAt: z.number() });
 /**
  * The longest wait between retries of a failing job. A job is never dropped: its log turns from
@@ -143,15 +147,15 @@ export class Hub extends DurableObject<Env> {
   }
 
   /**
-   * The triage bot's answer `answerId` is in the post, with the reply draft it proposes: the
-   * draft is kept for Use draft, and the answer gets its Use draft button (Relay.postAnswerButtons).
+   * The triage bot's answer `answerId` to message `replyTo` is in the post, with the reply draft it proposes: the
+   * draft is kept for Use draft, and the post's card offers it under the answer (Relay.answered).
    * Each answer is taken once, so a repeated call adds nothing.
    */
-  async triageAnswered(threadId: string, answerId: string, draft: string): Promise<void> {
+  async triageAnswered(threadId: string, answerId: string, replyTo: string, draft: string): Promise<void> {
     const ticket = this.store.ticketForThread(threadId);
     if (!ticket || this.store.get(answerKey(answerId)) !== undefined) return;
     this.store.set(answerKey(answerId), draft, ANSWER_TTL_MS);
-    this.enqueue({ type: "answer", ...ticket, answerId });
+    this.enqueue({ type: "answer", ...ticket, answerId, replyTo });
     await this.schedule();
   }
 
@@ -236,17 +240,10 @@ export class Hub extends DurableObject<Env> {
           this.store.completeJob(job);
           return "done";
         case "answer":
-          // At most once: Discord cannot tell a repeated post from a new one, and the buttons are a
-          // convenience (those under every message remain). Posting unarchives the post, so the
-          // ticket's state is applied again afterwards, whatever the post's outcome.
-          this.store.deleteJob(job.key);
+          // The card moves under the answer when the conversation's post is synced next.
+          services.relay.answered(payload.accountId, payload.conversationId, payload.answerId, payload.replyTo);
+          this.store.completeJob(job);
           this.enqueue({ type: "conversation", accountId: payload.accountId, conversationId: payload.conversationId });
-          try {
-            await services.relay.postAnswerButtons(payload.accountId, payload.conversationId, payload.answerId);
-          } catch (error) {
-            if (error instanceof BudgetExhaustedError) throw error;
-            log.warn("answer buttons not posted", { answerId: payload.answerId, ...errorFields(error) });
-          }
           return "done";
         case "route":
           await routeConversation(
@@ -301,7 +298,7 @@ export class Hub extends DurableObject<Env> {
    * pages per run, continuing where it stopped until it is done. Activity means a new message
    * (Chatwoot's `last_activity_at`); a change that creates none, such as only a custom
    * attribute, relies on its webhook. It also queues routing for open, unassigned conversations
-   * of a routed account that are not routed yet.
+   * of a routed account that are not routed yet, and posts still without a card (backfillCards).
    */
   private async sweep(accountId: number, { settings, chatwoot, relay }: ProcessorContext): Promise<void> {
     const lastKey = `sweep:${accountId}:last`;
@@ -334,14 +331,19 @@ export class Hub extends DurableObject<Env> {
         const needsCursor = row?.threadId !== undefined && row.cursor === undefined;
         const cursor = row?.cursor ?? settings.config.relay.startAfterMessageId;
         const behind = needsCursor || (latest !== undefined && latest > cursor);
+        // A card still to be moved or posted counts too (its sync may have failed).
         const stale =
-          row?.threadId !== undefined && row.state !== relay.stateOf(toRelayConversation(conversationId, conversation));
+          row?.threadId !== undefined &&
+          (row.state !== relay.stateOf(toRelayConversation(conversationId, conversation)) ||
+            row.cardCovered === 1 ||
+            isUnknownCard(row.cardId));
         if (behind || stale) {
           this.enqueue({ type: "conversation", accountId, conversationId });
           queued += 1;
         }
       }
     }
+    queued += this.backfillCards(accountId);
     if (reachedCutoff) {
       // The next pass covers everything active since this one started, so activity while it ran
       // (which reorders the list) is read again.
@@ -353,6 +355,16 @@ export class Hub extends DurableObject<Env> {
       this.enqueue({ type: "sweep", accountId }); // Continues in the next run.
       log.info("sweep continues", { accountId, nextPage: page, seen, queued });
     }
+  }
+
+  /**
+   * Queues a few of the account's posts without a card (from before cards) whose ticket is not
+   * resolved, however long ago their last activity, each at most once a day. Returns how many.
+   */
+  private backfillCards(accountId: number): number {
+    const ids = this.store.takePostsWithoutCard(accountId, CARD_BACKFILL_PER_SWEEP, CARD_BACKFILL_RETRY_MS);
+    for (const conversationId of ids) this.enqueue({ type: "conversation", accountId, conversationId });
+    return ids.length;
   }
 
   private sweepPass(key: string): z.infer<typeof sweepPassSchema> | undefined {

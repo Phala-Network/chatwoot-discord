@@ -1,7 +1,8 @@
-// Buttons on a ticket's posts, the menus they open, and the Manage panel. The buttons hold no
-// state: each acts on the ticket as it is when pressed. The panel (a Components V2 card) shows the
-// ticket as it was when drawn, and is drawn again after each change made from it (see
-// executeCommand). Nothing here performs I/O.
+// A ticket's card, the menus its buttons show, and the Manage panel. The card (at the bottom of
+// the ticket's post, see Relay.sync) shows the ticket as it is and offers what fits it; its
+// buttons act on the ticket as it is when pressed. The panel shows the ticket as it was when
+// drawn, and is drawn again after each change made from it (see executeCommand). Both are
+// Components V2 cards. Nothing here performs I/O.
 
 import {
   type APIActionRowComponent,
@@ -12,6 +13,7 @@ import {
   ButtonStyle,
   ComponentType,
 } from "discord-api-types/v10";
+import { defused } from "../relay/format.ts";
 
 /** Custom ids of the ticket buttons and the menus they show. */
 export const BUTTONS = {
@@ -23,6 +25,7 @@ export const BUTTONS = {
   /** The menu Assign to shows. */
   assignee: "ticket:assignee",
   resolve: "ticket:resolve",
+  reopen: "ticket:reopen",
   snooze: "ticket:snooze",
   block: "ticket:block",
   /** On the confirmation Block asks for. */
@@ -45,9 +48,13 @@ export type ActionRow = APIActionRowComponent<APIComponentInMessageActionRow>;
  */
 export const NONE = ":none";
 
-/** Discord's limits for a select menu. */
+/** Discord's limits for a select menu, and for a button's label. */
 const MAX_OPTIONS = 25;
 const MAX_OPTION_TEXT = 100;
+const MAX_BUTTON_TEXT = 80;
+/** What a card's summary shows at most: the labels, and the characters of a name or label. */
+const CARD_LABELS = 5;
+const CARD_TEXT = 60;
 
 type Style = ButtonStyle.Primary | ButtonStyle.Secondary | ButtonStyle.Danger;
 
@@ -66,6 +73,12 @@ function button(
   };
 }
 
+/** `text` cut to `max` characters, with an ellipsis when cut. */
+function clip(text: string, max: number): string {
+  const characters = Array.from(text);
+  return characters.length > max ? `${characters.slice(0, max - 1).join("")}…` : text;
+}
+
 function row(components: APIComponentInMessageActionRow[]): ActionRow {
   return { type: ComponentType.ActionRow, components };
 }
@@ -79,30 +92,90 @@ function option(value: string, label: string, emoji: string, selected: boolean):
   };
 }
 
+/** A ticket as its card shows it. */
+export interface CardTicket {
+  /** The ticket, e.g. "Acme #142", and its customer. */
+  title: string;
+  customer: string;
+  /** The channel, and how to reach the customer (email, phone). */
+  details: string[];
+  /** The conversation in Chatwoot. */
+  url: string;
+  /** open, pending, snoozed, or resolved. */
+  status: string;
+  /** The assignee's name; null when unassigned. */
+  assignee: string | null;
+  labels: string[];
+}
+
+/** A card's accent: the ticket's status at a glance. */
+const STATUS_COLORS: Record<string, number> = {
+  open: 0x3ba55c,
+  pending: 0xfaa61a,
+  snoozed: 0x5865f2,
+  resolved: 0x80848e,
+};
+
+const STATUS_NAMES: Record<string, string> = {
+  open: "🟢 **Open**",
+  pending: "🟡 **Pending**",
+  snoozed: "😴 **Snoozed**",
+  resolved: "✅ **Resolved**",
+};
+
 /**
- * The ticket buttons, a row per concern: answering (Reply; under a triage bot's answer with a
- * draft, led by Use draft for that answer), who owns the ticket (Take; Assign to, which shows a
- * menu of agents), and its state (Resolve, Snooze until the next reply, Block, and Manage for the
- * panel). Only the first is highlighted; the others are told apart by their emoji, which a
- * coloured button would hide.
+ * A ticket's card, coloured by its status: an overview (the ticket and its customer; the channel,
+ * how to reach the customer, and a link to Chatwoot; the status, assignee, and labels), then a
+ * row of buttons per concern. Answering: Reply, led by Use draft when `answerId` is a triage bot
+ * answer with a draft. Who owns the ticket: Take, and Assign to (named after the assignee), which
+ * shows a menu of agents. Its state: Resolve and Snooze until the next reply, or Reopen, as its
+ * status allows, then Block and Manage. Only the first button is coloured; the others are told
+ * apart by their emoji, which a coloured button would hide.
  */
-export function ticketButtons(answerId?: string): ActionRow[] {
+export function ticketCard(ticket: CardTicket, answerId?: string): APIMessageTopLevelComponent[] {
+  const assignee = ticket.assignee === null ? undefined : defused(ticket.assignee);
+  const more = ticket.labels.length - CARD_LABELS;
+  const summary = [
+    STATUS_NAMES[ticket.status] ?? `**${clip(ticket.status, CARD_TEXT)}**`,
+    `👉 ${assignee ? `**${clip(assignee, CARD_TEXT)}**` : "Unassigned"}`,
+    ...ticket.labels.slice(0, CARD_LABELS).map((label) => `🏷️ ${clip(label, CARD_TEXT)}`),
+    ...(more > 0 ? [`+${more}`] : []),
+  ].join(" · ");
+  // The customer's name and details are their own text: they must not mention anyone.
+  const heading = `### ${clip(ticket.title, CARD_TEXT)} · ${defused(clip(ticket.customer, CARD_TEXT))}`;
+  const details = [
+    ...ticket.details.map((detail) => defused(clip(detail, CARD_TEXT))),
+    `[Open in Chatwoot](<${ticket.url}>)`,
+  ].join(" · ");
+  const reopen = button(BUTTONS.reopen, "Reopen", "↩️");
+  const resolve = button(BUTTONS.resolve, "Resolve", "✅");
+  const state =
+    ticket.status === "resolved"
+      ? [reopen]
+      : ticket.status === "snoozed"
+        ? [reopen, resolve]
+        : [resolve, button(BUTTONS.snooze, "Snooze", "😴")];
   return [
-    row(
-      answerId
-        ? [
-            button(`${BUTTONS.draft}:${answerId}`, "Use draft", "🤖", ButtonStyle.Primary),
-            button(BUTTONS.reply, "Reply", "✏️"),
-          ]
-        : [button(BUTTONS.reply, "Reply", "✏️", ButtonStyle.Primary)],
-    ),
-    row([button(BUTTONS.take, "Take", "🙋"), button(BUTTONS.assign, "Assign to…", "👉")]),
-    row([
-      button(BUTTONS.resolve, "Resolve", "✅"),
-      button(BUTTONS.snooze, "Snooze", "😴"),
-      button(BUTTONS.block, "Block", "🚫"),
-      button(BUTTONS.manage, "Manage", "⚙️"),
-    ]),
+    {
+      type: ComponentType.Container,
+      accent_color: STATUS_COLORS[ticket.status] ?? null,
+      components: [
+        { type: ComponentType.TextDisplay, content: `${heading}\n-# ${details}\n${summary}` },
+        row(
+          answerId
+            ? [
+                button(`${BUTTONS.draft}:${answerId}`, "Use draft", "🤖", ButtonStyle.Primary),
+                button(BUTTONS.reply, "Reply", "✏️"),
+              ]
+            : [button(BUTTONS.reply, "Reply", "✏️", ButtonStyle.Primary)],
+        ),
+        row([
+          button(BUTTONS.take, "Take", "🙋"),
+          button(BUTTONS.assign, assignee ? clip(assignee, MAX_BUTTON_TEXT) : "Assign to…", "👉"),
+        ]),
+        row([...state, button(BUTTONS.block, "Block", "🚫"), button(BUTTONS.manage, "Manage", "⚙️")]),
+      ],
+    },
   ];
 }
 
@@ -155,14 +228,6 @@ const STATUSES: Array<[status: string, value: string, name: string, emoji: strin
   ["resolved", "resolved", "Resolved", "✅"],
   ["snoozed", "until_next_reply", "Snooze", "😴"],
 ];
-
-/** The card's accent: the ticket's status at a glance. */
-const STATUS_COLORS: Record<string, number> = {
-  open: 0x3ba55c,
-  pending: 0xfaa61a,
-  snoozed: 0x5865f2,
-  resolved: 0x80848e,
-};
 
 /**
  * The panel for a ticket, a card: its title (and what was just done), menus for its assignee and

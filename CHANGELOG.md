@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **One card per post, at its bottom, showing the ticket as it is.** Instead of buttons under
+  every message, a post ends with the ticket's card, coloured by its status: an overview (the
+  ticket and its customer, the channel, the customer's email or phone number, a link to
+  Chatwoot, the status, the assignee, and the labels), and the buttons, which follow the ticket: **Assign to…**
+  is named after the assignee, and **Reopen** replaces **Snooze** while the ticket is snoozed and
+  both **Resolve** and **Snooze** once it is resolved. The card is edited when the ticket changes
+  and moves to the bottom when the relay posts messages. After a triage bot's answer with a
+  draft, it moves under the answer and is led by **Use draft** until the customer writes again;
+  a receipt for an earlier answer, or for an answer to an earlier message, changes nothing. When
+  Discord's answer to posting a card is lost, or a post is adopted, the post's cards are looked
+  for (after the moment of posting, or from the post's start) and deleted before one is posted. The sweep gives posts from
+  before cards theirs, a few at a time, while their ticket is not resolved; buttons under older
+  messages keep working.
+- **Breaking:** the triage bot hook (`POST /triage/answered`) also takes `replyTo`, the message
+  the answer replies to.
+- The post's opening message is called the ticket header in the documentation.
+- Webhook messages are sent with `with_components=true`, as Discord documents for components.
+
+### Added
+
+- **Reopen** button.
+
 ## [0.18.1] - 2026-09-30
 
 ### Changed

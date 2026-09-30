@@ -41,6 +41,26 @@ function forum() {
 afterEach(() => vi.restoreAllMocks());
 
 describe("DiscordForum", () => {
+  it("finds the webhook's cards in a page of a post's messages after one, and where the next page starts", async () => {
+    const id = (n: number) => String(200000000000000000n + BigInt(n));
+    const page = Array.from({ length: 100 }, (_, index) => ({
+      id: id(200 - index), // newest first
+      webhook_id: index === 3 || index === 5 ? "1" : index === 4 ? "2" : undefined,
+      flags: index === 3 || index === 4 ? 1 << 15 : 0,
+    }));
+    const { requests } = mockFetch(
+      application,
+      on("GET", `${api}/channels/55/webhooks`, () =>
+        json([{ id: "1", token: "abc", type: 1, name: "Chatwoot", application_id: "100000000000000001" }]),
+      ),
+      on("GET", `${api}/channels/thread-9/messages`, () => json(page)),
+    );
+    // Only this webhook's Components V2 messages are cards; a full page has a next one.
+    expect(await forum().cardsAfter("55", "thread-9", id(100))).toEqual({ cards: [id(197)], next: id(200) });
+    const read = requests.find((request) => request.url.pathname.endsWith("/messages"));
+    expect(read?.url.search).toBe(`?after=${id(100)}&limit=100`);
+  });
+
   it("reuses the existing Chatwoot webhook and posts without the bot token", async () => {
     const { requests } = mockFetch(
       application,
@@ -58,7 +78,10 @@ describe("DiscordForum", () => {
     // The application id and the webhook are looked up once, then cached.
     expect(requests.filter((request) => request.method === "GET")).toHaveLength(2);
     const posts = requests.filter((request) => request.url.pathname.startsWith("/api/v10/webhooks/"));
-    expect(posts.map((request) => request.url.search)).toEqual(["?wait=true", "?wait=true&thread_id=thread-9"]);
+    expect(posts.map((request) => request.url.search)).toEqual([
+      "?wait=true&with_components=true",
+      "?wait=true&with_components=true&thread_id=thread-9",
+    ]);
     expect(posts.every((request) => request.headers.get("authorization") === null)).toBe(true);
     expect(requests[1]?.headers.get("authorization")).toBe("Bot bot-token");
   });
