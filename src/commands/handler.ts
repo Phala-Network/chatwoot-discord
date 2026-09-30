@@ -183,10 +183,22 @@ function inline(
   return message(context, kind, text?.trim() ?? "", files);
 }
 
-function message(context: Context, kind: "reply" | "note", content: string, files: AttachmentRef[]): HandlerResult {
+function message(
+  context: Context,
+  kind: "reply" | "note",
+  content: string,
+  files: AttachmentRef[],
+  sendAsAgent = false,
+): HandlerResult {
   if (content === "" && files.length === 0) throw new UserError("Add a message or an attachment.");
   checkFiles(files, context.deps.settings);
-  return defer(context, { type: "message", private: kind === "note", content, files });
+  return defer(context, {
+    type: "message",
+    private: kind === "note",
+    content,
+    files,
+    ...(sendAsAgent && kind === "reply" ? { sendAsAgent } : {}),
+  });
 }
 
 function submit(context: Context, interaction: APIModalSubmitInteraction): HandlerResult {
@@ -200,9 +212,10 @@ function submit(context: Context, interaction: APIModalSubmitInteraction): Handl
   const input = (name: string) => inputs.find((component) => component.custom_id.split(":", 1)[0] === name);
   const text = input("content");
   const upload = input("files");
+  const from = input("from");
   const content = text?.type === ComponentType.TextInput ? text.value.trim() : "";
   const files = uploadedFiles(interaction, upload?.type === ComponentType.FileUpload ? upload.values : []);
-  return message(context, kind, content, files);
+  return message(context, kind, content, files, from?.type === ComponentType.Checkbox && from.value);
 }
 
 /** Files from the editor's upload field, as Discord describes them in the resolved data. */
@@ -257,9 +270,10 @@ function draftOf(context: Context, interaction: APIApplicationCommandInteraction
 }
 
 /**
- * Modal with a text field and an optional upload field. Every editor gets ids unique to its
- * interaction: Discord keeps unsubmitted modal input per custom_id and would otherwise show text
- * from an earlier, cancelled editor instead of this draft.
+ * Modal with a text field, an optional upload field, and for a reply the choice to send an email
+ * from the agent's own address. Every editor gets ids unique to its interaction: Discord keeps
+ * unsubmitted modal input per custom_id and would otherwise show text from an earlier, cancelled
+ * editor instead of this draft.
  */
 function editor(context: Context, kind: "reply" | "note", value: string | undefined): APIModalInteractionResponse {
   const nonce = context.interaction.id;
@@ -297,6 +311,16 @@ function editor(context: Context, kind: "reply" | "note", value: string | undefi
                   max_values: maxFiles,
                   required: false,
                 },
+              },
+            ]
+          : []),
+        ...(kind === "reply"
+          ? [
+              {
+                type: ComponentType.Label as const,
+                label: "Send from my email address",
+                description: "Email tickets: from your address on the inbox's domain, not the inbox's",
+                component: { type: ComponentType.Checkbox as const, custom_id: `from:${nonce}` },
               },
             ]
           : []),

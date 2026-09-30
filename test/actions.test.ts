@@ -159,6 +159,35 @@ describe("executeCommand", () => {
     });
   });
 
+  it("asks Chatwoot to send a reply from the agent's own address, with or without files", async () => {
+    const { result, requests } = run(
+      { type: "message", private: false, content: "Hi", files: [], sendAsAgent: true },
+      on("GET", conversation, () =>
+        json({ id: 15, status: "open", meta: { channel: "Channel::Email", assignee: { id: 42 } } }),
+      ),
+      ok("POST", `${conversation}/messages`),
+    );
+    expect(await result).toBe("✅ Sent to the customer as Alice.");
+    expect(JSON.parse(requests.at(-1)?.body ?? "")).toMatchObject({ content_attributes: { send_as_agent: true } });
+
+    const withFile = run(
+      {
+        type: "message",
+        private: false,
+        content: "",
+        files: [{ url: "https://cdn.discordapp.com/a/q.pdf", filename: "q.pdf", size: 1 }],
+        sendAsAgent: true,
+      },
+      on("GET", conversation, () =>
+        json({ id: 15, status: "open", meta: { channel: "Channel::Email", assignee: { id: 42 } } }),
+      ),
+      on("GET", "cdn.discordapp.com/a/q.pdf", () => new Response(new Uint8Array([1]))),
+      ok("POST", `${conversation}/messages`),
+    );
+    await withFile.result;
+    expect(withFile.requests.at(-1)?.form?.get("content_attributes")).toBe('{"send_as_agent":true}');
+  });
+
   it("a note does not touch the assignee", async () => {
     const { result, requests } = run(
       { type: "message", private: true, content: "Refund approved", files: [] },

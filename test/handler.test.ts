@@ -42,7 +42,7 @@ function interaction(fields: {
   );
 }
 
-function submission(kind: string, text = "", files: Record<string, unknown> = {}) {
+function submission(kind: string, text = "", files: Record<string, unknown> = {}, fromMe?: boolean) {
   return interaction({
     type: 5,
     data: {
@@ -50,6 +50,7 @@ function submission(kind: string, text = "", files: Record<string, unknown> = {}
       components: [
         { type: 18, component: { type: 4, custom_id: "content:9001", value: text } },
         { type: 18, component: { type: 19, custom_id: "files:9001", values: Object.keys(files) } },
+        ...(fromMe === undefined ? [] : [{ type: 18, component: { type: 23, custom_id: "from:9001", value: fromMe } }]),
       ],
       resolved: { attachments: files },
     },
@@ -101,6 +102,7 @@ describe("interaction handler", () => {
     expect(response.data.title).toBe("Reply · Acme #15");
     expect(editorField(response, "content")).toMatchObject({ custom_id: "content:777001", style: 2, max_length: 4000 });
     expect(editorField(response, "content")).not.toHaveProperty("value");
+    expect(editorField(response, "from")).toEqual({ type: 23, custom_id: "from:777001" });
     expect(editorField(response, "files")).toEqual({
       type: 19,
       custom_id: "files:777001",
@@ -161,6 +163,7 @@ describe("interaction handler", () => {
   it("/note opens the private-note editor", async () => {
     const { response } = await handleInteraction(interaction({ name: "note" }), deps);
     expect(response.type === InteractionResponseType.Modal && response.data.custom_id).toBe("note:777001");
+    expect(editorField(response, "from")).toBeUndefined();
   });
 
   it("'Reply with this' takes the last code block of a triage bot message, whatever its headings", async () => {
@@ -220,6 +223,19 @@ describe("interaction handler", () => {
       token: "interaction-token",
       action: { type: "message", private: false, content: "Thanks!", files: [] },
     });
+  });
+
+  it("a reply can be sent from the agent's own address; unticked, it is not", async () => {
+    expect((await handleInteraction(submission("reply", "Hi", {}, true), deps)).job?.action).toEqual({
+      type: "message",
+      private: false,
+      content: "Hi",
+      files: [],
+      sendAsAgent: true,
+    });
+    expect((await handleInteraction(submission("reply", "Hi", {}, false), deps)).job?.action).not.toHaveProperty(
+      "sendAsAgent",
+    );
   });
 
   it("a note submission is private", async () => {
