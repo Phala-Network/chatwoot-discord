@@ -10,7 +10,9 @@ import {
   type Avatars,
   body,
   CONTENT_LIMIT,
+  channelName,
   charLength,
+  contactDetails,
   contactName,
   conversationUrl,
   customerAvatar,
@@ -58,8 +60,11 @@ export interface ForumClient {
   ): Promise<void>;
   /** Edits a message the forum's webhook posted; false if the message no longer exists. */
   editMessage(forumChannelId: string, threadId: string, messageId: string, message: WebhookMessage): Promise<boolean>;
-  /** The cards (Components V2 messages) the forum's webhook posted among a post's latest messages. */
-  cards(forumChannelId: string, threadId: string): Promise<string[]>;
+  /**
+   * The cards (Components V2 messages) the forum's webhook posted among the page of a post's
+   * messages that follows message `after`, and the last message of that page when more follow.
+   */
+  cardsAfter(forumChannelId: string, threadId: string, after: string): Promise<{ cards: string[]; next?: string }>;
   /** Deletes a message the forum's webhook posted; a message that is already gone counts as deleted. */
   deleteMessage(forumChannelId: string, threadId: string, messageId: string): Promise<void>;
   /** True if `threadId` is a post that still exists in the forum. */
@@ -87,13 +92,14 @@ export interface PostFields {
   title: string;
   /** The Chatwoot message the title's subject comes from. */
   titleMessageId: number;
-  /** The post's card (unset: none yet; CARD_UNKNOWN: not known). */
+  /** The post's card (unset: none yet; see unknownCards for cards not known). */
   cardId: string;
   /** 1 once a message was posted after the card, which then moves to the bottom. */
   cardCovered: number;
-  /** The triage bot's latest answer with a draft reported in the post. */
+  /** The triage bot's latest answer with a draft reported in the post, and the message it answers. */
   answerId: string;
-  /** The customer's latest message in the post: an answer before it offers no draft. */
+  answerSourceId: string;
+  /** The first Discord message of the customer's latest message (or response) in the post. */
   customerMessageId: string;
 }
 
@@ -144,11 +150,23 @@ export interface RelayOptions {
 
 /** A stored state that matches no conversation: the post's archived flag must be applied again. */
 const OUT_OF_DATE = "";
+const UNKNOWN_CARDS = "?";
+/** Discord's epoch (ms since the Unix epoch), and how far its clock may be from the Worker's. */
+const DISCORD_EPOCH = 1420070400000n;
+const CLOCK_SKEW_MS = 60_000n;
+
 /**
- * A card id for a card that may be in the post without its id being known: the answer to posting
- * it was lost, or the post was adopted. The post's cards are looked for before another is posted.
+ * The card id recorded while the post may hold cards of unknown ids after Discord message `after`:
+ * an answer to posting one may have been lost, or the post was adopted. They are looked for, and
+ * deleted, before a card is posted.
  */
-export const CARD_UNKNOWN = "?";
+export function unknownCards(after: string): string {
+  return `${UNKNOWN_CARDS}${after}`;
+}
+
+export function isUnknownCard(cardId: string | undefined): boolean {
+  return cardId?.startsWith(UNKNOWN_CARDS) === true;
+}
 /** Discord applies at most this many tags to a post. */
 const MAX_TAGS = 5;
 const RELAYED_TYPES = new Set(["incoming", "outgoing", "activity"]);
@@ -199,24 +217,24 @@ export class Relay {
     }
     this.unarchived(accountId, conversation);
     if (this.notifier.notifies(message)) store.updateConversation(accountId, conversation.id, { announcePending: 1 });
-    // The customer wrote again: the triage bot's earlier answers do not answer this.
-    const last = store.postedParts(accountId, conversation.id, message.id).at(-1);
-    if (message.messageType === "incoming" && last) {
-      store.updateConversation(accountId, conversation.id, { customerMessageId: last });
-    }
+    // The customer wrote again: the triage bot's answers to earlier messages are behind.
+    const first = store.postedParts(accountId, conversation.id, message.id)[0];
+    if (message.messageType === "incoming" && first) this.customerWrote(accountId, conversation.id, first);
   }
 
   /**
-   * The triage bot answered in the post with a draft (its hook reports each answer once it is
-   * there): the card offers that draft, under the answer, from the next sync.
+   * The triage bot answered `sourceId` in the post with a draft (its hook reports each answer
+   * once it is there): the card offers that draft, under the answer, from the next sync, while the
+   * customer wrote nothing newer. Receipts may come late or out of order: an answer older than
+   * the one recorded, or to an earlier customer message, changes nothing.
    */
-  answered(accountId: number, conversationId: number, answerId: string): void {
+  answered(accountId: number, conversationId: number, answerId: string, sourceId: string): void {
     const { store } = this.options;
     const post = store.conversation(accountId, conversationId);
-    // Receipts may come late or out of order: only the latest answer to the customer's latest
-    // message counts (Discord ids grow with time).
-    if (!post?.threadId || !isAfter(answerId, post.answerId) || !isAfter(answerId, post.customerMessageId)) return;
-    store.updateConversation(accountId, conversationId, { answerId, cardCovered: 1 });
+    if (!post?.threadId || !isAfter(answerId, post.answerId) || !answersLatest(sourceId, post.customerMessageId)) {
+      return;
+    }
+    store.updateConversation(accountId, conversationId, { answerId, answerSourceId: sourceId, cardCovered: 1 });
   }
 
   /**
@@ -254,11 +272,11 @@ export class Relay {
     const { store, forum } = this.options;
     const state = this.stateOf(conversation);
     const recorded = store.conversation(accountId, conversation.id);
-    const answerId = recorded?.answerId;
-    const draft = answerId && isAfter(answerId, recorded?.customerMessageId) ? answerId : undefined;
-    const card = this.options.card?.(cardTicket(conversation), draft);
+    const source = recorded?.answerSourceId;
+    const draft = source && answersLatest(source, recorded?.customerMessageId) ? recorded?.answerId : undefined;
+    const card = this.options.card?.(this.cardTicket(accountId, conversation), draft);
     const cardDue =
-      card !== undefined && (!recorded?.cardId || recorded.cardId === CARD_UNKNOWN || recorded.cardCovered === 1);
+      card !== undefined && (!recorded?.cardId || isUnknownCard(recorded.cardId) || recorded.cardCovered === 1);
     const stateChanged = recorded?.state !== state;
     if (!stateChanged && !cardDue) return;
     // Until everything below is applied, the post counts as out of date, so a failure or a yield
@@ -319,7 +337,7 @@ export class Relay {
       avatar_url: customerAvatar(conversation.contact.avatarUrl, avatars),
       allowed_mentions: { parse: [] },
     });
-    if (messageId) this.options.store.updateConversation(accountId, conversation.id, { customerMessageId: messageId });
+    if (messageId) this.customerWrote(accountId, conversation.id, messageId);
     return messageId;
   }
 
@@ -356,6 +374,7 @@ export class Relay {
       conversation.priority ?? "",
       conversation.labels.toSorted(),
       contactName(conversation.contact),
+      contactDetails(conversation),
     ]);
   }
 
@@ -508,13 +527,24 @@ export class Relay {
     const recorded = store.conversation(accountId, conversationId);
     const card: WebhookMessage = { flags: MessageFlags.IsComponentsV2, components };
     const cardId = recorded?.cardId;
-    if (cardId && cardId !== CARD_UNKNOWN && recorded?.cardCovered !== 1) {
+    if (cardId && !isUnknownCard(cardId) && recorded?.cardCovered !== 1) {
       if (await forum.editMessage(forumChannelId, threadId, cardId, card)) return;
     }
-    const previous = cardId === CARD_UNKNOWN ? await forum.cards(forumChannelId, threadId) : cardId ? [cardId] : [];
-    for (const id of previous) await forum.deleteMessage(forumChannelId, threadId, id);
-    // Should Discord's answer be lost, the card posted is looked for next time.
-    store.updateConversation(accountId, conversationId, { cardId: CARD_UNKNOWN });
+    if (isUnknownCard(cardId)) {
+      // Page by page, recording how far it got, so a yield continues where it stopped.
+      for (let after: string | undefined = cardId?.slice(UNKNOWN_CARDS.length); after !== undefined; ) {
+        const page = await forum.cardsAfter(forumChannelId, threadId, after);
+        for (const id of page.cards) await forum.deleteMessage(forumChannelId, threadId, id);
+        after = page.next;
+        if (after) store.updateConversation(accountId, conversationId, { cardId: unknownCards(after) });
+      }
+    } else if (cardId) {
+      await forum.deleteMessage(forumChannelId, threadId, cardId);
+    }
+    // Should Discord's answer be lost, the card posted is looked for after this moment.
+    const now = BigInt((this.options.now?.() ?? new Date()).getTime());
+    const moment = String((now - CLOCK_SKEW_MS - DISCORD_EPOCH) << 22n);
+    store.updateConversation(accountId, conversationId, { cardId: unknownCards(moment) });
     const { messageId } = await forum.execute(
       forumChannelId,
       { ...card, username: SYSTEM_USERNAME, avatar_url: avatars.chatwoot, allowed_mentions: { parse: [] } },
@@ -537,6 +567,29 @@ export class Relay {
     return this.options.target(accountId).forumChannelId;
   }
 
+  /** What the post's card shows of the conversation. */
+  private cardTicket(accountId: number, conversation: RelayConversation): CardTicket {
+    const { assignee } = conversation;
+    const channel = channelName(conversation);
+    return {
+      title: `${this.options.target(accountId).name} #${conversation.id}`,
+      customer: contactName(conversation.contact),
+      details: [...(channel ? [channel] : []), ...contactDetails(conversation)],
+      url: conversationUrl(this.options.frontendUrl, accountId, conversation.id),
+      status: conversation.status ?? "open",
+      assignee: assignee ? (assignee.name ?? `#${assignee.id ?? "?"}`) : null,
+      labels: conversation.labels,
+    };
+  }
+
+  /** Records the customer's latest message (Discord message `messageId`), which only moves forward. */
+  private customerWrote(accountId: number, conversationId: number, messageId: string): void {
+    const { store } = this.options;
+    if (isAfter(messageId, store.conversation(accountId, conversationId)?.customerMessageId)) {
+      store.updateConversation(accountId, conversationId, { customerMessageId: messageId });
+    }
+  }
+
   /** Posting into an archived post unarchives it: a resolved post must be archived again. */
   private unarchived(accountId: number, conversation: Pick<RelayConversation, "id" | "status">): void {
     if (conversation.status === "resolved") {
@@ -557,12 +610,10 @@ function isAfter(id: string, other: string | undefined): boolean {
   return !other || BigInt(id) > BigInt(other);
 }
 
-/** What the post's card shows of the conversation. */
-function cardTicket(conversation: RelayConversation): CardTicket {
-  const { assignee } = conversation;
-  return {
-    status: conversation.status ?? "open",
-    assignee: assignee ? (assignee.name ?? `#${assignee.id ?? "?"}`) : null,
-    labels: conversation.labels,
-  };
+/**
+ * Whether an answer to Discord message `sourceId` answers the customer's latest message, which
+ * starts at `latest`: the source is that message (any of its parts) or later.
+ */
+function answersLatest(sourceId: string, latest: string | undefined): boolean {
+  return !latest || BigInt(sourceId) >= BigInt(latest);
 }

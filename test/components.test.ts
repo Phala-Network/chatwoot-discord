@@ -49,12 +49,20 @@ describe("ticket menus", () => {
     expect(menu?.options.some((option) => option.default)).toBe(false);
   });
 
-  it("bound a card's summary, however many and long the labels", () => {
+  it("bound a card's overview, however long the names and many the labels", () => {
     const labels = Array.from({ length: 40 }, (_, index) => `${index}`.padEnd(100, "x"));
-    const [card] = ticketCard({ status: "open", assignee: "y".repeat(300), labels });
+    const [card] = ticketCard({
+      title: "Acme #1",
+      customer: "z".repeat(300),
+      details: ["Email", "w".repeat(300)],
+      url: "https://chatwoot.example.com/app/accounts/3/conversations/1",
+      status: "open",
+      assignee: "y".repeat(300),
+      labels,
+    });
     const summary = card?.type === ComponentType.Container ? card.components[0] : undefined;
     const content = summary?.type === ComponentType.TextDisplay ? summary.content : "";
-    expect(content.length).toBeLessThan(600);
+    expect(content.length).toBeLessThan(800);
     expect(content.endsWith(" · +35")).toBe(true);
   });
 });

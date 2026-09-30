@@ -710,12 +710,12 @@ describe("Relay", () => {
 });
 
 describe("the card", () => {
-  /** The card's summary line, and its buttons' custom ids by row. */
+  /** The card's status line, and its buttons' custom ids by row. */
   const shown = (payload: WebhookMessage | undefined) => {
     const container = payload?.components?.[0];
     if (container?.type !== ComponentType.Container) return [];
     return container.components.map((part) => {
-      if (part.type === ComponentType.TextDisplay) return part.content;
+      if (part.type === ComponentType.TextDisplay) return part.content.split("\n").at(-1);
       if (part.type !== ComponentType.ActionRow) return undefined;
       return part.components.map((button) => ("custom_id" in button ? button.custom_id : undefined));
     });
@@ -730,6 +730,16 @@ describe("the card", () => {
     expect(thread).toBe("thread-1");
     expect(card).toMatchObject({ flags: 1 << 15, username: "Chatwoot", allowed_mentions: { parse: [] } });
     expect(card).not.toHaveProperty("content");
+    // An overview of the ticket: it and its customer, how to reach them, and a link to Chatwoot.
+    const container = card?.components?.[0];
+    const text = container?.type === ComponentType.Container ? container.components[0] : undefined;
+    expect(text?.type === ComponentType.TextDisplay && text.content).toBe(
+      [
+        "### Acme #12 · Jane Doe",
+        "-# Live chat · jane@example.com · [Open in Chatwoot](<https://chatwoot.example.com/app/accounts/3/conversations/12>)",
+        "🟢 **Open** · 👉 Unassigned",
+      ].join("\n"),
+    );
     expect(shown(card)).toEqual([
       "🟢 **Open** · 👉 Unassigned",
       ["ticket:reply"],
@@ -772,7 +782,7 @@ describe("the card", () => {
     const first = store.conversation(3, 12)?.cardId;
 
     const answer = snowflake();
-    relay.answered(3, 12, answer);
+    relay.answered(3, 12, answer, store.conversation(3, 12)?.customerMessageId ?? "");
     await relay.sync(3, conversation, "thread-1");
     expect(forum.deleted).toEqual([first]);
     expect(shown(forum.calls.at(-1)?.[1])[1]).toEqual([`ticket:draft:${answer}`, "ticket:reply"]);
@@ -811,18 +821,18 @@ describe("the card", () => {
     forum.loseAnswer = true;
     await expect(relay.sync(3, conversation, "thread-1")).rejects.toThrow();
     await relay.sync(3, conversation, "thread-1");
-    const live = await forum.cards(FORUM, "thread-1");
-    expect(live).toEqual([store.conversation(3, 12)?.cardId]);
+    const { cards } = await forum.cardsAfter(FORUM, "thread-1", "0");
+    expect(cards).toEqual([store.conversation(3, 12)?.cardId]);
   });
 
   it("archives a resolved post again when that failed after its card moved", async () => {
-    const { relay, forum } = relayWith({ card: ticketCard });
+    const { relay, forum, store } = relayWith({ card: ticketCard });
     const conversation = { ...message().conversation, status: "resolved" };
     await relay.relay(message({ conversation }));
     await relay.sync(3, conversation, "thread-1");
     expect(forum.archived.has("thread-1")).toBe(true);
 
-    relay.answered(3, 12, snowflake());
+    relay.answered(3, 12, snowflake(), store.conversation(3, 12)?.customerMessageId ?? "");
     forum.failArchive = true;
     await expect(relay.sync(3, conversation, "thread-1")).rejects.toThrow();
     expect(forum.archived.has("thread-1")).toBe(false);
@@ -830,22 +840,60 @@ describe("the card", () => {
     expect(forum.archived.has("thread-1")).toBe(true);
   });
 
-  it("offers only the latest draft that answers the customer's latest message, however late receipts come", async () => {
-    const { relay, forum } = relayWith({ card: ticketCard });
+  it("offers only the latest draft that answers the customer's latest message, however receipts come", async () => {
+    const { relay, forum, store } = relayWith({ card: ticketCard });
     const conversation = message().conversation;
     const draftOffered = () => shown(forum.calls.at(-1)?.[1])[1]?.[0];
+    const latest = () => store.conversation(3, 12)?.customerMessageId ?? "";
     await relay.relay(message());
+    const first = latest();
     const older = snowflake();
     const newer = snowflake();
-    relay.answered(3, 12, newer);
-    relay.answered(3, 12, older); // out of order: ignored
+    relay.answered(3, 12, newer, first);
+    relay.answered(3, 12, older, first); // out of order: ignored
     await relay.sync(3, conversation, "thread-1");
     expect(draftOffered()).toBe(`ticket:draft:${newer}`);
 
-    // The customer answers a form: the draft is behind them, and a late receipt does not bring it back.
-    await relay.postResponse(3, conversation, "• Rating: 5");
-    relay.answered(3, 12, newer);
+    // The customer writes again, then an answer to their first message comes: it is behind them.
+    await relay.relay(message({ id: 2 }));
+    relay.answered(3, 12, snowflake(), first);
     await relay.sync(3, conversation, "thread-1");
     expect(draftOffered()).toBe("ticket:reply");
+
+    // A retry of the first message posts nothing, and does not take the customer's latest back.
+    const second = latest();
+    await relay.relay(message());
+    expect(latest()).toBe(second);
+
+    // An answer to the latest message is offered; a response to a form puts it behind them again.
+    const answer = snowflake();
+    relay.answered(3, 12, answer, second);
+    await relay.sync(3, conversation, "thread-1");
+    expect(draftOffered()).toBe(`ticket:draft:${answer}`);
+    await relay.postResponse(3, conversation, "• Rating: 5");
+    await relay.sync(3, conversation, "thread-1");
+    expect(draftOffered()).toBe("ticket:reply");
+  });
+
+  it("looks for cards of unknown id page by page, from where it stopped", async () => {
+    const forum = new FakeForum();
+    const { relay, store } = relayWith({ card: ticketCard, forum });
+    const conversation = message().conversation;
+    await relay.relay(message());
+    await relay.sync(3, conversation, "thread-1");
+    const orphan = store.conversation(3, 12)?.cardId ?? "";
+    // The post was adopted: its cards are not known.
+    store.updateConversation(3, 12, { cardId: `?${"1"}` });
+    const pages: string[] = [];
+    const cardsAfter = forum.cardsAfter.bind(forum);
+    forum.cardsAfter = async (forumId, thread, after) => {
+      pages.push(after);
+      // Two pages: the first ends at the orphan card.
+      return after === "1" ? { cards: [], next: String(BigInt(orphan) - 1n) } : cardsAfter(forumId, thread, after);
+    };
+    await relay.sync(3, conversation, "thread-1");
+    expect(pages).toEqual(["1", String(BigInt(orphan) - 1n)]);
+    expect(forum.deleted).toEqual([orphan]);
+    expect((await cardsAfter(FORUM, "thread-1", "0")).cards).toEqual([store.conversation(3, 12)?.cardId]);
   });
 });

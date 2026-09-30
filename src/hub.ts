@@ -29,7 +29,7 @@ import { errorFields, log } from "./log.ts";
 import { postQueue } from "./queue.ts";
 import { queueBudget } from "./queue-limits.ts";
 import { latestMessageId, type ProcessorContext, processConversation, relayFor } from "./relay/processor.ts";
-import { CARD_UNKNOWN } from "./relay/relay.ts";
+import { isUnknownCard } from "./relay/relay.ts";
 import { processMessageUpdate } from "./relay/updates.ts";
 import { awaitsRouting, routeConversation, routesAccount } from "./routing.ts";
 import { type Job, Store } from "./store.ts";
@@ -44,7 +44,7 @@ const payloadSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("message-updated"), accountId: id, conversationId: id, messageId: id }),
   z.object({ type: z.literal("route"), accountId: id, conversationId: id }),
   z.object({ type: z.literal("queue") }),
-  z.object({ type: z.literal("answer"), accountId: id, conversationId: id, answerId: z.string() }),
+  z.object({ type: z.literal("answer"), accountId: id, conversationId: id, answerId: z.string(), replyTo: z.string() }),
 ]);
 type JobPayload = z.infer<typeof payloadSchema>;
 
@@ -147,15 +147,15 @@ export class Hub extends DurableObject<Env> {
   }
 
   /**
-   * The triage bot's answer `answerId` is in the post, with the reply draft it proposes: the
+   * The triage bot's answer `answerId` to message `replyTo` is in the post, with the reply draft it proposes: the
    * draft is kept for Use draft, and the post's card offers it under the answer (Relay.answered).
    * Each answer is taken once, so a repeated call adds nothing.
    */
-  async triageAnswered(threadId: string, answerId: string, draft: string): Promise<void> {
+  async triageAnswered(threadId: string, answerId: string, replyTo: string, draft: string): Promise<void> {
     const ticket = this.store.ticketForThread(threadId);
     if (!ticket || this.store.get(answerKey(answerId)) !== undefined) return;
     this.store.set(answerKey(answerId), draft, ANSWER_TTL_MS);
-    this.enqueue({ type: "answer", ...ticket, answerId });
+    this.enqueue({ type: "answer", ...ticket, answerId, replyTo });
     await this.schedule();
   }
 
@@ -241,7 +241,7 @@ export class Hub extends DurableObject<Env> {
           return "done";
         case "answer":
           // The card moves under the answer when the conversation's post is synced next.
-          services.relay.answered(payload.accountId, payload.conversationId, payload.answerId);
+          services.relay.answered(payload.accountId, payload.conversationId, payload.answerId, payload.replyTo);
           this.store.completeJob(job);
           this.enqueue({ type: "conversation", accountId: payload.accountId, conversationId: payload.conversationId });
           return "done";
@@ -336,7 +336,7 @@ export class Hub extends DurableObject<Env> {
           row?.threadId !== undefined &&
           (row.state !== relay.stateOf(toRelayConversation(conversationId, conversation)) ||
             row.cardCovered === 1 ||
-            row.cardId === CARD_UNKNOWN);
+            isUnknownCard(row.cardId));
         if (behind || stale) {
           this.enqueue({ type: "conversation", accountId, conversationId });
           queued += 1;
@@ -362,16 +362,9 @@ export class Hub extends DurableObject<Env> {
    * resolved, however long ago their last activity, each at most once a day. Returns how many.
    */
   private backfillCards(accountId: number): number {
-    let queued = 0;
-    for (const conversationId of this.store.postsWithoutCard(accountId)) {
-      if (queued >= CARD_BACKFILL_PER_SWEEP) break;
-      const key = `card-backfill:${accountId}:${conversationId}`;
-      if (this.store.get(key) !== undefined) continue;
-      this.store.set(key, "1", CARD_BACKFILL_RETRY_MS);
-      this.enqueue({ type: "conversation", accountId, conversationId });
-      queued += 1;
-    }
-    return queued;
+    const ids = this.store.takePostsWithoutCard(accountId, CARD_BACKFILL_PER_SWEEP, CARD_BACKFILL_RETRY_MS);
+    for (const conversationId of ids) this.enqueue({ type: "conversation", accountId, conversationId });
+    return ids.length;
   }
 
   private sweepPass(key: string): z.infer<typeof sweepPassSchema> | undefined {

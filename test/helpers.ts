@@ -38,7 +38,8 @@ export function message(overrides: Overrides = {}): RelayMessage {
   };
 }
 
-let lastSnowflake = 100000000000100000n;
+// Discord ids from the time of the relay tests' clock (2026-09-27T20:00:00Z) on.
+let lastSnowflake = (BigInt(Date.parse("2026-09-27T20:00:00Z")) - 1420070400000n) << 22n;
 
 /** A new Discord id, greater than every one before it, as Discord's grow with time. */
 export function snowflake(): string {
@@ -56,7 +57,7 @@ export class MemoryStore implements RelayStore {
     const row = this.rows.get(`${a}:${c}`);
     if (!row) return undefined;
     const { threadId, state, announcedAssignee, announcePending, titleSubject, title, titleMessageId } = row;
-    const { cardId, cardCovered, answerId, customerMessageId } = row;
+    const { cardId, cardCovered, answerId, answerSourceId, customerMessageId } = row;
     return {
       threadId,
       state,
@@ -68,6 +69,7 @@ export class MemoryStore implements RelayStore {
       cardId,
       cardCovered,
       answerId,
+      answerSourceId,
       customerMessageId,
     };
   }
@@ -188,11 +190,13 @@ export class FakeForum implements ForumClient {
     return true;
   }
 
-  async cards(_forum: string, threadId: string) {
-    return this.calls.flatMap(([thread, payload], index) => {
+  async cardsAfter(_forum: string, threadId: string, after: string) {
+    const cards = this.calls.flatMap(([thread, payload], index) => {
       const id = this.ids[index] ?? "";
-      return thread === threadId && payload.flags === 1 << 15 && !this.deleted.includes(id) ? [id] : [];
+      const live = thread === threadId && payload.flags === 1 << 15 && !this.deleted.includes(id);
+      return live && BigInt(id) > BigInt(after) ? [id] : [];
     });
+    return { cards };
   }
 
   async deleteMessage(_forum: string, _threadId: string, messageId: string) {

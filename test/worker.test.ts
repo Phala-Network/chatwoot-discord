@@ -458,7 +458,16 @@ describe("worker", () => {
     const thread = world.webhookPosts().at(-1)?.thread ?? "";
     const before = world.cards().length;
     const answerId = "100000000000009100";
-    const answer = { threadId: thread, answerId, draft: "Hi, restart the agent from the dashboard." };
+    // The answer replies to the customer's message.
+    const [row] = await runInDurableObject(hub(), (_instance, state) =>
+      state.storage.sql
+        .exec<{ customer_message_id: string }>(
+          "SELECT customer_message_id FROM conversations WHERE conversation_id = 24",
+        )
+        .toArray(),
+    );
+    const replyTo = row?.customer_message_id ?? "";
+    const answer = { threadId: thread, answerId, replyTo, draft: "Hi, restart the agent from the dashboard." };
 
     expect((await triageHook(answer, "wrong-secret-0123456789abcdef0123")).status).toBe(401);
     expect((await triageHook({ threadId: thread, answerId })).status).toBe(400);

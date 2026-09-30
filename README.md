@@ -206,8 +206,9 @@ are supported); you provide TLS, the cron trigger, and storage persistence.
 Used inside a ticket post, by Discord users linked in `agents[]` who have a token in
 `CHATWOOT_AGENT_TOKENS`. The same actions are buttons, which need no typing:
 
-- Every post ends with the ticket's card, coloured by its status: a line with the status, the
-  assignee, and the labels, then a row of buttons per concern. Answering: **Reply**. Who owns the
+- Every post ends with the ticket's card, coloured by its status: an overview (the ticket and its
+  customer; the channel, the customer's email or phone number, and a link to Chatwoot; the status,
+  the assignee, and the labels), then a row of buttons per concern. Answering: **Reply**. Who owns the
   ticket: **Take**, and **Assign to…**, named after the assignee once there is one. Its state:
   **Resolve** and **Snooze** (until the next reply) while it is open; **Reopen** and **Resolve**
   while it is snoozed; **Reopen** once it is resolved; then **Block** and **Manage**. The card is
@@ -442,11 +443,12 @@ window, so a missed webhook only delays it.
 
 The Worker does not see Discord messages, so a triage bot's side reports each answer once it is
 in the post: `POST
-/triage/answered` with `{"threadId":"<post id>","answerId":"<answer message id>","draft":"<the
-reply draft>"}`, signed like a Chatwoot webhook (`x-timestamp`, Unix seconds, and `x-signature`,
+/triage/answered` with `{"threadId":"<post id>","answerId":"<answer message id>","replyTo":"<the
+message it answers>","draft":"<the reply draft>"}`, signed like a Chatwoot webhook (`x-timestamp`, Unix seconds, and `x-signature`,
 `sha256=` and the hex HMAC-SHA256 of `<timestamp>.<body>` with `TRIAGE_HOOK_SECRET`). The Worker
 keeps the draft for 14 days and moves the post's card under the answer, led by **Use draft**,
-once per answer (a repeated call adds nothing). Report only answers that have a draft, and only
+once per answer (a repeated call adds nothing), while the message it answers is the customer's
+latest (an answer to an earlier one, or older than one already reported, changes nothing). Report only answers that have a draft, and only
 after they were sent, so the card follows them (right after the answer unless another message
 came in between). The hook is a convenience: if a call is lost, the card offers no draft, and
 **Reply with this** still works.

@@ -3,7 +3,7 @@
 // counters, and a small cache.
 
 import type { Cache } from "./discord/forum.ts";
-import { CARD_UNKNOWN, type PostFields, type RelayStore } from "./relay/relay.ts";
+import { type PostFields, type RelayStore, unknownCards } from "./relay/relay.ts";
 
 export const MIGRATIONS: string[] = [
   `CREATE TABLE conversations (
@@ -82,10 +82,11 @@ export const MIGRATIONS: string[] = [
    );
    ALTER TABLE conversations ADD COLUMN title_message_id INTEGER;`,
   // A post's card: its message, whether messages were posted after it, the triage bot's latest
-  // answer, and the customer's latest message in the post (see Relay.sync).
+  // answer and the message it answers, and the customer's latest message (see Relay.sync).
   `ALTER TABLE conversations ADD COLUMN card_id TEXT;
    ALTER TABLE conversations ADD COLUMN card_covered INTEGER;
    ALTER TABLE conversations ADD COLUMN answer_id TEXT;
+   ALTER TABLE conversations ADD COLUMN answer_source_id TEXT;
    ALTER TABLE conversations ADD COLUMN customer_message_id TEXT;`,
 ];
 
@@ -113,6 +114,7 @@ const COLUMNS: ReadonlyArray<readonly [keyof ConversationFields, string]> = [
   ["cardId", "card_id"],
   ["cardCovered", "card_covered"],
   ["answerId", "answer_id"],
+  ["answerSourceId", "answer_source_id"],
   ["customerMessageId", "customer_message_id"],
 ];
 
@@ -158,6 +160,7 @@ export class Store implements RelayStore, Cache {
         card_id: string | null;
         card_covered: number | null;
         answer_id: string | null;
+        answer_source_id: string | null;
         customer_message_id: string | null;
       }>(
         `SELECT ${COLUMNS.map(([, column]) => column).join(", ")} FROM conversations
@@ -179,6 +182,7 @@ export class Store implements RelayStore, Cache {
       cardId: row.card_id ?? undefined,
       cardCovered: row.card_covered ?? undefined,
       answerId: row.answer_id ?? undefined,
+      answerSourceId: row.answer_source_id ?? undefined,
       customerMessageId: row.customer_message_id ?? undefined,
     };
   }
@@ -208,20 +212,27 @@ export class Store implements RelayStore, Cache {
   }
 
   /**
-   * The account's posts that have no card and whose ticket was not resolved when last synced
-   * (`state` is Relay.stateOf, which starts with the status).
+   * Up to `limit` of the account's posts that have no card, whose ticket was not resolved when
+   * last synced (`state` is Relay.stateOf, which starts with the status), and that were not taken
+   * in the last `retryMs`; each is taken (see backfillCards in hub.ts).
    */
-  postsWithoutCard(accountId: number): number[] {
-    return this.sql
+  takePostsWithoutCard(accountId: number, limit: number, retryMs: number): number[] {
+    const ids = this.sql
       .exec<{ conversation_id: number }>(
-        `SELECT conversation_id FROM conversations
-         WHERE account_id = ? AND thread_id IS NOT NULL AND card_id IS NULL
-           AND (state IS NULL OR state NOT LIKE '["resolved"%')
-         ORDER BY conversation_id DESC`,
+        `SELECT c.conversation_id FROM conversations c
+         LEFT JOIN cache taken ON taken.key = 'card-backfill:' || c.account_id || ':' || c.conversation_id
+           AND (taken.expires_at IS NULL OR taken.expires_at > ?)
+         WHERE c.account_id = ? AND c.thread_id IS NOT NULL AND c.card_id IS NULL AND taken.key IS NULL
+           AND (c.state IS NULL OR c.state NOT LIKE '["resolved"%')
+         ORDER BY c.conversation_id DESC LIMIT ?`,
+        this.now(),
         accountId,
+        limit,
       )
       .toArray()
       .map((row) => row.conversation_id);
+    for (const id of ids) this.set(`card-backfill:${accountId}:${id}`, "1", retryMs);
+    return ids;
   }
 
   setCursor(accountId: number, conversationId: number, cursor: number): void {
@@ -252,16 +263,17 @@ export class Store implements RelayStore, Cache {
 
   /** Maps a conversation to an existing post that no other conversation is mapped to. */
   adoptThread(accountId: number, conversationId: number, threadId: string): void {
-    // The adopted post may hold a card already: it is looked for before one is posted.
+    // The adopted post may hold cards anywhere: they are looked for before one is posted.
     this.sql.exec(
       `INSERT INTO conversations (account_id, conversation_id, thread_id, card_id) VALUES (?, ?, ?, ?)
        ON CONFLICT (account_id, conversation_id) DO UPDATE SET thread_id = excluded.thread_id, state = NULL,
          announced_assignee = NULL, announce_pending = NULL, title_subject = NULL, title = NULL, title_message_id = NULL,
-         card_id = excluded.card_id, card_covered = NULL, answer_id = NULL, customer_message_id = NULL`,
+         card_id = excluded.card_id, card_covered = NULL, answer_id = NULL, answer_source_id = NULL,
+         customer_message_id = NULL`,
       accountId,
       conversationId,
       threadId,
-      CARD_UNKNOWN,
+      unknownCards(threadId),
     );
   }
 
@@ -328,7 +340,7 @@ export class Store implements RelayStore, Cache {
     this.sql.exec(
       `UPDATE conversations SET thread_id = NULL, state = NULL, announced_assignee = NULL, announce_pending = NULL,
          title_subject = NULL, title = NULL, title_message_id = NULL, card_id = NULL, card_covered = NULL, answer_id = NULL,
-         customer_message_id = NULL
+         answer_source_id = NULL, customer_message_id = NULL
        WHERE account_id = ? AND conversation_id = ?`,
       accountId,
       conversationId,

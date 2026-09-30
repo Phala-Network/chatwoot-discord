@@ -94,6 +94,13 @@ function option(value: string, label: string, emoji: string, selected: boolean):
 
 /** A ticket as its card shows it. */
 export interface CardTicket {
+  /** The ticket, e.g. "Acme #142", and its customer. */
+  title: string;
+  customer: string;
+  /** The channel, and how to reach the customer (email, phone). */
+  details: string[];
+  /** The conversation in Chatwoot. */
+  url: string;
   /** open, pending, snoozed, or resolved. */
   status: string;
   /** The assignee's name; null when unassigned. */
@@ -117,7 +124,8 @@ const STATUS_NAMES: Record<string, string> = {
 };
 
 /**
- * A ticket's card: a line with its status, assignee, and labels, coloured by its status, then a
+ * A ticket's card, coloured by its status: an overview (the ticket and its customer; the channel,
+ * how to reach the customer, and a link to Chatwoot; the status, assignee, and labels), then a
  * row of buttons per concern. Answering: Reply, led by Use draft when `answerId` is a triage bot
  * answer with a draft. Who owns the ticket: Take, and Assign to (named after the assignee), which
  * shows a menu of agents. Its state: Resolve and Snooze until the next reply, or Reopen, as its
@@ -133,6 +141,12 @@ export function ticketCard(ticket: CardTicket, answerId?: string): APIMessageTop
     ...ticket.labels.slice(0, CARD_LABELS).map((label) => `🏷️ ${clip(label, CARD_TEXT)}`),
     ...(more > 0 ? [`+${more}`] : []),
   ].join(" · ");
+  // The customer's name and details are their own text: they must not mention anyone.
+  const heading = `### ${clip(ticket.title, CARD_TEXT)} · ${defused(clip(ticket.customer, CARD_TEXT))}`;
+  const details = [
+    ...ticket.details.map((detail) => defused(clip(detail, CARD_TEXT))),
+    `[Open in Chatwoot](<${ticket.url}>)`,
+  ].join(" · ");
   const reopen = button(BUTTONS.reopen, "Reopen", "↩️");
   const resolve = button(BUTTONS.resolve, "Resolve", "✅");
   const state =
@@ -146,7 +160,7 @@ export function ticketCard(ticket: CardTicket, answerId?: string): APIMessageTop
       type: ComponentType.Container,
       accent_color: STATUS_COLORS[ticket.status] ?? null,
       components: [
-        { type: ComponentType.TextDisplay, content: summary },
+        { type: ComponentType.TextDisplay, content: `${heading}\n-# ${details}\n${summary}` },
         row(
           answerId
             ? [

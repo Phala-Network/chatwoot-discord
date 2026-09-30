@@ -33,8 +33,8 @@ const UNKNOWN_WEBHOOK = 10015;
 const UNKNOWN_MESSAGE = 10008;
 const UNKNOWN_TAG = 10087;
 const APPLICATION_KEY = "discord:application";
-/** How many of a post's latest messages are searched for its cards: a card is at or near the bottom. */
-const CARD_SEARCH = 50;
+/** Messages per page when looking for a post's cards (Discord's maximum). */
+const CARD_PAGE = 100;
 
 export interface Cache {
   get(key: string): string | undefined;
@@ -129,19 +129,26 @@ export class DiscordForum implements ForumClient {
     }
   }
 
-  async cards(forumChannelId: string, threadId: string): Promise<string[]> {
+  async cardsAfter(
+    forumChannelId: string,
+    threadId: string,
+    after: string,
+  ): Promise<{ cards: string[]; next?: string }> {
     const webhook = await this.webhook(forumChannelId);
     try {
       // A message's author and flags are given without the Message Content intent.
       const messages = await this.rest.get<RESTGetAPIChannelMessagesResult, RESTGetAPIChannelMessagesQuery>(
         Routes.channelMessages(threadId),
-        { query: { limit: CARD_SEARCH } },
+        { query: { after, limit: CARD_PAGE } },
       );
-      return messages
+      const cards = messages
         .filter(
           (message) => message.webhook_id === webhook.id && ((message.flags ?? 0) & MessageFlags.IsComponentsV2) !== 0,
         )
         .map((message) => message.id);
+      if (messages.length < CARD_PAGE) return { cards };
+      const next = messages.map((message) => BigInt(message.id)).reduce((a, b) => (a > b ? a : b));
+      return { cards, next: String(next) };
     } catch (error) {
       if (error instanceof DiscordHttpError && error.status === 404) throw new UnknownThreadError(threadId);
       throw error;

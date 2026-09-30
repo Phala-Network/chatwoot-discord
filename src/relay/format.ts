@@ -126,14 +126,25 @@ export function threadTitle(accountName: string, conversation: RelayConversation
  * their phone number on channels that reach them by phone.
  */
 export function postHeader(message: RelayMessage): string {
-  const { channel: channelType, contact } = message.conversation;
-  const channel = filled(CHANNEL_LABELS[channelType ?? ""] ?? channelType?.replace(/^Channel::/, ""));
+  const channel = channelName(message.conversation);
   const inbox = filled(message.inboxName);
-  const phone = PHONE_CHANNELS.has(channelType ?? "") ? filled(contact.phone) : undefined;
   const lines: string[] = [];
   if (channel || inbox) lines.push(`-# via ${[channel, inbox].filter(Boolean).join(" · ")}`);
-  for (const detail of [filled(contact.email), phone]) if (detail) lines.push(`-# ${detail}`);
+  for (const detail of contactDetails(message.conversation)) lines.push(`-# ${detail}`);
   return lines.join("\n");
+}
+
+/** The conversation's channel, as people call it. */
+export function channelName(conversation: Pick<RelayConversation, "channel">): string | undefined {
+  const type = conversation.channel;
+  return filled(CHANNEL_LABELS[type ?? ""] ?? type?.replace(/^Channel::/, ""));
+}
+
+/** How to reach the contact: their email, and their phone number on phone channels. */
+export function contactDetails(conversation: Pick<RelayConversation, "channel" | "contact">): string[] {
+  const { channel, contact } = conversation;
+  const phone = PHONE_CHANNELS.has(channel ?? "") ? filled(contact.phone) : undefined;
+  return [filled(contact.email), phone].filter((detail) => detail !== undefined);
 }
 
 export function body(message: RelayMessage): string {
