@@ -243,11 +243,14 @@ async function triageHook(payload: unknown, secret = "triage-hook-secret-0123456
   );
 }
 
-const ALL_BUTTONS = ["ticket:reply", "ticket:draft", "ticket:take", "ticket:resolve", "ticket:manage"];
+/** The ticket buttons: the answering row, then who owns it, then its state. */
+const OWNER = ["ticket:take", "ticket:assign"];
+const STATE = ["ticket:resolve", "ticket:snooze", "ticket:block", "ticket:manage"];
+const ALL_BUTTONS = [["ticket:reply"], OWNER, STATE];
 
-/** The custom ids of a posted message's buttons. */
-function buttons(body: unknown): string[] | undefined {
-  return (body as { components?: Array<{ components: Array<{ custom_id: string }> }> }).components?.flatMap((row) =>
+/** The custom ids of a posted message's buttons, row by row. */
+function buttons(body: unknown): string[][] | undefined {
+  return (body as { components?: Array<{ components: Array<{ custom_id: string }> }> }).components?.map((row) =>
     row.components.map((button) => button.custom_id),
   );
 }
@@ -373,8 +376,7 @@ describe("worker", () => {
       content:
         "-# via Live chat · Acme — Product App\n-# jane@example.com\n[Open in Chatwoot](<https://chatwoot.example.com/app/accounts/3/conversations/12>)",
     });
-    // The card and every message carry the ticket buttons, but a message the triage bot answers
-    // has them after the answer (see the triage hook test); activity lines have none.
+    // The card and every message carry the ticket buttons; activity lines have none.
     expect(buttons(posts[0]?.body)).toEqual(ALL_BUTTONS);
     const thread = posts[1]?.thread ?? "";
     expect(thread).toMatch(/^\d{18}$/);
@@ -387,7 +389,7 @@ describe("worker", () => {
         avatar_url: "https://gravatar.com/avatar/?d=mp&f=y&s=256",
       },
     });
-    expect(buttons(posts[1]?.body)).toBeUndefined();
+    expect(buttons(posts[1]?.body)).toEqual(ALL_BUTTONS);
 
     // The post URL is merged into the conversation's attributes; other attributes survive.
     const link = world.requests.find((request) => request.url.pathname.endsWith("/custom_attributes"));
@@ -421,29 +423,66 @@ describe("worker", () => {
     expect(buttons(later[0]?.body)).toEqual(ALL_BUTTONS);
   });
 
-  it("posts the ticket buttons after the triage bot's answer when its signed hook says it answered", async () => {
+  it("puts Use draft right under the triage bot's answer when its signed hook says the answer is in", async () => {
     world.conversation(21, [{ id: 701, content: "help", message_type: 0 }]);
     await chatwootWebhook(created(21));
     await drain();
     const thread = world.webhookPosts().at(-1)?.thread ?? "";
-    expect(thread).toMatch(/^\d{18}$/);
     const before = world.webhookPosts().length;
+    const answerId = "100000000000009100";
+    const answer = { threadId: thread, answerId, draft: "Hi, restart the agent from the dashboard." };
 
-    expect((await triageHook({ threadId: thread }, "wrong-secret-0123456789abcdef0123")).status).toBe(401);
-    expect((await triageHook({ threadId: "not a thread" })).status).toBe(400);
-    expect((await triageHook({ threadId: thread })).status).toBe(200);
-    // It waits a moment, so the answer (sent right after the hook) lands first.
-    await runInDurableObject(hub(), (_instance, state) => {
-      state.storage.sql.exec("UPDATE jobs SET not_before = 0");
-    });
-    await setAlarmNow();
+    expect((await triageHook(answer, "wrong-secret-0123456789abcdef0123")).status).toBe(401);
+    expect((await triageHook({ threadId: thread, answerId })).status).toBe(400);
+    expect((await triageHook(null)).status).toBe(400);
+    expect((await triageHook(answer)).status).toBe(200);
+    await drain();
+    // The same answer again (a replayed call) adds nothing.
+    expect((await triageHook(answer)).status).toBe(200);
     await drain();
 
-    const [bar, ...rest] = world.webhookPosts().slice(before);
-    expect(rest).toEqual([]);
-    expect(bar).toMatchObject({ thread, body: { username: "Chatwoot", allowed_mentions: { parse: [] } } });
-    expect(bar?.body).not.toHaveProperty("content");
-    expect(buttons(bar?.body)).toEqual(ALL_BUTTONS);
+    const bar = world.webhookPosts().slice(before);
+    expect(bar).toHaveLength(1);
+    expect(bar[0]).toMatchObject({ thread, body: { username: "Chatwoot", allowed_mentions: { parse: [] } } });
+    expect(bar[0]?.body).not.toHaveProperty("content");
+    expect(buttons(bar[0]?.body)).toEqual([[`ticket:draft:${answerId}`, "ticket:reply"], OWNER, STATE]);
+
+    // Use draft opens the editor with the draft the hook sent: no Discord read, no intent needed.
+    const pressed = await discordInteraction({
+      id: "900211",
+      application_id: "100000000000000001",
+      token: "interaction-token",
+      type: 3,
+      channel_id: thread,
+      channel: { id: thread, type: 11 },
+      member: { user: { id: ALICE } },
+      message: { id: "100000000000009101", components: [] },
+      data: { custom_id: `ticket:draft:${answerId}`, component_type: 2 },
+    });
+    const modal = (await pressed.json()) as {
+      type: number;
+      data: { components: Array<{ component: { value?: string } }> };
+    };
+    expect(modal.type).toBe(9);
+    expect(modal.data.components[0]?.component.value).toBe(answer.draft);
+
+    // An answer whose draft is not kept, and that Discord will not give back: it is linked instead.
+    const other = "100000000000009102";
+    const unread = await discordInteraction({
+      id: "900212",
+      application_id: "100000000000000001",
+      token: "interaction-token",
+      type: 3,
+      guild_id: GUILD,
+      channel_id: thread,
+      channel: { id: thread, type: 11 },
+      member: { user: { id: ALICE } },
+      message: { id: "100000000000009103", components: [] },
+      data: { custom_id: `ticket:draft:${other}`, component_type: 2 },
+    });
+    const link = (await unread.json()) as { type: number; data: { content: string; flags: number } };
+    expect(link.type).toBe(4);
+    expect(link.data.content).toContain(`(https://discord.com/channels/${GUILD}/${thread}/${other})`);
   });
 
   it("retries a failed message with backoff without skipping it", async () => {
@@ -739,6 +778,46 @@ describe("worker", () => {
     expect(JSON.parse(edit?.body ?? "")).toEqual({ content: "✅ Resolved.", allowed_mentions: { parse: [] } });
     const toggled = world.requests.find((request) => request.url.pathname.endsWith("/toggle_status"));
     expect(toggled?.headers.get("api_access_token")).toBe("token-alice");
+  });
+
+  it("shows a failed change from the Manage panel as text in that panel (a Components V2 message)", async () => {
+    const thread = "100000000000030009";
+    await runInDurableObject(hub(), (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO conversations (account_id, conversation_id, thread_id, cursor) VALUES (3, 91, ?, 0)",
+        thread,
+      );
+    });
+    const profile = on("GET", "chatwoot.example.com/api/v1/profile", () =>
+      json({ id: 42, name: "Alice", email: "alice@example.com", accounts: [{ id: 3 }] }),
+    );
+    const refused = on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/91/toggle_status", () =>
+      json({ error: "forbidden" }, { status: 403 }),
+    );
+    world.mock.spy.mockRestore();
+    world = new World([profile, refused]);
+    const response = await discordInteraction({
+      id: "900091",
+      application_id: "100000000000000001",
+      token: "interaction-token",
+      type: 3,
+      channel_id: thread,
+      channel: { id: thread, type: 11 },
+      member: { user: { id: ALICE } },
+      message: { id: "900", flags: 32768, components: [] },
+      data: { custom_id: "panel:status:resolved", component_type: 2 },
+    });
+    expect(await response.json()).toEqual({ type: 6 });
+    await drain();
+    await vi.waitFor(() =>
+      expect(world.requests.some((request) => request.url.pathname.endsWith("original"))).toBe(true),
+    );
+    const edit = world.requests.find((request) => request.url.pathname.endsWith("original"));
+    expect(JSON.parse(edit?.body ?? "")).toEqual({
+      flags: 32768,
+      components: [{ type: 10, content: "❌ You do not have access to this conversation." }],
+      allowed_mentions: { parse: [] },
+    });
   });
 
   it("runs a replayed signed command once, and refuses an old signed request", async () => {

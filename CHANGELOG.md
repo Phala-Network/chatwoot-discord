@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The ticket buttons are three rows: answering (**Reply**), who owns the ticket (**Take**,
+  **Assign to…**), and its state (**Resolve**, **Snooze**, **Block**, **Manage**), under every
+  message again, the customer's included.
+- **Breaking:** the triage bot hook (`POST /triage/answered`) takes
+  `{"threadId", "answerId", "draft"}` and is called once the answer is in the post: the Worker
+  keeps the draft and posts the ticket buttons, led by **Use draft** (highlighted), right under
+  that answer, at once and once per answer. **Use draft** takes the draft the hook sent, else reads the answer
+  (Message Content intent), else links to it for **Reply with this**.
+- Routing does not snooze a ticket the customer has written to since the messages Jev was given,
+  and asks Jev again instead of applying a decision made before them. It reads past pages of
+  notes and activity lines to find the customer's messages, and does not snooze a ticket
+  when it cannot read far enough to tell.
+- **Use draft** links to the answer when Discord cannot give it back in time, and the Manage
+  card keeps its label menu when the ticket's only label is too long for it.
+- The Manage card's menus keep the current assignee and label among their 25 choices, a label may
+  be called `none`, and a current label too long for a menu is named in its placeholder.
+- A failed change from the Manage card shows in the card, which is a Components V2 message.
+- The support queue posts nothing after its first three minutes, however it is retried or
+  deferred, so it cannot be posted twice; a run keeps the queue's due time for its nonces.
+- The buttons of a very long message are on the part the triage bot is called on, not on the
+  truncation note.
+
+### Added
+
+- **Assign to…**, **Snooze** (until the next reply), and **Block** buttons. **Assign to…** shows
+  a menu of the account's agents; **Block** asks to confirm first. Both turn into the result.
+
 ## [0.17.0] - 2026-09-30
 
 ### Added

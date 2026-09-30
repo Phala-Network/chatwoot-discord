@@ -1,38 +1,26 @@
-// "Use draft": the triage bot's latest draft in a post. Reading another bot's message text needs
-// the Message Content intent on this bot's application; without it Discord returns the triage
-// bot's messages with empty content, which is told apart from "no draft yet".
+// "Use draft": the draft of the triage bot's answer its button is under. The bot's hook sends the
+// draft with the answer (see Hub.triageAnswered), and it is kept for a while; otherwise it is read
+// from the answer, which needs the Message Content intent on this bot's application (without it
+// Discord returns another bot's message with empty content, and the answer is linked instead).
 
-import {
-  type RESTGetAPIChannelMessagesQuery,
-  type RESTGetAPIChannelMessagesResult,
-  Routes,
-} from "discord-api-types/v10";
+import { type RESTGetAPIChannelMessageResult, Routes } from "discord-api-types/v10";
 import type { DiscordRest } from "../discord/rest.ts";
 import { lastCodeBlock } from "../relay/format.ts";
 
-/** Messages read back from the end of a post. */
-const RECENT = 50;
+export type Draft = { text: string } | { missing: "none" } | { missing: "unreadable" };
 
-export type Draft = { text: string } | { missing: "none" | "unreadable" };
-
-/** The last code block of the triage bot's newest message in the post that has one. */
-export async function latestDraft(
+/** The answer's draft (its last code block), read from Discord at once: someone is waiting. */
+export async function readDraft(
   rest: DiscordRest,
   threadId: string,
+  answerId: string,
   triageUserId: string | undefined,
 ): Promise<Draft> {
-  if (!triageUserId) return { missing: "none" };
-  const messages = await rest.get<RESTGetAPIChannelMessagesResult, RESTGetAPIChannelMessagesQuery>(
-    Routes.channelMessages(threadId),
-    { query: { limit: RECENT } },
-  );
-  // Newest first.
-  const triage = messages.filter((message) => message.author.id === triageUserId);
-  for (const message of triage) {
-    const text = lastCodeBlock(message.content);
-    if (text) return { text };
-  }
-  // The triage bot wrote here, but every message reads as empty: the intent is missing.
-  const unreadable = triage.length > 0 && triage.every((message) => message.content === "");
-  return { missing: unreadable ? "unreadable" : "none" };
+  const answer = await rest.get<RESTGetAPIChannelMessageResult>(Routes.channelMessage(threadId, answerId), {
+    retry: false,
+  });
+  if (!triageUserId || answer.author.id !== triageUserId) return { missing: "none" };
+  if (answer.content === "") return { missing: "unreadable" };
+  const text = lastCodeBlock(answer.content);
+  return text ? { text } : { missing: "none" };
 }

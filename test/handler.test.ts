@@ -14,11 +14,13 @@ import { ALICE, BOB, CAROL, TRIAGE, testSettings } from "./helpers.ts";
 
 const THREAD = "100000000000001500";
 const settings = testSettings();
+const ANSWER = "100000000000009100";
 let draft: Draft = { text: "Hi, restart the CVM from the dashboard." };
 const deps = {
   settings,
   ticketForThread: async (threadId: string) => (threadId === THREAD ? { accountId: 3, conversationId: 15 } : undefined),
-  latestDraft: async () => draft,
+  draftOf: async (threadId: string, answerId: string) =>
+    threadId === THREAD && answerId === ANSWER ? draft : { missing: "none" as const },
 };
 
 /** A ticket button pressed, or a panel menu changed, in the post. */
@@ -410,21 +412,26 @@ describe("interaction handler", () => {
 });
 
 describe("ticket buttons and the Manage panel", () => {
-  it("Reply opens the editor; Use draft opens it with the triage bot's latest draft", async () => {
+  it("Reply opens the editor; Use draft opens it with the draft of the answer it is under", async () => {
     const { response } = await press("ticket:reply");
     expect(response.type === InteractionResponseType.Modal && response.data.custom_id).toBe("reply:777001");
     expect(editorField(response, "content")).not.toHaveProperty("value");
-    expect(editorField((await press("ticket:draft")).response, "content")?.value).toBe(
+    expect(editorField((await press(`ticket:draft:${ANSWER}`)).response, "content")?.value).toBe(
       "Hi, restart the CVM from the dashboard.",
     );
   });
 
-  it("Use draft says why there is none: not written yet, or not readable without the intent", async () => {
+  it("Use draft says when the answer has no draft, and links one it cannot read for Reply with this", async () => {
     draft = { missing: "none" };
-    expect(privateText(await press("ticket:draft"))).toMatch(/no draft in this post yet/);
+    expect(privateText(await press(`ticket:draft:${ANSWER}`))).toMatch(/has no draft/);
     draft = { missing: "unreadable" };
-    expect(privateText(await press("ticket:draft"))).toMatch(/Message Content intent.*Reply with this/);
+    expect(privateText(await press(`ticket:draft:${ANSWER}`))).toMatch(
+      new RegExp(
+        `Message Content intent.*\\(https://discord\\.com/channels/[^/]+/${THREAD}/${ANSWER}\\).*Reply with this`,
+      ),
+    );
     draft = { text: "Hi, restart the CVM from the dashboard." };
+    expect(privateText(await press("ticket:draft:not-an-id"))).toMatch(/Unknown button/);
   });
 
   it("Take assigns the invoker, Resolve resolves, Manage draws the panel, each answered privately", async () => {
@@ -439,13 +446,41 @@ describe("ticket buttons and the Manage panel", () => {
     const manage = await press("ticket:manage");
     expect(manage.job?.action).toEqual({ type: "panel" });
     expect(manage.job).not.toHaveProperty("panel");
+    expect((await press("ticket:snooze")).job?.action).toEqual({ type: "status", status: "snoozed" });
+  });
+
+  it("Assign to shows a menu of agents; choosing one turns the menu into the result", async () => {
+    expect((await press("ticket:assign")).job?.action).toEqual({ type: "pick-assignee" });
+    const chosen = await press("ticket:assignee", ["43"]);
+    expect(chosen.response).toEqual({
+      type: InteractionResponseType.UpdateMessage,
+      data: { content: "⏳ Assigning…", components: [] },
+    });
+    expect(chosen.job?.action).toEqual({ type: "assign", chatwootUserId: 43 });
+    expect(chosen.job).not.toHaveProperty("panel");
+    expect((await press("ticket:assignee", [":none"])).job?.action).toEqual({ type: "unassign" });
+  });
+
+  it("Block asks first; confirming turns the question into the result", async () => {
+    const asked = await press("ticket:block");
+    expect(asked.job).toBeUndefined();
+    expect(asked.response).toMatchObject({
+      type: InteractionResponseType.ChannelMessageWithSource,
+      data: { flags: MessageFlags.Ephemeral, components: [{ components: [{ custom_id: "ticket:block-confirmed" }] }] },
+    });
+    const confirmed = await press("ticket:block-confirmed");
+    expect(confirmed.response).toEqual({
+      type: InteractionResponseType.UpdateMessage,
+      data: { content: "⏳ Blocking…", components: [] },
+    });
+    expect(confirmed.job?.action).toEqual({ type: "block" });
   });
 
   it("a panel change updates the panel in place", async () => {
     const assign = await press("panel:assignee", ["43"]);
     expect(assign.response).toEqual({ type: InteractionResponseType.DeferredMessageUpdate });
     expect(assign.job).toMatchObject({ action: { type: "assign", chatwootUserId: 43 }, panel: true });
-    expect((await press("panel:assignee", ["none"])).job?.action).toEqual({ type: "unassign" });
+    expect((await press("panel:assignee", [":none"])).job?.action).toEqual({ type: "unassign" });
     const resolve = await press("panel:status:resolved");
     expect(resolve.response).toEqual({ type: InteractionResponseType.DeferredMessageUpdate });
     expect(resolve.job).toMatchObject({ action: { type: "status", status: "resolved" }, panel: true });
@@ -454,7 +489,9 @@ describe("ticket buttons and the Manage panel", () => {
 
   it("the label menu gives the ticket one label, or none", async () => {
     expect((await press("panel:labels", ["billing"])).job?.action).toEqual({ type: "labels", labels: ["billing"] });
-    expect((await press("panel:labels", ["none"])).job?.action).toEqual({ type: "labels", labels: [] });
+    expect((await press("panel:labels", [":none"])).job?.action).toEqual({ type: "labels", labels: [] });
+    // A label may be called "none": it is a label, not "no label".
+    expect((await press("panel:labels", ["none"])).job?.action).toEqual({ type: "labels", labels: ["none"] });
   });
 
   it("refuses a menu value that is not in it", async () => {

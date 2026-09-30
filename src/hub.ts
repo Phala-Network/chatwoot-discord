@@ -10,6 +10,7 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   type APIMessageTopLevelComponent,
+  ComponentType,
   MessageFlags,
   type RESTPatchAPIWebhookWithTokenMessageJSONBody,
   type RESTPatchAPIWebhookWithTokenMessageResult,
@@ -19,6 +20,7 @@ import { z } from "zod";
 import { Budget, BudgetExhaustedError } from "./budget.ts";
 import { chatwootClient, toRelayConversation } from "./chatwoot/api.ts";
 import { executeCommand } from "./commands/actions.ts";
+import { text } from "./commands/components.ts";
 import { type CommandJob, commandJobSchema } from "./commands/job.ts";
 import { loadSettings, relaysInbox, type Settings } from "./config.ts";
 import { DiscordForum } from "./discord/forum.ts";
@@ -41,29 +43,28 @@ const payloadSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("message-updated"), accountId: id, conversationId: id, messageId: id }),
   z.object({ type: z.literal("route"), accountId: id, conversationId: id }),
   z.object({ type: z.literal("queue") }),
-  z.object({ type: z.literal("buttons"), accountId: id, conversationId: id }),
+  z.object({ type: z.literal("answer"), accountId: id, conversationId: id, answerId: z.string() }),
 ]);
 type JobPayload = z.infer<typeof payloadSchema>;
 
 const PRIORITY = {
   command: 0,
-  buttons: 1,
+  answer: 1,
   sweep: 1,
   conversation: 2,
   route: 2,
   "message-updated": 3,
   queue: 4,
 } as const;
-/**
- * The triage bot's hook fires as it finishes its answer, just before the answer is sent: the
- * buttons wait this long so they land under it.
- */
-const BUTTONS_DELAY_MS = 3000;
 /** Requests a job may need before it can start without being cut short. */
 const COMMAND_BUDGET = 20;
 const MIN_BUDGET = 2;
-/** Reading the conversation and its messages, asking Jev, reading the conversation again, assigning, and setting the topic. */
-const ROUTE_BUDGET = 6;
+/**
+ * Reading the conversation; for a decision not applied yet, whether the customer wrote since (up
+ * to 3 pages); the messages; asking Jev; reading the conversation again; assigning; setting the
+ * topic; checking again before a snooze (up to 3 pages); and the snooze.
+ */
+const ROUTE_BUDGET = 14;
 /** Pages of conversations (25 each by default) a sweep run reads; a longer pass continues in the next run. */
 const SWEEP_PAGES = 10;
 /** A sweep pass left unfinished this long (e.g. its account was removed) is started over. */
@@ -84,6 +85,10 @@ const RUN_WALL_MS = 5 * 60 * 1000;
  */
 const COMMAND_START_DEADLINE_MS = 12 * 60 * 1000;
 const EXPIRED = "❌ This could not start in time, so nothing was done. Please try again.";
+/** How long a triage answer's draft is kept for Use draft, and the answer remembered. */
+const ANSWER_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+/** How long the support queue may be posted after it is due: Discord's nonce check covers a few minutes. */
+const QUEUE_RETRY_MS = 3 * 60 * 1000;
 
 export class Hub extends DurableObject<Env> {
   private readonly store: Store;
@@ -137,12 +142,22 @@ export class Hub extends DurableObject<Env> {
     await this.schedule();
   }
 
-  /** The triage bot answered in a post: its ticket's buttons follow the answer (see Relay.postButtons). */
-  async triageAnswered(threadId: string): Promise<void> {
+  /**
+   * The triage bot's answer `answerId` is in the post, with the reply draft it proposes: the
+   * draft is kept for Use draft, and the answer gets its Use draft button (Relay.postAnswerButtons).
+   * Each answer is taken once, so a repeated call adds nothing.
+   */
+  async triageAnswered(threadId: string, answerId: string, draft: string): Promise<void> {
     const ticket = this.store.ticketForThread(threadId);
-    if (!ticket) return;
-    this.enqueue({ type: "buttons", ...ticket }, Date.now() + BUTTONS_DELAY_MS);
+    if (!ticket || this.store.get(answerKey(answerId)) !== undefined) return;
+    this.store.set(answerKey(answerId), draft, ANSWER_TTL_MS);
+    this.enqueue({ type: "answer", ...ticket, answerId });
     await this.schedule();
+  }
+
+  /** The draft the triage bot's hook sent with an answer, while it is kept. */
+  async answerDraft(answerId: string): Promise<string | null> {
+    return this.store.get(answerKey(answerId)) ?? null;
   }
 
   async ticketForThread(threadId: string): Promise<{ accountId: number; conversationId: number } | null> {
@@ -213,12 +228,25 @@ export class Hub extends DurableObject<Env> {
           this.store.completeJob(job);
           return "done";
         case "queue":
-          await postQueue(services);
+          // Discord drops a repeated post by its nonce only for a few minutes: however the job
+          // is retried or deferred, nothing is posted after that, so the queue and its pings are
+          // never posted twice (the next hour's queue lists the same tickets). The run keeps the
+          // job's time, so every attempt posts the same messages with the same nonces.
+          await postQueue(services, job.createdAt, job.createdAt + QUEUE_RETRY_MS);
           this.store.completeJob(job);
           return "done";
-        case "buttons":
-          await services.relay.postButtons(payload.accountId, payload.conversationId);
-          this.store.completeJob(job);
+        case "answer":
+          // At most once: Discord cannot tell a repeated post from a new one, and the buttons are a
+          // convenience (those under every message remain). Posting unarchives the post, so the
+          // ticket's state is applied again afterwards, whatever the post's outcome.
+          this.store.deleteJob(job.key);
+          this.enqueue({ type: "conversation", accountId: payload.accountId, conversationId: payload.conversationId });
+          try {
+            await services.relay.postAnswerButtons(payload.accountId, payload.conversationId, payload.answerId);
+          } catch (error) {
+            if (error instanceof BudgetExhaustedError) throw error;
+            log.warn("answer buttons not posted", { answerId: payload.answerId, ...errorFields(error) });
+          }
           return "done";
         case "route":
           await routeConversation(
@@ -373,16 +401,22 @@ export class Hub extends DurableObject<Env> {
 }
 
 /**
- * Replaces the invoker's "thinking…" with `content`, or with `components` as a Components V2
- * message: the Manage panel (the one the job came from, or a new one).
+ * Replaces the invoker's "thinking…" with `content`, and `components`: menus under the content,
+ * or, when they include more than action rows, a Components V2 message (the Manage panel, the one
+ * the job came from or a new one), which has no content.
  */
 async function respond(
   rest: DiscordRest,
   job: CommandJob,
   content: string,
-  components?: APIMessageTopLevelComponent[],
+  given?: APIMessageTopLevelComponent[],
 ): Promise<void> {
-  const body = components ? { flags: MessageFlags.IsComponentsV2, components } : { content };
+  // A job from the Manage panel replaces that Components V2 message, which cannot take content.
+  const components = given ?? (job.panel ? [text(content)] : undefined);
+  const v2 = components?.some((component) => component.type !== ComponentType.ActionRow);
+  const body = v2
+    ? { flags: MessageFlags.IsComponentsV2, components }
+    : { content, ...(components ? { components } : {}) };
   try {
     await rest.patch<RESTPatchAPIWebhookWithTokenMessageResult, RESTPatchAPIWebhookWithTokenMessageJSONBody>(
       Routes.webhookMessage(job.applicationId, job.token, "@original"),
@@ -404,8 +438,9 @@ function jobKey(payload: JobPayload): string {
       return "queue";
     case "conversation":
     case "route":
-    case "buttons":
       return `${payload.type}:${payload.accountId}:${payload.conversationId}`;
+    case "answer":
+      return answerKey(payload.answerId);
     case "message-updated":
       return `${payload.type}:${payload.accountId}:${payload.conversationId}:${payload.messageId}`;
   }
@@ -426,4 +461,8 @@ function parsePayload(raw: string): JobPayload | undefined {
   } catch {
     return undefined;
   }
+}
+
+function answerKey(answerId: string): string {
+  return `answer:${answerId}`;
 }

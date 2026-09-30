@@ -425,14 +425,21 @@ describe("executeCommand", () => {
       expect(mock.requests.some((request) => request.url.pathname.endsWith("/assignments"))).toBe(true);
     });
 
-    it("shows why a change failed in place of the panel", async () => {
-      mockFetch(profile, agents);
-      const failed = await executeCommand(
-        { ...job({ type: "assign", chatwootUserId: 99 }), panel: true },
-        settings,
-        (request) => fetch(request),
-      );
-      expect(failed.components).toEqual([{ type: 10, content: "❌ That agent is not in this Chatwoot account." }]);
+    it("Assign to's menu lists the account's agents, the assignee selected", async () => {
+      const { content, components } = await run({ type: "pick-assignee" }, state, agents).outcome;
+      expect(content).toBe("👤 Assign **Acme #15** to:");
+      const [row] = components as Array<{
+        type: number;
+        components: Array<{ custom_id: string; options: Array<{ value: string; default?: boolean }> }>;
+      }>;
+      expect(row?.type).toBe(1);
+      expect(row?.components[0]?.custom_id).toBe("ticket:assignee");
+      // The current assignee first, so a long list of agents never hides it.
+      expect(row?.components[0]?.options.map((option) => `${option.value}${option.default ? "*" : ""}`)).toEqual([
+        ":none",
+        "43*",
+        "42",
+      ]);
     });
   });
 

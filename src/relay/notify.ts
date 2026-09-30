@@ -29,8 +29,6 @@ interface Notification {
   lines: string[];
   /** Users the lines may ping. */
   users: string[];
-  /** The triage bot is called: its answer is followed by the ticket buttons (see Relay.postButtons). */
-  triaged: boolean;
 }
 
 /** Who a post announces as its assignee: their Chatwoot user id, which a rename does not change; "" for none. */
@@ -57,7 +55,7 @@ export class Notifier {
 
   /** The notification lines for a message; the same on every attempt at posting it. */
   notification(message: RelayMessage): Notification {
-    if (!this.notifies(message)) return { lines: [], users: [], triaged: false };
+    if (!this.notifies(message)) return { lines: [], users: [] };
     // While a new assignee waits for their announcement, which pings them, do not ping twice.
     const ping = fromCustomer(message) && !this.newAssignee(message.account.id, message.conversation);
     const assignee = ping ? this.linkedAssignee(message.conversation) : undefined;
@@ -67,7 +65,7 @@ export class Notifier {
       (line) => line !== undefined,
     );
     // The triage mention stays a literal token: only the assignee may be pinged.
-    return { lines, users: assignee ? [assignee] : [], triaged: triage.mention !== undefined };
+    return { lines, users: assignee ? [assignee] : [] };
   }
 
   /**

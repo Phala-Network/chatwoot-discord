@@ -121,8 +121,11 @@ export interface RelayOptions {
   triage?: TriageOptions | undefined;
   /** The agent linked to a Chatwoot user id, if any. */
   linkedAgent?: ((chatwootUserId: number) => LinkedAgent | undefined) | undefined;
-  /** Buttons on the ticket card and under each message (not activity lines). */
-  buttons?: MessageComponents | undefined;
+  /**
+   * The ticket buttons, on the card and under each message (not activity lines), and those right
+   * under a triage bot's answer with a draft (see postAnswerButtons).
+   */
+  buttons?: { message: MessageComponents; answer(answerId: string): MessageComponents } | undefined;
   /** Messages created longer ago than this are relayed without notifications. */
   liveSeconds: number;
   now?: () => Date;
@@ -183,13 +186,16 @@ export class Relay {
   }
 
   /**
-   * The ticket buttons as a message of their own, posted when the triage bot has answered in the
-   * post (its hook tells the Hub), so they follow its draft. A post that no longer exists is left.
+   * The triage bot's answer `answerId` has a draft: posts the ticket buttons, led by its Use draft,
+   * right under it (the bot's hook calls once the answer is in the post). Posting unarchives the
+   * post, so its state is marked out of date first, for the next sync, however the post ends. A
+   * post that no longer exists is left.
    */
-  async postButtons(accountId: number, conversationId: number): Promise<void> {
+  async postAnswerButtons(accountId: number, conversationId: number, answerId: string): Promise<void> {
     const { store, forum, buttons } = this.options;
     const threadId = store.conversation(accountId, conversationId)?.threadId;
     if (!threadId || !buttons) return;
+    store.updateConversation(accountId, conversationId, { state: OUT_OF_DATE });
     try {
       await forum.execute(
         this.options.target(accountId).forumChannelId,
@@ -197,7 +203,7 @@ export class Relay {
           username: SYSTEM_USERNAME,
           avatar_url: this.options.avatars.chatwoot,
           allowed_mentions: { parse: [] },
-          components: buttons,
+          components: buttons.answer(answerId),
         },
         threadId,
       );
@@ -365,11 +371,11 @@ export class Relay {
         allowed_mentions: { parse: [] },
       });
     }
-    // A message ends with the buttons to act on the ticket; an activity line has none, and a
-    // message the triage bot answers has them after the answer instead (see postButtons).
-    const last = parts.at(-1);
-    if (last && this.options.buttons && message.messageType !== "activity" && !notification.triaged) {
-      last.components = this.options.buttons;
+    // A message's last part (the one the triage bot is called on and answers, before any
+    // truncation note) carries the buttons to act on the ticket; an activity line has none.
+    const last = parts[kept.length - 1];
+    if (last && this.options.buttons && message.messageType !== "activity") {
+      last.components = this.options.buttons.message;
     }
     return parts;
   }
@@ -411,7 +417,7 @@ export class Relay {
     };
     const tags = this.postTags(accountId, conversation);
     if (tags.length > 0) post.applied_tags = tags;
-    if (this.options.buttons) post.components = this.options.buttons;
+    if (this.options.buttons) post.components = this.options.buttons.message;
     const { channelId: threadId } = await forum.execute(target.forumChannelId, post);
     store.updateConversation(accountId, conversation.id, {
       threadId,

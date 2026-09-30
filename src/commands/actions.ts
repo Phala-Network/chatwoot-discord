@@ -8,7 +8,7 @@ import { errorFields, log } from "../log.ts";
 import { clip, defused } from "../relay/format.ts";
 import { downloadAttachment } from "./attachments.ts";
 import { FAILED, filesTooLarge, NOT_LINKED, UserError } from "./common.ts";
-import { panel, text } from "./components.ts";
+import { assigneeMenu, panel } from "./components.ts";
 import { PRIORITY_NAMES } from "./definitions.ts";
 import type { CommandJob } from "./job.ts";
 
@@ -16,8 +16,8 @@ interface CommandResult {
   /** The confirmation shown to the invoker (only they see it). */
   content: string;
   /**
-   * For the Manage panel, what replaces it (a Components V2 message, which has no `content`): the
-   * panel drawn again with the ticket as it is now, or the error.
+   * What goes with the result: Assign to's menu, or the Manage panel drawn again with the ticket as
+   * it is now (a Components V2 message; see respond in hub.ts).
    */
   components?: APIMessageTopLevelComponent[];
   /** Chatwoot could not find the conversation: it may have been deleted. */
@@ -48,6 +48,18 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
     switch (action.type) {
       case "panel":
         break;
+      case "pick-assignee": {
+        const conversation = await existing(chatwoot.getConversation(accountId, conversationId));
+        const ticket = `${settings.account(accountId)?.name ?? "Ticket"} #${conversationId}`;
+        return {
+          content: `👤 Assign **${ticket}** to:`,
+          components: assigneeMenu(
+            named(await chatwoot.listAgents(accountId)),
+            conversation.meta?.assignee?.id ?? null,
+          ),
+          conversationGone: false,
+        };
+      }
       case "labels": {
         const known = await chatwoot.listLabels(accountId);
         const unknown = action.labels.find((label) => !known.includes(label));
@@ -164,8 +176,7 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
     return { content: `✅ ${message}`, conversationGone: false };
   } catch (error) {
     const gone = error instanceof ConversationGoneError || (error instanceof ChatwootError && error.status === 404);
-    const content = failure(error, job);
-    return { content, ...(isPanel(job) ? { components: [text(content)] } : {}), conversationGone: gone };
+    return { content: failure(error, job), conversationGone: gone };
   }
 }
 
@@ -215,8 +226,15 @@ async function drawPanel(
       labels: conversation.labels ?? [],
       status: conversation.status ?? "open",
     },
-    agents.flatMap((agent) => (agent.id === undefined ? [] : [{ id: agent.id, name: agent.name ?? `#${agent.id}` }])),
+    named(agents),
     labels,
+  );
+}
+
+/** The account's agents, each with a name to show. */
+function named(agents: Array<{ id?: number; name?: string }>): Array<{ id: number; name: string }> {
+  return agents.flatMap((agent) =>
+    agent.id === undefined ? [] : [{ id: agent.id, name: agent.name ?? `#${agent.id}` }],
   );
 }
 

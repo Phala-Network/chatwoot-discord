@@ -32,8 +32,9 @@ interface Open {
 }
 
 /** Open or snoozed conversations of account 3 (25 per page, like Chatwoot), none in account 1, and Discord. */
-function world(open: Open[], { failPost = 0 }: { failPost?: number } = {}) {
+function world(open: Open[], { failPost = 0, rateLimit = false }: { failPost?: number; rateLimit?: boolean } = {}) {
   let failures = failPost;
+  let limited = rateLimit;
   let posts = 0;
   return mockFetch(
     on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations", (request) => {
@@ -52,6 +53,10 @@ function world(open: Open[], { failPost = 0 }: { failPost?: number } = {}) {
     on("GET", "chatwoot.example.com/api/v1/accounts/1/conversations", () => json({ data: { meta: {}, payload: [] } })),
     on("POST", `discord.com/api/v10/channels/${CHANNEL}/messages`, () => {
       posts += 1;
+      if (limited) {
+        limited = false;
+        return json({ message: "You are being rate limited.", retry_after: 5, global: false }, { status: 429 });
+      }
       if (posts > 1 && failures > 0) {
         failures -= 1;
         return json({ message: "Internal Server Error" }, { status: 500 });
@@ -123,6 +128,18 @@ describe("support queue", () => {
       "💤 [Acme #2](<https://chatwoot.example.com/app/accounts/3/conversations/2>) | waiting 2 h | Alice",
     ]);
     expect(message.allowed_mentions).toEqual({ parse: [], users: [], roles: [ROLE] });
+  });
+
+  it("posts nothing once its deadline has passed, so a late retry cannot post it twice", async () => {
+    const { requests } = world([{ id: 1, waiting: 3 }]);
+    await postQueue(context(), NOW * 1000, Date.now() - 1);
+    expect(posted(requests)).toEqual([]);
+  });
+
+  it("hands a rate limit back to its job instead of waiting it out, so the job checks the deadline first", async () => {
+    const { requests } = world([{ id: 1, waiting: 3 }], { rateLimit: true });
+    await expect(postQueue(context(), NOW * 1000)).rejects.toMatchObject({ status: 429 });
+    expect(posted(requests)).toHaveLength(1);
   });
 
   it("escalates to a user instead of a role", async () => {

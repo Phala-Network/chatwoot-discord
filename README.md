@@ -112,9 +112,10 @@ To connect an AI agent, see [Connecting an AI agent](docs/ai-agent.md).
 ### 1. Discord
 
 1. Create an application at <https://discord.com/developers/applications>; note its
-   **Application ID** and **Public Key**, and create a **bot token**. With a triage bot, turn on
-   the **Message Content** intent for **Use draft** (a bot in 100 or more servers, or in a large
-   one, needs Discord's review first); without it the button points to **Reply with this**.
+   **Application ID** and **Public Key**, and create a **bot token**. No privileged intent is
+   needed; with a triage bot whose hook does not send its drafts, turn on the **Message Content**
+   intent for **Use draft** (an app in 100 or more servers, or exposed to a large one, needs
+   Discord's review first).
 2. Invite the bot with the `bot` and `applications.commands` scopes.
 3. Create a **forum channel**. Give the bot *View Channels*, *Read Message History* (**Use
    draft**), *Manage Threads* (tags, archiving),
@@ -204,19 +205,25 @@ are supported); you provide TLS, the cron trigger, and storage persistence.
 Used inside a ticket post, by Discord users linked in `agents[]` who have a token in
 `CHATWOOT_AGENT_TOKENS`. The same actions are buttons, which need no typing:
 
-- **Reply**, **Use draft** (with a triage bot), **Take**, **Resolve**, and **Manage** are on the
-  ticket card, at the top of the post, and under every message (not activity lines), so they are
-  always close at hand.
-- **Reply** opens the `/reply` editor. **Use draft** opens it with the draft of the triage bot's
-  newest message in the post that has one (its last code block, as **Reply with this** takes it);
-  it reads the post's messages, which needs the Message Content intent, and says so when the bot
-  lacks it. **Take** assigns the ticket to you; **Resolve** resolves it.
+- The ticket card (at the top of the post) and every message (not activity lines) end with three
+  rows of buttons: answering (**Reply**), who owns the ticket (**Take**, **Assign to…**), and its
+  state (**Resolve**, **Snooze** until the next reply, **Block**, and **Manage**).
+- Right under a triage bot's answer with a draft come the same buttons, led by **Use draft**
+  (highlighted), when the bot's hook reports the answer (see [Triage bot hook](#triage-bot-hook)). **Use draft** opens
+  the `/reply` editor with that answer's draft: the one the hook sent, or else the answer's last
+  code block read from Discord, which needs the Message Content intent; without it, it links to
+  the answer for **Reply with this**, which works on any message.
+- **Reply** opens the `/reply` editor. **Take** assigns the ticket to you; **Assign to…** shows you a menu of the account's
+  agents, and the menu turns into the result. **Resolve** resolves it. **Block** asks you to
+  confirm first (only you see the question), then blocks the contact as `/block` does.
 - **Manage** opens a card only you see, drawn with the ticket as it is and coloured by its status:
-  menus for its assignee and its label (one per ticket: choosing one replaces its labels), and
-  **Open**, **Resolve**, and **Snooze** (until the next reply) buttons with the current status
-  highlighted. A change is made at once, and the card is drawn again with the result, so it
-  always shows the ticket's state. Priority and "pending" are set with `/priority` and
-  `/pending`; several labels with `/label`.
+  menus for its assignee and its label (the card sets one: choosing one replaces the ticket's
+  labels), and **Open**, **Resolve**, and **Snooze** (until the next reply) buttons with the
+  current status highlighted. A change is made at once, and the card is drawn again with the
+  result; a change someone else makes shows the next time it is drawn. A menu lists at most 25
+  choices (the current assignee and label among them; a label longer than a menu option can be
+  is named in the menu's placeholder instead); assign others with `/assign`, and
+  set priority, "pending", and several labels with `/priority`, `/pending`, and `/label`.
 
 Posts created before the buttons were added have none; the commands work everywhere.
 
@@ -397,7 +404,11 @@ has no label yet (a ticket has one label, so one an automation rule set stays al
 is clear, Jev is asked again each time the customer adds a message, until one is or three customer
 messages were seen; the ticket then stays for a person. With `snoozeUnclear`, a ticket without a
 clear owner is snoozed until the customer's next message, which reopens it and asks Jev again, so it
-waits for detail instead of escalating; after the third message it stays open. A ticket assigned
+waits for detail instead of escalating; after the third message it stays open. A ticket the customer
+wrote to after the messages Jev was given is not snoozed (a message in the moment between that
+check and the snooze waits for the customer's next one; the support queue lists the ticket
+meanwhile). Customer messages are looked for among the next 300 messages (notes and activity lines count
+too): one beyond them is not seen, and the ticket is then not snoozed but left for a person. A ticket assigned
 before its turn (by a person or a Chatwoot automation rule) is left alone, and a routed ticket is
 never routed again, even if someone unassigns it. The decision is recorded, without expiry, before
 it is applied, so a retry applies the same one without asking Jev again. It is applied to the ticket
@@ -420,14 +431,16 @@ window, so a missed webhook only delays it.
 
 ### Triage bot hook
 
-A customer message that calls the triage bot has no buttons of its own: the ticket buttons follow
-the bot's answer instead, so **Use draft** sits under the draft. The Worker cannot see Discord
-messages, so the bot's side says when it has answered: `POST /triage/answered` with the body
-`{"threadId":"<post id>"}` and the headers `x-timestamp` (Unix seconds) and `x-signature`
-(`sha256=` and the hex HMAC-SHA256 of `<timestamp>.<body>` with `TRIAGE_HOOK_SECRET`, as Chatwoot
-signs its webhooks). The Worker posts the buttons in that post 3 seconds later, since a hook that
-fires as the answer is finished runs just before the answer is sent. For Hermes, an `agent:end`
-gateway hook in the triage profile does this.
+A triage bot's answer is its own message, which only it can put buttons on, and the Worker does
+not see Discord messages. So the bot's side reports each answer once it is in the post: `POST
+/triage/answered` with `{"threadId":"<post id>","answerId":"<answer message id>","draft":"<the
+reply draft>"}`, signed like a Chatwoot webhook (`x-timestamp`, Unix seconds, and `x-signature`,
+`sha256=` and the hex HMAC-SHA256 of `<timestamp>.<body>` with `TRIAGE_HOOK_SECRET`). The Worker
+keeps the draft for 14 days and posts the ticket buttons, led by **Use draft**, right under the
+answer, once per answer (a repeated call adds nothing). Report only answers that have a draft, and only after they
+were sent, so the buttons follow them (right after the answer unless another message came in
+between). The hook is a convenience: if a call is lost, the answer has no buttons of its own, and
+the buttons under the customer's message and **Reply with this** still work.
 
 ## Limits and the Workers Free plan
 
@@ -485,8 +498,12 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
   support volumes are far below its throughput. Jobs run by priority (commands first), failures
   retry with exponential backoff (5 s … 30 min), and a run yields before the subrequest limit.
   A job that Discord rate limits waits as long as Discord asks, without counting an attempt.
-  A job is never dropped: after a few failures its log turns into errors, and it keeps retrying
-  at most every 30 minutes, so an outage of any length loses no work. Every outbound request
+  A job is never dropped, with three exceptions: a command that could not start while Discord's
+  15-minute interaction window left time to report is answered that nothing was done, the support queue posts nothing after its first
+  three minutes (Discord's nonce, which keeps a retried post from appearing twice, lasts only a
+  few minutes; the next hour's queue lists the same tickets), and a triage answer's Use draft
+  button is posted at most once. Otherwise, after a few failures a job's log turns into errors,
+  and it keeps retrying at most every 30 minutes, so an outage of any length loses no work. Every outbound request
   times out after 60 seconds, which counts as a failed attempt. While a conversation's job is
   backing off, new events for it wait for its next attempt.
 - **Relaying** (`src/relay/`): a webhook only queues "sync conversation N" (conversation events

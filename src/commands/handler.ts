@@ -20,7 +20,7 @@ import {
 import type { Settings } from "../config.ts";
 import { draftFromMessage, lastCodeBlock } from "../relay/format.ts";
 import { filesTooLarge, fileTooLarge, isDiscordAttachmentUrl, NOT_LINKED, UserError } from "./common.ts";
-import { BUTTONS, NONE, PANEL } from "./components.ts";
+import { BUTTONS, blockConfirmation, NONE, PANEL } from "./components.ts";
 import { CONTENT_MAX, REPLY_WITH_THIS } from "./definitions.ts";
 import type { Draft } from "./draft.ts";
 import { type AttachmentRef, type CommandAction, type CommandJob, prioritySchema } from "./job.ts";
@@ -34,8 +34,8 @@ interface HandlerDeps {
   settings: Settings;
   /** The conversation the relay mapped to this forum post, if any. */
   ticketForThread(threadId: string): Promise<Ticket | undefined>;
-  /** The triage bot's latest draft in the post. */
-  latestDraft(threadId: string): Promise<Draft>;
+  /** The draft of a triage bot's answer in the post: the one its hook sent, else read from the answer. */
+  draftOf(threadId: string, answerId: string): Promise<Draft>;
 }
 
 export interface HandlerResult {
@@ -373,16 +373,19 @@ function defer(context: Context, action: CommandAction): HandlerResult {
 /** A ticket button, or a change in the Manage panel. */
 async function component(context: Context, interaction: APIMessageComponentInteraction): Promise<HandlerResult> {
   const { data } = interaction;
+  // Use draft carries its answer: "ticket:draft:<answer message id>".
+  const answerId = data.custom_id.startsWith(`${BUTTONS.draft}:`) ? data.custom_id.slice(BUTTONS.draft.length + 1) : "";
+  if (/^\d{17,20}$/.test(answerId)) {
+    const draft = await context.deps.draftOf(context.threadId, answerId);
+    if ("text" in draft) return { response: editor(context, "reply", draft.text) };
+    if (draft.missing === "none") return privately("That answer has no draft.");
+    return privately(
+      `That answer's draft cannot be read here (it needs Discord's Message Content intent, or Discord did not answer in time). Right-click [the answer](https://discord.com/channels/${interaction.guild_id ?? "@me"}/${context.threadId}/${answerId}) and choose Apps → ${REPLY_WITH_THIS}.`,
+    );
+  }
   switch (data.custom_id) {
     case BUTTONS.reply:
       return { response: editor(context, "reply", undefined) };
-    case BUTTONS.draft: {
-      const draft = await context.deps.latestDraft(context.threadId);
-      if ("text" in draft) return { response: editor(context, "reply", draft.text) };
-      return privately(
-        draft.missing === "unreadable" ? DRAFT_UNREADABLE : "The triage bot has no draft in this post yet.",
-      );
-    }
     case BUTTONS.take: {
       const chatwootUserId = context.deps.settings.chatwootUserFor(context.userId);
       if (chatwootUserId === undefined) return privately(NOT_LINKED);
@@ -390,6 +393,30 @@ async function component(context: Context, interaction: APIMessageComponentInter
     }
     case BUTTONS.resolve:
       return defer(context, { type: "status", status: "resolved" });
+    case BUTTONS.snooze:
+      return snooze(context, "until_next_reply", Date.now());
+    case BUTTONS.block:
+      return {
+        response: {
+          type: InteractionResponseType.ChannelMessageWithSource,
+          data: {
+            content:
+              "Block this contact? The ticket is resolved, and their new messages are muted (`/unblock` undoes it).",
+            components: blockConfirmation(),
+            flags: MessageFlags.Ephemeral,
+            allowed_mentions: { parse: [] },
+          },
+        },
+      };
+    case BUTTONS.blockConfirmed:
+      return inPlace(context, { type: "block" }, "⏳ Blocking…");
+    case BUTTONS.assign:
+      return defer(context, { type: "pick-assignee" });
+    case BUTTONS.assignee: {
+      if (data.component_type !== ComponentType.StringSelect) return privately("Unknown menu.");
+      const [agent = NONE] = data.values;
+      return inPlace(context, agent === NONE ? { type: "unassign" } : assignee(agent), "⏳ Assigning…");
+    }
     case BUTTONS.manage:
       return defer(context, { type: "panel" });
   }
@@ -415,15 +442,23 @@ async function component(context: Context, interaction: APIMessageComponentInter
   }
 }
 
+/**
+ * A deferred command whose result replaces the private message it came from (a confirmation, a
+ * menu): "@original" is the message the button or menu is on, shown meanwhile as `interim`.
+ */
+function inPlace(context: Context, action: CommandAction, interim: string): HandlerResult {
+  return {
+    ...defer(context, action),
+    response: { type: InteractionResponseType.UpdateMessage, data: { content: interim, components: [] } },
+  };
+}
+
 function assignee(value: string): CommandAction {
   const chatwootUserId = Number(value);
   if (!Number.isSafeInteger(chatwootUserId) || chatwootUserId <= 0)
     throw new UserError("Choose an agent from the list.");
   return { type: "assign", chatwootUserId };
 }
-
-const DRAFT_UNREADABLE =
-  "This bot cannot read the triage bot's messages yet (it needs Discord's Message Content intent). Right-click the draft and choose Apps → Reply with this.";
 
 export function privately(content: string): HandlerResult {
   return {
