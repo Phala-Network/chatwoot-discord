@@ -17,7 +17,7 @@ import {
   TextInputStyle,
 } from "discord-api-types/v10";
 import type { Settings } from "../config.ts";
-import { draftFromMessage, draftFromTriage } from "../relay/format.ts";
+import { draftFromMessage, lastCodeBlock } from "../relay/format.ts";
 import { filesTooLarge, fileTooLarge, isDiscordAttachmentUrl, NOT_LINKED, UserError } from "./common.ts";
 import { CONTENT_MAX, REPLY_WITH_THIS } from "./definitions.ts";
 import { type AttachmentRef, type CommandAction, type CommandJob, prioritySchema } from "./job.ts";
@@ -242,9 +242,9 @@ function replyWithThis(context: Context, interaction: APIApplicationCommandInter
 }
 
 /**
- * A message command carries its target message, content included. From the triage bot, only the
- * code block after a draft label counts (its progress messages also contain code blocks); from
- * anyone else, the last code block, or the whole message when there is none.
+ * A message command carries its target message, content included. From the triage bot, its last
+ * code block (its answer's draft; a message without one has no draft); from anyone else, the last
+ * code block, or the whole message when there is none.
  */
 function draftOf(context: Context, interaction: APIApplicationCommandInteraction): string | undefined {
   const { data } = interaction;
@@ -252,7 +252,7 @@ function draftOf(context: Context, interaction: APIApplicationCommandInteraction
   const message = data.resolved.messages[data.target_id];
   const content = message?.content ?? "";
   const triage = context.deps.settings.config.triage;
-  if (triage.userId && message?.author.id === triage.userId) return draftFromTriage(content, triage.draftLabels);
+  if (triage.userId && message?.author.id === triage.userId) return lastCodeBlock(content);
   return draftFromMessage(content);
 }
 

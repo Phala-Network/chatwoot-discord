@@ -76,10 +76,10 @@ and a Discord server where you can add an application and a forum channel.
   per conversation and `triage.perHour` (30) in total call the agent each hour; beyond that a
   visible note replaces the mention. Messages from blocked contacts are never relayed.
 - **The AI drafts, humans send.** Talking in a post never reaches the customer; only commands do.
-  The agent writes its proposed reply as a fenced code block after a draft label
-  (`triage.draftLabels`, default `Draft`). A human uses **Apps → Reply with this** to open the
-  reply editor prefilled with it, edits if needed, and submits. Every action runs with the
-  human's own Chatwoot token, so Chatwoot's permissions and audit trail apply.
+  The agent writes its proposed reply as the last fenced code block of its answer. A human uses
+  **Apps → Reply with this** to open the reply editor prefilled with it, edits if needed, and
+  submits. Every action runs with the human's own Chatwoot token, so Chatwoot's permissions and
+  audit trail apply.
 - **Links work both ways, for machines too.** The post URL is stored in the conversation's link
   attribute (`relay.linkAttribute`, default `discord_thread`), so anything that reads Chatwoot's
   API (for example a queue digest) can link to the post; the ticket card links back to Chatwoot.
@@ -312,7 +312,6 @@ replace:
 | `triage.name` | 1–100 characters | `Triage bot` | Name used in budget notes. |
 | `triage.perConversationPerHour` | integer ≥ 1 | `5` | Customer messages per conversation that call the triage bot each hour. |
 | `triage.perHour` | integer ≥ 1 | `30` | Customer messages in total that call the triage bot each hour. |
-| `triage.draftLabels` | non-empty array of non-empty strings | `["Draft"]` | Labels before the triage bot's draft code block. |
 | `relay.maxChunks` | integer 1–10 | `4` | Discord messages per Chatwoot message before truncation. |
 | `relay.topicAttribute` | non-empty string | `topic` | Conversation custom attribute used as a topic tag. |
 | `relay.linkAttribute` | string | `discord_thread` | Conversation custom attribute that receives the post URL (`""` disables it). |

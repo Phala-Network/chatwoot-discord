@@ -4,7 +4,7 @@ import {
   CONTENT_LIMIT,
   chatwootMentions,
   draftFromMessage,
-  draftFromTriage,
+  lastCodeBlock,
   postHeader,
   senderName,
   split,
@@ -142,24 +142,20 @@ describe("format", () => {
     expect(() => split("text", 0)).toThrow(RangeError);
   });
 
-  it("extracts the draft after a label from a triage message", () => {
+  it("takes the last code block of a message", () => {
     const triage =
       "**Summary**: wants account deletion\n**Basis**:\n```\ncli conv 15\n```\n**Draft**:\n```text\nHi, you can delete it in Settings.\n```\n-# Reply with this";
-    expect(draftFromTriage(triage, ["Draft"])).toBe("Hi, you can delete it in Settings.");
-    expect(draftFromTriage("**Draft**:\n\n```\nHi there,\n\nThanks!\n```", ["Draft"])).toBe("Hi there,\n\nThanks!");
-    expect(draftFromTriage("**Brouillon**:\n```\nBonjour\n```", ["Draft", "Brouillon"])).toBe("Bonjour");
-    expect(draftFromTriage("```\nprogress output\n```", ["Draft"])).toBeUndefined();
-    // Labels are literal text, not patterns.
-    expect(draftFromTriage("**D.aft**:\n```\nx\n```", ["D.aft"])).toBe("x");
-    expect(draftFromTriage("**Draft**:\n```\nx\n```", ["D.aft"])).toBeUndefined();
+    expect(lastCodeBlock(triage)).toBe("Hi, you can delete it in Settings.");
+    expect(lastCodeBlock("**Draft**:\n\n```\nHi there,\n\nThanks!\n```")).toBe("Hi there,\n\nThanks!");
+    expect(lastCodeBlock("疑似垃圾：广告。建议 /block")).toBeUndefined();
   });
 
   it("reads code blocks by CommonMark's fence rules, so a draft may contain code", () => {
     const draft = "Run this:\n```sh\nagent restart\n```\nThen try again.";
     // A longer fence around a draft that has its own code block.
-    expect(draftFromTriage(`**Draft**:\n\`\`\`\`\n${draft}\n\`\`\`\`\n-# done`, ["Draft"])).toBe(draft);
+    expect(lastCodeBlock(`**Draft**:\n\`\`\`\`\n${draft}\n\`\`\`\`\n-# done`)).toBe(draft);
     // Tildes, closed by at least as many tildes; backticks inside do not close them.
-    expect(draftFromTriage(`Draft:\n~~~text\n${draft}\n~~~~\nafter`, ["Draft"])).toBe(draft);
+    expect(lastCodeBlock(`Draft:\n~~~text\n${draft}\n~~~~\nafter`)).toBe(draft);
     // A fence may be indented up to three spaces; its content loses that indentation.
     expect(draftFromMessage("   ```\n   Hi,\n    indented\n   ```")).toBe("Hi,\n indented");
     // An unclosed block runs to the end of the message.

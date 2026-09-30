@@ -68,8 +68,6 @@ export const configSchema = z
         name: z.string().min(1).max(100).default("Triage bot"),
         perConversationPerHour: z.number().int().positive().default(5),
         perHour: z.number().int().positive().default(30),
-        /** Labels that introduce the triage bot's draft code block ("Reply with this"). */
-        draftLabels: z.array(z.string().min(1)).min(1).default(["Draft"]),
       })
       .prefault({}),
     relay: z

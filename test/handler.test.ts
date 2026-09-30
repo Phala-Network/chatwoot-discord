@@ -163,16 +163,16 @@ describe("interaction handler", () => {
     expect(response.type === InteractionResponseType.Modal && response.data.custom_id).toBe("note:777001");
   });
 
-  it("'Reply with this' takes the draft block from a triage bot message", async () => {
+  it("'Reply with this' takes the last code block of a triage bot message, whatever its headings", async () => {
     const triage =
-      "**Summary**: wants account deletion\n```\ncli conv 15\n```\n**Draft**:\n```text\nHi, delete it in Settings.\n```";
+      "**总结**: wants account deletion\n```\ncli conv 15\n```\n**回复**:\n```text\nHi, delete it in Settings.\n```\n**下一步**: /resolve";
     const { response } = await menu(triage);
     expect(response.type === InteractionResponseType.Modal && response.data.custom_id).toBe("reply:777001");
     expect(editorField(response, "content")?.value).toBe("Hi, delete it in Settings.");
   });
 
-  it("'Reply with this' explains when a triage message has no draft", async () => {
-    expect(privateText(await menu("```\nprogress output\n```"))).toMatch(/no draft/);
+  it("'Reply with this' explains when a triage message has no draft (no code block)", async () => {
+    expect(privateText(await menu("疑似垃圾：广告。建议 /block"))).toMatch(/no draft/);
   });
 
   it("'Reply with this' uses the last code block or the whole text from anyone else", async () => {

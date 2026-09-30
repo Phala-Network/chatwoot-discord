@@ -180,7 +180,7 @@ export function testSettings(
       { discordUserId: BOB, chatwootUserId: 43 },
       { discordUserId: CAROL, chatwootUserId: 45 },
     ],
-    triage: { userId: TRIAGE, draftLabels: ["Draft"] },
+    triage: { userId: TRIAGE },
     ...overrides,
   });
   const secrets = secretsSchema.parse({

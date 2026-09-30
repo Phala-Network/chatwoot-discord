@@ -26,7 +26,7 @@
         { "discordUserId": "100000000000000011", "chatwootUserId": 1 },
         { "discordUserId": "100000000000000012", "chatwootUserId": 2 }
       ],
-      "triage": { "userId": "100000000000000021", "name": "Triage bot", "draftLabels": ["Draft"] },
+      "triage": { "userId": "100000000000000021", "name": "Triage bot" },
       "relay": { "maxChunks": 4, "topicAttribute": "topic", "linkAttribute": "discord_thread" }
     }
   }
