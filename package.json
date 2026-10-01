@@ -21,8 +21,14 @@
   "license": "MIT",
   "type": "module",
   "exports": {
-    ".": "./lib/src/index.js",
-    "./stored-config": "./lib/scripts/stored-config.js"
+    ".": {
+      "types": "./lib/src/index.d.ts",
+      "default": "./lib/src/index.js"
+    },
+    "./stored-config": {
+      "types": "./lib/scripts/stored-config.d.ts",
+      "default": "./lib/scripts/stored-config.js"
+    }
   },
   "bin": {
     "chatwoot-discord-store-config": "./lib/scripts/store-config.js"
@@ -48,7 +54,7 @@
     "register-commands": "node scripts/register-commands.ts",
     "forum-tags": "node scripts/forum-tags.ts",
     "store-config": "node scripts/store-config.ts",
-    "build:package": "esbuild src/index.ts scripts/stored-config.ts scripts/store-config.ts --bundle --platform=node --format=esm --packages=external --outbase=. --outdir=lib",
+    "build:package": "rm -rf lib && esbuild src/index.ts scripts/stored-config.ts scripts/store-config.ts --bundle --platform=node --format=esm --packages=external --outbase=. --outdir=lib && tsc -p tsconfig.package.json && tsc -p tsconfig.package-node.json",
     "prepack": "npm run build:package"
   },
   "devDependencies": {

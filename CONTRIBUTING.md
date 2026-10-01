@@ -70,5 +70,13 @@ To release, a maintainer:
    gh release create vx.y.z --title "vx.y.z" --notes "<changelog section>"
    ```
 
-The package is not published to npm (`"private": true`); operators deploy a release with
-`npm run deploy` (or Workers Builds, when deployed with the Deploy to Cloudflare button).
+Publishing the release runs [`release.yml`](.github/workflows/release.yml), which publishes the version to npm as
+[`chatwoot-discord-relay`](https://www.npmjs.com/package/chatwoot-discord-relay) with
+[trusted publishing](https://docs.npmjs.com/trusted-publishers): GitHub Actions proves its identity with OIDC, so no npm
+token is stored, and npm attaches provenance. The trusted publisher (this repository, `release.yml`) is configured on
+the package, which therefore had to exist first: its first version was published by a maintainer by hand
+(`npm publish` from the release commit), then `npm trust github chatwoot-discord-relay --file release.yml --repo
+Phala-Network/chatwoot-discord-relay`, then token publishing was disallowed in the package settings. A version npm has
+published cannot be published again. Prereleases are not published. Operators deploy a release from this repository
+with `npm run deploy` (or Workers Builds, when deployed with the Deploy to Cloudflare button), or from a repository of
+their own that depends on the package (see the README).

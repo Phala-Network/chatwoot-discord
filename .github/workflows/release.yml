@@ -12,6 +12,8 @@ permissions:
 
 jobs:
   publish:
+    # Releases only: a prerelease would need its own npm dist-tag.
+    if: ${{ !github.event.release.prerelease }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -27,6 +29,8 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+          # No cache in a job that can publish.
+          package-manager-cache: false
       # Trusted publishing needs npm 11.5.1 or later; use the version pinned in `packageManager`.
       - run: npm install --global "$(node -p 'require("./package.json").packageManager')"
       - name: The release tag names the package version

@@ -370,8 +370,9 @@ export default defineConfig({
 });
 ```
 
-Store the configuration, then deploy (in CI too, following
-[Use cf in CI](https://developers.cloudflare.com/cf/ci/)):
+Store the configuration, then deploy. In CI, follow [Use cf in CI](https://developers.cloudflare.com/cf/ci/) without
+`--mode` (this configuration has no modes): `npx cf build`, then `npx cf deploy --prebuilt` after storing the
+configuration. By hand:
 
 ```sh
 npx cf kv namespaces create --title chatwoot-discord-config   # once

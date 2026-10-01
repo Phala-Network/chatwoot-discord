@@ -17,5 +17,7 @@
     // Relative imports name the .ts file: bundlers accept it, and scripts run with Node's type stripping.
     "allowImportingTsExtensions": true
   },
-  "include": ["src", "test"]
+  "include": ["src", "test"],
+  // A consumer of the packed package (CI installs it there).
+  "exclude": ["test/package"]
 }

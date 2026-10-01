@@ -42,10 +42,12 @@ jobs:
           node scripts/forum-tags.ts || [ $? -eq 2 ]
       - name: Build (wrangler dry run, no deploy)
         run: npm run build
-      - name: Package (what npm publish would ship)
+      - name: Package (what npm publish would ship), installed and type-checked by a consumer
         # The command prints its usage and exits 2 without arguments.
         run: |
-          npm pack --dry-run
+          npm pack --pack-destination test/package
           node lib/scripts/store-config.js || [ $? -eq 2 ]
-          node --input-type=module -e 'const { storedConfig } = await import("chatwoot-discord-relay/stored-config"); if (typeof storedConfig !== "function") process.exit(1)'
+          cd test/package
+          npm install --no-save --no-audit --no-fund ./chatwoot-discord-relay-*.tgz typescript @cloudflare/workers-types @types/node@24
+          npx tsc
 
