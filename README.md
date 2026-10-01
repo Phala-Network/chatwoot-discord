@@ -397,7 +397,7 @@ read that fails is retried with the next request. Set `CONFIG` or `CONFIG_KEY`, 
 | `routing` | object | unset | Assigns new tickets, adds their topic label, and acts on their kind with TypeSafe Jev ([routing](#routing)). Requires the `TYPESAFE_API_KEY` secret. Unset: off. |
 | `routing.model` | non-empty string | `jev-1.13.0` | TypeSafe model. |
 | `routing.minConfidence` | number 0.5–1 | `0.7` | Probability an answer needs before it is applied. |
-| `routing.snoozeUnclear` | boolean | `false` | Snooze a ticket with no clear owner until the customer's next message. |
+| `routing.snoozeUnclear` | boolean | `false` | Snooze a ticket with no clear owner in which the customer asked for nothing yet (a greeting, a test) until their next message. |
 | `routing.accounts` | object: account id → (owner name → owner) | required | Routed accounts (configured in `accounts[]`) and the owners Jev chooses from. Owner names are 1–40 lower-case letters, digits, or `_`; `unclear` is reserved. |
 | `routing.accounts.<id>.<name>.assignee` | integer > 0 | required | Chatwoot user id to assign. |
 | `routing.accounts.<id>.<name>.covers` | 1–1000 characters | required | What the owner handles: Jev's criterion for choosing them. |
@@ -451,9 +451,11 @@ details in the text still reach TypeSafe, so check that its data policy suits yo
 `minConfidence` or above is assigned, and a topic at or above it is added as a label when the ticket
 has no label other than its kinds (a ticket has one topic label, so one an automation rule set stays alone). When no owner
 is clear, Jev is asked again each time the customer adds a message, until one is or three customer
-messages were seen; the ticket then stays for a person. With `snoozeUnclear`, a ticket without a
-clear owner is snoozed until the customer's next message, which reopens it and asks Jev again, so it
-waits for detail instead of escalating; after the third message it stays open. A ticket the customer
+messages were seen; the ticket then stays for a person. With `snoozeUnclear`, Jev is also asked
+whether the customer asked for anything yet: a ticket without a clear owner and without a request (a
+greeting, a test, a name alone) is snoozed until the customer's next message, which reopens it and
+asks Jev again, so it waits for detail instead of escalating; after the third message it stays open.
+One with a request (a question no owner covers) stays open for a person. A ticket the customer
 wrote to after the messages Jev was given is not snoozed (a message in the moment between that
 check and the snooze waits for the customer's next one; the support queue lists the ticket
 meanwhile). Customer messages are looked for among the next 300 messages (notes and activity lines count

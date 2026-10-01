@@ -9,8 +9,10 @@
 // message, until an owner is found or MAX_MESSAGES were seen; then the ticket stays for a person.
 // Customer messages are looked for in the next PAGES pages of messages (notes and activity lines
 // count too): one beyond them is not seen, and the ticket is then not snoozed.
-// With `snoozeUnclear`, such a ticket is snoozed until the customer's next message (which reopens
-// it), so it waits for more detail instead of escalating; once MAX_MESSAGES were seen it stays open.
+// With `snoozeUnclear`, Jev also tells whether the customer asked for anything yet; such a ticket
+// without a request (a greeting, a test) is snoozed until the customer's next message (which reopens
+// it), so it waits for detail instead of escalating; once MAX_MESSAGES were seen it stays open. One
+// with a request stays open for a person (the support queue escalates it).
 // Jev's decision is recorded (without expiry) before it is applied, so a retry applies the same
 // decision without asking Jev again; it is applied to the conversation as it is after Jev answered,
 // so an assignee or topic label someone set meanwhile is kept. A customer message newer than those
@@ -49,6 +51,11 @@ export const UNCLEAR = "unclear";
 const UNCLEAR_CRITERION =
   "The message has no concrete request, mixes several of the other areas, concerns another product, or cannot be " +
   "assigned to exactly one of them.";
+/** With `snoozeUnclear`: whether the customer asked for anything yet. */
+const REQUEST_CRITERIA = {
+  request: "The customer asks a question, reports a problem, or asks for something, however briefly.",
+  none: "No request yet: a greeting, a test, or a few words without a question, problem, or ask.",
+};
 /** Jev's answer when no kind fits; also a reserved kind name. */
 const NO_KIND = "none";
 const NO_KIND_CRITERION = "None of the other kinds.";
@@ -91,6 +98,8 @@ const decisionSchema = z.object({
   topicConfidence: z.number(),
   kind: z.string().nullable().default(null),
   kindConfidence: z.number().default(0),
+  /** Jev is confident the customer asked for nothing yet (asked with `snoozeUnclear` only). */
+  noRequest: z.boolean().default(false),
   /** Customer messages the decision was made on. */
   messages: z.number().int(),
   /** The newest customer message Jev was given: a newer one makes the decision stale. */
@@ -299,6 +308,7 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
   const snooze =
     state === "waiting" &&
     routing.snoozeUnclear &&
+    decision.noRequest &&
     !(await wroteSince(chatwoot, accountId, conversationId, decision.lastMessageId));
   if (snooze) await chatwoot.setStatus(accountId, conversationId, { status: "snoozed" });
   store.set(key, JSON.stringify({ ...decision, state }));
@@ -315,6 +325,7 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     kind: decision.kind,
     kindConfidence: decision.kindConfidence,
     replied,
+    noRequest: decision.noRequest,
     snoozed: snooze,
     state,
   });
@@ -419,6 +430,13 @@ async function decide(
       criteria: routing.topics,
     };
   }
+  if (routing.snoozeUnclear) {
+    questions.request = {
+      type: "choice",
+      instructions: "Select whether the customer asks for anything in this support ticket, using only the ticket.",
+      criteria: REQUEST_CRITERIA,
+    };
+  }
   if (kinds) {
     questions.kind = {
       type: "choice",
@@ -453,6 +471,7 @@ async function decide(
   const owner = answer("owner");
   const topic = answer("topic");
   const kind = answer("kind");
+  const request = answer("request");
   return {
     owner: owner.choice === UNCLEAR ? null : owner.choice,
     ownerConfidence: owner.confidence,
@@ -460,6 +479,7 @@ async function decide(
     topicConfidence: topic.confidence,
     kind: kind.choice === NO_KIND ? null : kind.choice,
     kindConfidence: kind.confidence,
+    noRequest: request.choice === "none" && request.confidence >= routing.minConfidence,
     messages,
     lastMessageId,
     state: "pending",
@@ -474,6 +494,7 @@ function unassignable(): Decision {
     topicConfidence: 0,
     kind: null,
     kindConfidence: 0,
+    noRequest: false,
     messages: 0,
     lastMessageId: 0,
     state: "done",
