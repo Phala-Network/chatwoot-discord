@@ -45,7 +45,7 @@ describe("ticket menus", () => {
     const long = "l".repeat(101);
     const card = panel("### Acme #1", { assigneeId: null, labels: [long], status: "open" }, [], []);
     const menu = panelSelect(card, "panel:labels");
-    expect(menu?.placeholder).toMatch(/^🏷️ l+… \(\/label\)$/);
+    expect(menu?.placeholder).toMatch(/^🏷️ l+… \(in Chatwoot\)$/);
     expect(menu?.options.some((option) => option.default)).toBe(false);
   });
 

@@ -3,9 +3,9 @@
 // Requests (webhook events, deferred commands, sweeps) only write a job row and set an
 // alarm, so they return quickly. The alarm drains due jobs one at a time, which serializes work
 // per conversation (and globally), and yields to a fresh invocation before it would exceed the
-// per-invocation subrequest limit. Failed jobs back off (up to MAX_BACKOFF_MS) and retry until
-// they succeed, so an outage of any length loses no work; nothing depends on a single delivery
-// succeeding.
+// per-invocation subrequest limit. Commands run at most once; failed background jobs back off (up
+// to MAX_BACKOFF_MS) and retry until they succeed, so an outage of any length loses no background
+// work; nothing depends on a single delivery succeeding.
 
 import { DurableObject } from "cloudflare:workers";
 import {
@@ -66,8 +66,15 @@ const MIN_BUDGET = 2;
  * topic; checking again before a snooze (up to 3 pages); and the snooze.
  */
 const ROUTE_BUDGET = 14;
-/** Pages of conversations (25 each by default) a sweep run reads; a longer pass continues in the next run. */
-const SWEEP_PAGES = 10;
+/**
+ * Pages of conversations (25 each by default) a sweep job reads; a longer pass continues in the
+ * next job. One, so a command waiting runs between pages rather than after the whole pass.
+ */
+const SWEEP_PAGES = 1;
+/** Commands that change nothing in Chatwoot: their post needs no sync. */
+const READ_ONLY_ACTIONS: ReadonlySet<string> = new Set(["panel", "pick-assignee"]);
+/** A job that takes longer than this is logged, to tell a slow upstream from a busy queue. */
+const SLOW_JOB_MS = 5000;
 /** A sweep pass left unfinished this long (e.g. its account was removed) is started over. */
 const SWEEP_PASS_TTL_MS = 24 * 60 * 60 * 1000;
 /** Posts without a card a sweep queues at most, and how long before one is queued again. */
@@ -75,8 +82,8 @@ const CARD_BACKFILL_PER_SWEEP = 10;
 const CARD_BACKFILL_RETRY_MS = 24 * 60 * 60 * 1000;
 const sweepPassSchema = z.object({ cutoff: z.number(), page: z.number().int().positive(), startedAt: z.number() });
 /**
- * The longest wait between retries of a failing job. A job is never dropped: its log turns from
- * warnings into errors after a few attempts, and it keeps retrying at this pace.
+ * The longest wait between retries of a failing background job: its log turns from warnings into
+ * errors after a few attempts, and it keeps retrying at this pace.
  */
 const MAX_BACKOFF_MS = 30 * 60 * 1000;
 /** Stop draining and continue in a new invocation after this long (alarms may run 15 minutes). */
@@ -192,7 +199,10 @@ export class Hub extends DurableObject<Env> {
         yielded = true;
         break;
       }
+      const jobStarted = Date.now();
       const outcome = await this.run(job, payload, services);
+      const ms = Date.now() - jobStarted;
+      if (ms > SLOW_JOB_MS) log.warn("slow job", { job: job.key, ms });
       if (outcome === "yield") {
         this.store.deferJob(job);
         yielded = true;
@@ -215,6 +225,9 @@ export class Hub extends DurableObject<Env> {
             });
             await respond(services.rest, payload.job, EXPIRED);
             return "done";
+          }
+          if (Date.now() - job.createdAt > SLOW_JOB_MS) {
+            log.warn("command waited", { interactionId: payload.job.interactionId, ms: Date.now() - job.createdAt });
           }
           await this.runCommand(payload.job, services);
           return "done";
@@ -288,7 +301,7 @@ export class Hub extends DurableObject<Env> {
     if (conversationGone)
       this.enqueue({ type: "conversation", accountId: job.accountId, conversationId: job.conversationId });
     await respond(services.rest, job, content, components);
-    if (!conversationGone) await this.syncAfterCommand(job, services);
+    if (!conversationGone && !READ_ONLY_ACTIONS.has(job.action.type)) await this.syncAfterCommand(job, services);
   }
 
   /**
@@ -314,10 +327,11 @@ export class Hub extends DurableObject<Env> {
    * differ) and queues them. Covers webhooks that were never delivered and service downtime.
    * A pass reads conversations newest activity first, down to the start of its window (since the
    * previous pass started, at least `lookbackSeconds`, at most `maxCatchUpSeconds`), SWEEP_PAGES
-   * pages per run, continuing where it stopped until it is done. Activity means a new message
+   * pages per job, continuing where it stopped until it is done. Activity means a new message
    * (Chatwoot's `last_activity_at`); a change that creates none, such as only a custom
    * attribute, relies on its webhook. It also queues routing for open, unassigned conversations
-   * of a routed account that are not routed yet, and posts still without a card (backfillCards).
+   * of a routed account that are not routed yet, and, once a pass, posts still without a card
+   * (backfillCards).
    */
   private async sweep(accountId: number, { settings, chatwoot, relay }: ProcessorContext): Promise<void> {
     const lastKey = `sweep:${accountId}:last`;
@@ -362,7 +376,7 @@ export class Hub extends DurableObject<Env> {
         }
       }
     }
-    queued += this.backfillCards(accountId);
+    if (pass.page === 1) queued += this.backfillCards(accountId);
     if (reachedCutoff) {
       // The next pass covers everything active since this one started, so activity while it ran
       // (which reorders the list) is read again.

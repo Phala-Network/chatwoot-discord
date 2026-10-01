@@ -157,7 +157,8 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
           content: action.content,
           private: action.private,
           files,
-          sendAsAgent: action.sendAsAgent === true,
+          // Only a Chatwoot build that reads it sends from the agent's address.
+          sendAsAgent: settings.config.chatwoot.sendAsAgent && action.sendAsAgent === true,
         });
         // Customers see an agent's display name (`available_name`).
         message = action.private ? "Note added." : `Sent to the customer as ${profile.available_name || profile.name}.`;

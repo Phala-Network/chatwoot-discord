@@ -26,8 +26,12 @@ const profile = on("GET", `${cw}/profile`, () =>
 const ok = (method: string, path: string) => on(method, path, () => json({}));
 
 function run(action: CommandAction, ...routes: Route[]) {
+  return runWith(settings, action, ...routes);
+}
+
+function runWith(given: typeof settings, action: CommandAction, ...routes: Route[]) {
   const mock = mockFetch(profile, ...routes);
-  const outcome = executeCommand(job(action), settings, (request) => fetch(request));
+  const outcome = executeCommand(job(action), given, (request) => fetch(request));
   return { outcome, result: outcome.then(({ content }) => content), requests: mock.requests };
 }
 
@@ -159,8 +163,21 @@ describe("executeCommand", () => {
     });
   });
 
-  it("asks Chatwoot to send a reply from the agent's own address, with or without files", async () => {
-    const { result, requests } = run(
+  it("asks a Chatwoot build that can to send a reply from the agent's own address, with or without files", async () => {
+    const sendingAsAgent = testSettings({ chatwoot: { baseUrl: "https://chatwoot.example.com", sendAsAgent: true } });
+    const stock = run(
+      { type: "message", private: false, content: "Hi", files: [], sendAsAgent: true },
+      on("GET", conversation, () =>
+        json({ id: 15, status: "open", meta: { channel: "Channel::Email", assignee: { id: 42 } } }),
+      ),
+      ok("POST", `${conversation}/messages`),
+    );
+    await stock.result;
+    expect(JSON.parse(stock.requests.at(-1)?.body ?? "")).not.toHaveProperty("content_attributes");
+    vi.restoreAllMocks();
+
+    const { result, requests } = runWith(
+      sendingAsAgent,
       { type: "message", private: false, content: "Hi", files: [], sendAsAgent: true },
       on("GET", conversation, () =>
         json({ id: 15, status: "open", meta: { channel: "Channel::Email", assignee: { id: 42 } } }),
@@ -170,7 +187,8 @@ describe("executeCommand", () => {
     expect(await result).toBe("✅ Sent to the customer as Alice.");
     expect(JSON.parse(requests.at(-1)?.body ?? "")).toMatchObject({ content_attributes: { send_as_agent: true } });
 
-    const withFile = run(
+    const withFile = runWith(
+      sendingAsAgent,
       {
         type: "message",
         private: false,

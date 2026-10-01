@@ -23,6 +23,7 @@ import {
   type ChatwootClient,
   type ChatwootMessage,
   type Fetch,
+  MESSAGE_PAGE_SIZE,
   messageContent,
   toRelayConversation,
 } from "./chatwoot/api.ts";
@@ -204,8 +205,7 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
   });
 }
 
-/** Chatwoot's page of messages after an id (MessageFinder at v4.18.0), and how many are read. */
-const MESSAGES_PER_PAGE = 100;
+/** Pages of messages (MESSAGE_PAGE_SIZE each) read for a customer's messages. */
 const PAGES = 3;
 
 /**
@@ -226,7 +226,7 @@ async function customerMessages(
     const messages = await chatwoot.listMessages(accountId, conversationId, after);
     found.push(...messages.filter((message) => message.message_type === 0 && !message.private));
     const last = messages.at(-1);
-    if (!last || messages.length < MESSAGES_PER_PAGE) return { messages: found.slice(0, limit), complete: true };
+    if (!last || messages.length < MESSAGE_PAGE_SIZE) return { messages: found.slice(0, limit), complete: true };
     after = last.id;
   }
   return { messages: found.slice(0, limit), complete: found.length >= limit };

@@ -254,7 +254,7 @@ export function panel(
       .map((label) => option(label, label, "🏷️", label === current)),
   ].slice(0, MAX_OPTIONS);
   const unlisted = current !== undefined && current.length > MAX_OPTION_TEXT;
-  const labelPlaceholder = unlisted ? `🏷️ ${Array.from(current).slice(0, 80).join("")}… (/label)` : "🏷️ No label";
+  const labelPlaceholder = unlisted ? `🏷️ ${Array.from(current).slice(0, 80).join("")}… (in Chatwoot)` : "🏷️ No label";
   const statuses = STATUSES.map(([status, value, name, emoji]) =>
     button(
       `${PANEL.status}:${value}`,
