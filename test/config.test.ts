@@ -147,4 +147,13 @@ describe("loadSettings", () => {
     await expect(loadSettings({ ...stored, CONFIG_KEY: "config-missing" })).rejects.toThrow(/not in CONFIG_STORE/);
     await expect(loadSettings({ ...env, CONFIG_KEY: "config-test" })).rejects.toThrow(/either CONFIG or CONFIG_KEY/);
   });
+
+  it("reads again after a failed read", async () => {
+    const { CONFIG, ...stored } = env;
+    const settingsEnv = { ...stored, CONFIG_KEY: "config-later" };
+    await expect(loadSettings(settingsEnv)).rejects.toThrow(/not in CONFIG_STORE/);
+
+    await env.CONFIG_STORE?.put("config-later", JSON.stringify(CONFIG));
+    expect((await loadSettings(settingsEnv)).config.accounts).toHaveLength(2);
+  });
 });

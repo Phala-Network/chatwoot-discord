@@ -10,8 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - A configuration larger than the 5 KB a Worker var holds can live in a KV namespace bound as
-  `CONFIG_STORE`: `npm run store-config -- <file>` validates it (JSON with comments), stores it
-  under a key derived from its content, and prints the key to deploy with as `CONFIG_KEY`.
+  `CONFIG_STORE`, under the key in the `CONFIG_KEY` var. `storedConfig` (scripts/stored-config.ts)
+  validates a configuration file (JSON with comments) and derives its key from its content, for a
+  deployment's `cloudflare.config.ts`; `npm run store-config` stores it with the Cloudflare CLI
+  (`cf`, now a dev dependency).
+
 
 ### Changed
 

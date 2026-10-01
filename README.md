@@ -336,17 +336,31 @@ replace.
 
 A var holds at most 5 KB ([Workers limits](https://developers.cloudflare.com/workers/platform/limits/)).
 A larger configuration goes in a [KV namespace](https://developers.cloudflare.com/kv/) bound as
-`CONFIG_STORE` instead: write it, as JSON with comments, in a file of its own (not under `vars`),
-then deploy with the key `npm run store-config` prints for it:
+`CONFIG_STORE`, and is deployed with the [Cloudflare CLI](https://developers.cloudflare.com/cf/)
+(`cf`, in beta; a dev dependency here). Write the configuration, as JSON with comments, in a file
+of its own, and in `cloudflare.config.ts` (see
+[Migrate a Wrangler project](https://developers.cloudflare.com/cf/wrangler/migrate/)) bind the
+namespace and the configuration's key instead of `CONFIG`:
 
-```sh
-npx wrangler kv namespace create CONFIG_STORE   # once; add the binding it prints to wrangler.jsonc
-key=$(npm run -s store-config -- config.jsonc) && npx wrangler deploy --var "CONFIG_KEY:$key"
+```ts
+import { storedConfig } from "./scripts/stored-config.ts";
+// …
+env: {
+  CONFIG_STORE: bindings.kv({ id: "<namespace id>" }),
+  CONFIG_KEY: bindings.text(storedConfig("config.jsonc").key),
+},
 ```
 
-`store-config` validates the file and stores it under a key derived from its content, so each
-deployed version keeps reading the configuration it was deployed with, also after a rollback.
-Set `CONFIG` or `CONFIG_KEY`, not both.
+Then store the configuration before deploying:
+
+```sh
+npx cf kv namespaces create --title chatwoot-discord-config   # once
+npm run -s store-config -- config.jsonc --namespace-id <namespace id> && npx cf deploy
+```
+
+Both validate the file. Its key is derived from its content, so each version reads the configuration
+it was deployed with, also after a rollback (stored keys are kept). KV is eventually consistent: a
+read that fails is retried with the next request. Set `CONFIG` or `CONFIG_KEY`, not both.
 
 | Key | Type and constraints | Default | Meaning |
 |---|---|---|---|

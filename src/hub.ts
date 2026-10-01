@@ -68,7 +68,7 @@ const MIN_BUDGET = 2;
  * snooze (up to 3 pages); and the snooze (a kind that sets the status takes that instead of the
  * assignment and what follows).
  */
-const ROUTE_BUDGET = 15;
+const ROUTE_BUDGET = 16;
 /**
  * Pages of conversations (25 each by default) a sweep job reads; a longer pass continues in the
  * next job. One, so a command waiting runs between pages rather than after the whole pass.

@@ -31,7 +31,7 @@ app.get("/healthz", async (c) => {
     await loadSettings(c.env);
     return c.json({ ok: true });
   } catch (error) {
-    if (error instanceof ConfigError) log.error("configuration invalid", errorFields(error));
+    log.error(error instanceof ConfigError ? "configuration invalid" : "configuration unavailable", errorFields(error));
     return c.json({ ok: false }, 503);
   }
 });
@@ -107,6 +107,8 @@ app.post("/triage/answered", bodyLimit({ maxSize: 64 * 1024 }), async (c) => {
 });
 
 app.post("/discord/interactions", bodyLimit({ maxSize: 1024 * 1024 }), async (c) => {
+  // Discord waits 3 s for the reply editor, counted from the interaction: one deadline for all of it.
+  const deadline = AbortSignal.timeout(DRAFT_DEADLINE_MS);
   const settings = await loadSettings(c.env);
   const signature = c.req.header("x-signature-ed25519");
   const timestamp = c.req.header("x-signature-timestamp");
@@ -125,7 +127,6 @@ app.post("/discord/interactions", bodyLimit({ maxSize: 1024 * 1024 }), async (c)
     return c.text("bad request", 400);
   }
 
-  const deadline = AbortSignal.timeout(DRAFT_DEADLINE_MS);
   const stub = hub(c.env);
   try {
     const result = await handleInteraction(interaction, {
@@ -134,7 +135,6 @@ app.post("/discord/interactions", bodyLimit({ maxSize: 1024 * 1024 }), async (c)
       draftOf: async (threadId, answerId) => {
         const kept = await stub.answerDraft(answerId);
         if (kept !== null) return { text: kept };
-        // Discord waits 3 s for the editor, counted from the interaction: one deadline for all of it.
         const rest = new DiscordRest(settings.secrets.DISCORD_BOT_TOKEN, (request) =>
           fetch(request, { signal: deadline }),
         );
