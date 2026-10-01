@@ -332,7 +332,21 @@ while the conversation is resolved.
 
 Non-secret settings live in the `CONFIG` var in `wrangler.jsonc`, validated at startup; an
 unknown key (for example a typo) makes it invalid. The committed values are placeholders to
-replace:
+replace.
+
+A var holds at most 5 KB ([Workers limits](https://developers.cloudflare.com/workers/platform/limits/)).
+A larger configuration goes in a [KV namespace](https://developers.cloudflare.com/kv/) bound as
+`CONFIG_STORE` instead: write it, as JSON with comments, in a file of its own (not under `vars`),
+then deploy with the key `npm run store-config` prints for it:
+
+```sh
+npx wrangler kv namespace create CONFIG_STORE   # once; add the binding it prints to wrangler.jsonc
+key=$(npm run -s store-config -- config.jsonc) && npx wrangler deploy --var "CONFIG_KEY:$key"
+```
+
+`store-config` validates the file and stores it under a key derived from its content, so each
+deployed version keeps reading the configuration it was deployed with, also after a rollback.
+Set `CONFIG` or `CONFIG_KEY`, not both.
 
 | Key | Type and constraints | Default | Meaning |
 |---|---|---|---|
@@ -374,8 +388,8 @@ replace:
 | `routing.topics` | object: label → what it covers | unset | Topic labels (Chatwoot label names, lower case) Jev chooses from; one is added when a ticket has no label other than its kinds (an automation rule's label is kept alone). Show them as forum tags with `label:<label>` keys in `forumTags`. Unset: no topic. |
 | `routing.kinds` | object: account id → (kind name → kind) | unset | Kinds of ticket Jev recognizes in routed accounts, added as labels beside the topic, and what is done once when it does ([routing](#routing)). Kind names are the account's label names (1–40 lower-case letters, digits, `_`, or `-`); `none` is reserved. Unset: none. |
 | `routing.kinds.<id>.<name>.covers` | 1–1000 characters | required | What the kind is: Jev's criterion for recognizing it. |
-| `routing.kinds.<id>.<name>.reply` | 1–4000 characters | unset | Sent to the customer once, by the account's agent bot (`CHATWOOT_BOT_TOKENS`). |
-| `routing.kinds.<id>.<name>.status` | `resolved` or `snoozed` | unset | Set instead of routing the ticket (`snoozed`: until the customer's next message); a new customer message reopens it. Not with `reply`. |
+| `routing.kinds.<id>.<name>.cannedResponse` | short code | unset | The account's Chatwoot canned response sent to the customer once, by the account's agent bot (`CHATWOOT_BOT_TOKENS`); none while it does not exist. |
+| `routing.kinds.<id>.<name>.status` | `resolved` or `snoozed` | unset | Set instead of routing the ticket (`snoozed`: until the customer's next message); a new customer message reopens it. Not with `cannedResponse`. |
 | `reconcile.lookbackSeconds` | integer ≥ 60 | `3600` | Minimum sweep window (conversations with activity within it are checked). Messages older than this are relayed without notifications. |
 | `reconcile.maxCatchUpSeconds` | integer ≥ 60 | `604800` (7 days) | Maximum sweep window after downtime. |
 | `attachments.maxFiles` | integer 0–10 | `10` | Files per `/reply` or `/note` (0 hides the editor's upload field). |
@@ -441,8 +455,11 @@ labels of a second family: a ticket has one topic label, the category, and a kin
 about is added beside it (create each kind as a label in its account; it needs no forum tag, and
 the card shows it). It also acts with the decision: a kind with a `status` (spam, for example) sets the
 ticket aside, resolved or snoozed until the customer's next message, instead of routing it; the
-contact is not blocked, so a new message reopens the ticket as usual. A kind with a `reply` sends that fixed text to the customer, for
-example to acknowledge an application or point a security report to its process, as the account's
+contact is not blocked, so a new message reopens the ticket as usual. A kind with a `cannedResponse` sends that
+Chatwoot canned response (Settings → Canned Responses, by its short code) to the customer, for
+example to acknowledge an application or point a security report to its process. It is read when
+it is sent, so it is edited in Chatwoot, can use Chatwoot's variables such as `{{contact.name}}`,
+and nothing is sent while it does not exist. It is sent as the account's
 Chatwoot agent bot (`CHATWOOT_BOT_TOKENS`): customers see the bot's name, such as "Acme Support"; a
 bot's message assigns nobody and is no human first reply, and Chatwoot then counts the customer as
 answered (no longer waiting) until they write again. Create the bot in the account (Settings →
@@ -462,7 +479,7 @@ subject) are Chatwoot's automation rules.
   "kinds": {
     "1": {
       "spam": { "covers": "Unsolicited promotion or scams.", "status": "resolved" },
-      "startup-program": { "covers": "A Startup Program application.", "reply": "Thanks for applying! …" }
+      "startup-program": { "covers": "A Startup Program application.", "cannedResponse": "startup-program" }
     }
   }
 }

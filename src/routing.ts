@@ -22,10 +22,10 @@
 // about is added as a label beside the ticket's one topic label (kinds are labels too, of another
 // family: a topic is a category, a kind may act), and acts with the decision: `status` sets the
 // ticket aside (resolved, or snoozed until the customer's next message, either of which that message
-// reopens) instead of routing it; `reply` sends a fixed reply as the account's Chatwoot agent bot,
-// under its own name, which assigns nobody and is no human first reply. A reply is sent at most once
-// per ticket: it is recorded before it is sent, so a failed send is not retried, and a reply is never
-// repeated.
+// reopens) instead of routing it; `cannedResponse` sends that Chatwoot canned response, read when
+// it is sent (none while it does not exist), as the account's Chatwoot agent bot, under its own name,
+// which assigns nobody and is no human first reply. A reply is sent at most once per ticket: it is
+// recorded before it is sent, so a failed send is not retried, and a reply is never repeated.
 
 import { z } from "zod";
 import {
@@ -230,8 +230,9 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
   const labels = withKind(topic === null ? current.labels : [...current.labels, topic]);
   if (labels !== current.labels) await chatwoot.setLabels(accountId, conversationId, labels);
 
-  const reply = store.get(replyKey(accountId, conversationId)) === undefined ? kind?.reply : undefined;
+  const shortCode = store.get(replyKey(accountId, conversationId)) === undefined ? kind?.cannedResponse : undefined;
   const botToken = settings.botToken(accountId);
+  const reply = shortCode !== undefined && botToken ? await chatwoot.cannedResponse(accountId, shortCode) : undefined;
   if (reply !== undefined && botToken) {
     store.set(replyKey(accountId, conversationId), decision.kind ?? "");
     const bot = chatwootClient(settings.config.chatwoot.baseUrl, botToken, ctx.fetch);
@@ -260,7 +261,7 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     topicSet: topic !== null,
     kind: decision.kind,
     kindConfidence: decision.kindConfidence,
-    replied: reply !== undefined && botToken !== undefined,
+    replied: reply !== undefined,
     snoozed: snooze,
     state,
   });

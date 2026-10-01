@@ -74,6 +74,12 @@ function world(
       return json({});
     }),
     on("POST", `${CW}/labels`, () => json({})),
+    on("GET", "chatwoot.example.com/api/v1/accounts/1/canned_responses", () =>
+      json([
+        { id: 1, short_code: "startup", content: "Hello" },
+        { id: 2, short_code: "startup-program", content: "Thanks for applying!" },
+      ]),
+    ),
     on("POST", `${CW}/messages`, () => {
       if ((ticket.failReply ?? 0) > 0) {
         ticket.failReply = (ticket.failReply ?? 0) - 1;
@@ -371,7 +377,8 @@ describe("routeConversation with kinds", () => {
     ...ROUTING,
     kinds: {
       "1": {
-        "startup-program": { covers: "A Startup Program application.", reply: "Thanks for applying!" },
+        "startup-program": { covers: "A Startup Program application.", cannedResponse: "startup-program" },
+        security: { covers: "A security report.", cannedResponse: "security-report" },
         spam: { covers: "Spam.", status: "resolved" },
       },
     },
@@ -400,6 +407,17 @@ describe("routeConversation with kinds", () => {
     const unsure = world({}, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["startup-program", 0.5] });
     await routeConversation(context(new MapStore(), KINDS), 1, 5);
     expect(replies(unsure.requests)).toEqual([]);
+  });
+
+  it("sends no reply while the kind's canned response does not exist", async () => {
+    const { requests } = world({}, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["security", 1] });
+
+    await routeConversation(context(new MapStore(), KINDS), 1, 5);
+
+    expect(replies(requests)).toEqual([]);
+    expect(sent(requests, "POST", `${CW}/labels`).map((r) => JSON.parse(r.body))).toEqual([
+      { labels: ["billing", "security"] },
+    ]);
   });
 
   it("adds the topic to a ticket whose only labels are kinds", async () => {

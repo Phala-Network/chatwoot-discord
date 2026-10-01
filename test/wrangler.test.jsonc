@@ -10,6 +10,7 @@
     "bindings": [{ "name": "HUB", "class_name": "Hub" }]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }],
+  "kv_namespaces": [{ "binding": "CONFIG_STORE", "id": "config-store" }],
   "vars": {
     "CONFIG": {
       "chatwoot": { "baseUrl": "https://chatwoot.example.com" },

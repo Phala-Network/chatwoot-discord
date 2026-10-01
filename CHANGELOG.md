@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A configuration larger than the 5 KB a Worker var holds can live in a KV namespace bound as
+  `CONFIG_STORE`: `npm run store-config -- <file>` validates it (JSON with comments), stores it
+  under a key derived from its content, and prints the key to deploy with as `CONFIG_KEY`.
+
+### Changed
+
+- **Breaking:** a routing kind replies with a Chatwoot canned response, `cannedResponse: "<short
+  code>"`, instead of a fixed `reply` text: it is edited in Chatwoot, can use Chatwoot's variables,
+  and nothing is sent while it does not exist.
+
 ## [0.21.0] - 2026-09-30
 
 ### Added
