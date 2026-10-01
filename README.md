@@ -404,7 +404,7 @@ read that fails is retried with the next request. Set `CONFIG` or `CONFIG_KEY`, 
 | `routing.kinds` | object: account id → (kind name → kind) | unset | Kinds of ticket Jev recognizes in routed accounts, added as labels beside the topic, and what is done once when it does ([routing](#routing)). Kind names are the account's label names (1–40 lower-case letters, digits, `_`, or `-`); `none` is reserved. Unset: none. |
 | `routing.kinds.<id>.<name>.covers` | 1–1000 characters | required | What the kind is: Jev's criterion for recognizing it. |
 | `routing.kinds.<id>.<name>.cannedResponse` | short code | unset | The account's Chatwoot canned response sent to the customer once, by the account's agent bot (`CHATWOOT_BOT_TOKENS`); none while it does not exist. |
-| `routing.kinds.<id>.<name>.status` | `resolved` or `snoozed` | unset | Set instead of routing the ticket (`snoozed`: until the customer's next message); a new customer message reopens it. Not with `cannedResponse`. |
+| `routing.kinds.<id>.<name>.status` | `resolved` or `snoozed` | unset | Set instead of routing the ticket (`snoozed`: until the customer's next message), after the reply of a `cannedResponse`; a new customer message reopens it. |
 | `reconcile.lookbackSeconds` | integer ≥ 60 | `3600` | Minimum sweep window (conversations with activity within it are checked). Messages older than this are relayed without notifications. |
 | `reconcile.maxCatchUpSeconds` | integer ≥ 60 | `604800` (7 days) | Maximum sweep window after downtime. |
 | `attachments.maxFiles` | integer 0–10 | `10` | Files per `/reply` or `/note` (0 hides the editor's upload field). |
@@ -472,7 +472,8 @@ the card shows it). It also acts with the decision: a kind with a `status` (spam
 ticket aside, resolved or snoozed until the customer's next message, instead of routing it; the
 contact is not blocked, so a new message reopens the ticket as usual. A kind with a `cannedResponse` sends that
 Chatwoot canned response (Settings → Canned Responses, by its short code) to the customer, for
-example to acknowledge an application or point a security report to its process. It is read when
+example to acknowledge an application or point a security report to its process; a kind with both
+replies, then sets the ticket aside (a templated security report: acknowledged, then resolved). It is read when
 it is sent, so it is edited in Chatwoot, can use Chatwoot's variables such as `{{contact.name}}`,
 and nothing is sent while it does not exist. It is sent as the account's
 Chatwoot agent bot (`CHATWOOT_BOT_TOKENS`): customers see the bot's name, such as "Acme Support"; a

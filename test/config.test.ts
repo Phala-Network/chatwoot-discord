@@ -84,7 +84,7 @@ describe("configuration", () => {
     const kinds = (given: Record<string, unknown>) =>
       configSchema.safeParse({ ...minimal, routing: { accounts: { "1": owners }, kinds: given } });
     expect(kinds({ "1": { spam: { covers: "Spam.", status: "resolved" } } }).success).toBe(true);
-    expect(kinds({ "1": { spam: { covers: "Spam.", status: "resolved", cannedResponse: "hi" } } }).success).toBe(false);
+    expect(kinds({ "1": { spam: { covers: "Spam.", status: "resolved", cannedResponse: "hi" } } }).success).toBe(true);
     expect(kinds({ "1": { spam: { covers: "Spam.", status: "pending" } } }).success).toBe(false);
     expect(kinds({ "1": { none: { covers: "Nothing." } } }).success).toBe(false);
     // Kinds and topics are labels of two families: no name in both.
