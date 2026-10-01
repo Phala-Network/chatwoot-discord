@@ -53,8 +53,12 @@ const UNCLEAR_CRITERION =
   "assigned to exactly one of them.";
 /** With `snoozeUnclear`: whether the customer asked for anything yet. */
 const REQUEST_CRITERIA = {
-  request: "The customer asks a question, reports a problem, or asks for something, however briefly.",
-  none: "No request yet: a greeting, a test, or a few words without a question, problem, or ask.",
+  request:
+    "The customer asks for support, information, or an action: a question about a product or service, a problem, " +
+    "or something to do, however briefly.",
+  none:
+    'No request yet: a greeting or a check that someone is there (such as "hi" or "hello, anyone there?"), a test, ' +
+    "a name or contact details alone, or a few words that ask for nothing.",
 };
 /** Jev's answer when no kind fits; also a reserved kind name. */
 const NO_KIND = "none";

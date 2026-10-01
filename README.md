@@ -442,9 +442,10 @@ messages; tickets beyond that are counted at the end.
 ### Routing
 
 With `routing`, each new ticket of a routed account is routed when it is open, has no assignee, and
-has a customer message. The Worker asks Jev two multiple-choice questions, who owns the ticket (one
-of the account's owners, or `unclear`) and its topic, using the email subject and the first three
-customer messages. Before they leave the Worker, emails, URLs, hex and base58 addresses, long
+has a customer message. The Worker asks Jev multiple-choice questions, who owns the ticket (one
+of the account's owners, or `unclear`) and its topic (with `topics`), plus its kind (with `kinds`)
+and whether the customer asks for anything yet (with `snoozeUnclear`), using the email subject and
+the first three customer messages. Before they leave the Worker, emails, URLs, hex and base58 addresses, long
 tokens, phone numbers, IP addresses, @handles, and the contact's name are replaced with
 `[REDACTED]`. This is best-effort redaction of common identifiers, not anonymization: other personal
 details in the text still reach TypeSafe, so check that its data policy suits you. An owner at
@@ -452,10 +453,11 @@ details in the text still reach TypeSafe, so check that its data policy suits yo
 has no label other than its kinds (a ticket has one topic label, so one an automation rule set stays alone). When no owner
 is clear, Jev is asked again each time the customer adds a message, until one is or three customer
 messages were seen; the ticket then stays for a person. With `snoozeUnclear`, Jev is also asked
-whether the customer asked for anything yet: a ticket without a clear owner and without a request (a
-greeting, a test, a name alone) is snoozed until the customer's next message, which reopens it and
+whether the customer asks for support, information, or an action yet: a ticket without a clear owner
+for which Jev is at least `minConfidence` sure there is no request (a greeting, a test, a name alone)
+is snoozed until the customer's next message, which reopens it and
 asks Jev again, so it waits for detail instead of escalating; after the third message it stays open.
-One with a request (a question no owner covers) stays open for a person. A ticket the customer
+Any other (a request no owner covers, or Jev unsure) stays open for a person. A ticket the customer
 wrote to after the messages Jev was given is not snoozed (a message in the moment between that
 check and the snooze waits for the customer's next one; the support queue lists the ticket
 meanwhile). Customer messages are looked for among the next 300 messages (notes and activity lines count
