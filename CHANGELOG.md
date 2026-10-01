@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-09-30
+
 ### Fixed
 
 - A change made with a button or command shows on the post's card and tags at once, instead of
@@ -447,7 +449,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-invocation subrequest budget, and a cron reconciliation sweep for missed webhooks.
 - Verification of Chatwoot webhook HMAC signatures and Discord Ed25519 interaction signatures.
 
-[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.19.1...HEAD
+[0.19.1]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.18.1...v0.19.0
 [0.18.1]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.17.0...v0.18.0
