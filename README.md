@@ -374,7 +374,7 @@ replace:
 | `routing.kinds` | object: account id → (kind name → kind) | unset | Kinds of ticket Jev recognizes in routed accounts, and what is done once when it does ([routing](#routing)). Kind names are 1–40 lower-case letters, digits, `_`, or `-`; `none` is reserved. Unset: none. |
 | `routing.kinds.<id>.<name>.covers` | 1–1000 characters | required | What the kind is: Jev's criterion for recognizing it. |
 | `routing.kinds.<id>.<name>.reply` | 1–4000 characters | unset | Sent to the customer once, after the ticket has an owner. |
-| `routing.kinds.<id>.<name>.block` | boolean | `false` | Resolve the ticket and block its contact (as `/block`) instead of routing it; not with `reply`. |
+| `routing.kinds.<id>.<name>.status` | `resolved` or `snoozed` | unset | Set instead of routing the ticket (`snoozed`: until the customer's next message); a new customer message reopens it. Not with `reply`. |
 | `reconcile.lookbackSeconds` | integer ≥ 60 | `3600` | Minimum sweep window (conversations with activity within it are checked). Messages older than this are relayed without notifications. |
 | `reconcile.maxCatchUpSeconds` | integer ≥ 60 | `604800` (7 days) | Maximum sweep window after downtime. |
 | `attachments.maxFiles` | integer 0–10 | `10` | Files per `/reply` or `/note` (0 hides the editor's upload field). |
@@ -435,8 +435,9 @@ assignment as made by that user. The sweep queues routing for open, unassigned t
 window, so a missed webhook only delays it.
 
 With `kinds`, Jev is also asked which of the account's kinds the ticket is (or `none`), and a kind
-it is confident about acts with the decision: a `block` kind (spam) resolves the ticket and blocks
-its contact instead of routing it; a kind with a `reply` sends that fixed text to the customer once
+it is confident about acts with the decision: a kind with a `status` (spam, for example) sets the
+ticket aside, resolved or snoozed until the customer's next message, instead of routing it; the
+contact is not blocked, so a new message reopens the ticket as usual. A kind with a `reply` sends that fixed text to the customer once
 the ticket has an owner (an unassigned ticket would become the relay user's, Chatwoot assigning a
 ticket to whoever replies), for example to acknowledge an application or point a security report
 to its process. A reply goes out at most once per ticket: it is recorded before it is sent, so a
@@ -454,7 +455,7 @@ subject) are Chatwoot's automation rules.
   "topics": { "technical-support": "Something does not work.", "billing": "Payments, invoices, refunds." },
   "kinds": {
     "1": {
-      "spam": { "covers": "Unsolicited promotion or scams.", "block": true },
+      "spam": { "covers": "Unsolicited promotion or scams.", "status": "resolved" },
       "startup-program": { "covers": "A Startup Program application.", "reply": "Thanks for applying! …" }
     }
   }

@@ -19,8 +19,9 @@
 // the customer's next message reopens the ticket; the support queue lists it meanwhile.)
 //
 // With `kinds`, Jev also tells which configured kind of ticket it is, if any. A kind Jev is confident
-// about acts with the decision: `block` resolves the ticket and blocks its contact instead of routing
-// it; `reply` sends a fixed reply once the ticket has an owner (Chatwoot assigns an unassigned ticket
+// about acts with the decision: `status` sets it aside (resolved, or snoozed until the customer's next
+// message, either of which that message reopens) instead of routing it; `reply` sends a fixed reply
+// once the ticket has an owner (Chatwoot assigns an unassigned ticket
 // to whoever replies). A reply is sent at most once per ticket: it is recorded before it is sent, so
 // a failed send is not retried, and a reply is never repeated.
 
@@ -162,7 +163,6 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     recorded?.state === "pending" && (await wroteSince(chatwoot, accountId, conversationId, recorded.lastMessageId));
   let decision = recorded?.state === "pending" && !stale ? recorded : undefined;
   let current = conversation;
-  let contactId = raw.meta?.sender?.id;
   if (!decision) {
     if (conversation.status !== "open") return; // Routed if it opens again unassigned.
     const { text, messages, lastMessageId } = await customerText(chatwoot, accountId, conversationId, [
@@ -177,7 +177,6 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     const now = await chatwoot.getConversation(accountId, conversationId);
     if (!now) return;
     current = toRelayConversation(conversationId, now);
-    contactId = now.meta?.sender?.id;
   }
 
   // Closed meanwhile (and nobody took it): keep the decision pending until it opens again.
@@ -187,17 +186,16 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     decision.kind !== null && decision.kindConfidence >= routing.minConfidence && Object.hasOwn(kinds, decision.kind)
       ? kinds[decision.kind]
       : undefined;
-  // Not a ticket someone took meanwhile; one without a contact to block is routed as any other.
-  if (kind?.block && !current.assignee && contactId != null) {
-    // As /block does; both steps are idempotent, so a retry completes them.
-    await chatwoot.setStatus(accountId, conversationId, { status: "resolved" });
-    await chatwoot.setContactBlocked(accountId, contactId, true);
+  // Not a ticket someone took meanwhile. Setting a status twice changes nothing, so a retry is safe.
+  if (kind?.status && !current.assignee) {
+    await chatwoot.setStatus(accountId, conversationId, { status: kind.status });
     store.set(key, JSON.stringify({ ...decision, state: "done" }));
-    log.info("ticket blocked as its kind", {
+    log.info("ticket set aside as its kind", {
       accountId,
       conversationId,
       kind: decision.kind,
       kindConfidence: decision.kindConfidence,
+      status: kind.status,
     });
     return;
   }

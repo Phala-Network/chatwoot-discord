@@ -79,7 +79,6 @@ function world(
       }
       return json({});
     }),
-    on("PUT", "chatwoot.example.com/api/v1/accounts/1/contacts/88", () => json({})),
     on("POST", `${CW}/toggle_status`, (request) => {
       if ((ticket.failSnooze ?? 0) > 0) {
         ticket.failSnooze = (ticket.failSnooze ?? 0) - 1;
@@ -364,7 +363,7 @@ describe("routeConversation with kinds", () => {
     kinds: {
       "1": {
         "startup-program": { covers: "A Startup Program application.", reply: "Thanks for applying!" },
-        spam: { covers: "Spam.", block: true },
+        spam: { covers: "Spam.", status: "resolved" },
       },
     },
   };
@@ -425,7 +424,7 @@ describe("routeConversation with kinds", () => {
     expect(replies(requests)).toHaveLength(1);
   });
 
-  it("blocks a spam ticket instead of routing it", async () => {
+  it("resolves a spam ticket instead of routing it, without blocking its contact", async () => {
     const { requests } = world({}, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["spam", 0.95] });
 
     await routeConversation(context(new MapStore(), KINDS), 1, 5);
@@ -433,17 +432,13 @@ describe("routeConversation with kinds", () => {
     expect(sent(requests, "POST", `${CW}/toggle_status`).map((r) => JSON.parse(r.body))).toEqual([
       { status: "resolved" },
     ]);
-    expect(
-      JSON.parse(sent(requests, "PUT", "chatwoot.example.com/api/v1/accounts/1/contacts/88")[0]?.body ?? ""),
-    ).toEqual({
-      blocked: true,
-    });
+    expect(sent(requests, "PUT", "chatwoot.example.com/api/v1/accounts/1/contacts/88")).toEqual([]);
     expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
     expect(sent(requests, "POST", `${CW}/labels`)).toEqual([]);
     expect(replies(requests)).toEqual([]);
   });
 
-  it("does not block a ticket someone took while Jev was answering", async () => {
+  it("does not set aside a ticket someone took while Jev was answering", async () => {
     const ticket: Ticket = {};
     const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["spam", 0.95] }, 0, () => {
       ticket.assignee = { id: 9, name: "Doyle" };
@@ -452,7 +447,6 @@ describe("routeConversation with kinds", () => {
     await routeConversation(context(new MapStore(), KINDS), 1, 5);
 
     expect(sent(requests, "POST", `${CW}/toggle_status`)).toEqual([]);
-    expect(sent(requests, "PUT", "chatwoot.example.com/api/v1/accounts/1/contacts/88")).toEqual([]);
   });
 });
 

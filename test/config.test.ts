@@ -81,11 +81,14 @@ describe("configuration", () => {
 
     const kinds = (given: Record<string, unknown>) =>
       configSchema.safeParse({ ...minimal, routing: { accounts: { "1": owners }, kinds: given } });
-    expect(kinds({ "1": { spam: { covers: "Spam.", block: true } } }).success).toBe(true);
-    expect(kinds({ "1": { spam: { covers: "Spam.", block: true, reply: "Hi" } } }).success).toBe(false);
+    expect(kinds({ "1": { spam: { covers: "Spam.", status: "resolved" } } }).success).toBe(true);
+    expect(kinds({ "1": { spam: { covers: "Spam.", status: "resolved", reply: "Hi" } } }).success).toBe(false);
+    expect(kinds({ "1": { spam: { covers: "Spam.", status: "pending" } } }).success).toBe(false);
     expect(kinds({ "1": { none: { covers: "Nothing." } } }).success).toBe(false);
     expect(
-      kinds({ "2": { spam: { covers: "Spam.", block: true } } }).error?.issues.map((issue) => issue.path.join(".")),
+      kinds({ "2": { spam: { covers: "Spam.", status: "resolved" } } }).error?.issues.map((issue) =>
+        issue.path.join("."),
+      ),
     ).toEqual(["routing.kinds"]);
 
     const secrets = (extra: Record<string, string> = {}) =>

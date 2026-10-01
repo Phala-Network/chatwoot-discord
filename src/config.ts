@@ -165,10 +165,13 @@ export const configSchema = z
                   covers: z.string().min(1).max(1000),
                   /** Sent to the customer once the ticket has an owner. */
                   reply: z.string().trim().min(1).max(4000).optional(),
-                  /** Resolve the ticket and block its contact, as /block does, instead of routing it. */
-                  block: z.boolean().default(false),
+                  /**
+                   * Set instead of routing the ticket: `resolved`, or `snoozed` until the customer's
+                   * next message. A new message from the customer reopens either.
+                   */
+                  status: z.enum(["resolved", "snoozed"]).optional(),
                 })
-                .refine((kind) => !(kind.block && kind.reply), "a blocked contact gets no reply"),
+                .refine((kind) => !(kind.status && kind.reply), "a ticket set aside gets no reply"),
             ),
           )
           .optional(),

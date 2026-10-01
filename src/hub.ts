@@ -64,7 +64,7 @@ const MIN_BUDGET = 2;
  * Reading the conversation; for a decision not applied yet, whether the customer wrote since (up
  * to 3 pages); the messages; asking Jev; reading the conversation again; assigning; setting the
  * topic; a kind's reply; checking again before a snooze (up to 3 pages); and the snooze (a kind that
- * blocks takes the resolve and the block instead of the assignment and what follows).
+ * sets the status takes that instead of the assignment and what follows).
  */
 const ROUTE_BUDGET = 15;
 /**
