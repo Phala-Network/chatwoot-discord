@@ -26,9 +26,10 @@
 // it is sent (none while it does not exist), as the account's Chatwoot agent bot, under its own name,
 // which assigns nobody and is no human first reply; a kind with both replies, then sets the ticket
 // aside (a reply to a junk report, for example). A reply is sent at most once per ticket: it is
-// recorded before it is sent, so a failed send is not retried, and a reply is never repeated. Once
-// it is sent, the customer messages it answers (those Jev was given) do not call the triage bot
-// (see answeredAutomatically): the Hub relays them after routing, unless routing fails or is late.
+// recorded before it is sent, so a failed send is not retried, and a reply is never repeated. Once a
+// kind replied or set the ticket aside, the customer messages it handled (those Jev was given) do not
+// call the triage bot (see handledAutomatically): the Hub relays them after routing, unless routing
+// fails or is late.
 
 import { z } from "zod";
 import {
@@ -126,26 +127,30 @@ function replyKey(accountId: number, conversationId: number): string {
   return `kind-reply:${accountId}:${conversationId}`;
 }
 
-/** Recorded once a kind's reply was sent: the id of the latest customer message it answers. */
-function answeredKey(accountId: number, conversationId: number): string {
-  return `kind-answered:${accountId}:${conversationId}`;
+/**
+ * Recorded once a kind's reply was sent or the ticket set aside: the id of the latest customer message
+ * the kind handled.
+ */
+function handledKey(accountId: number, conversationId: number): string {
+  return `kind-handled:${accountId}:${conversationId}`;
 }
 
-/** Whether a kind's reply answered customer message `messageId`. */
-export function answeredAutomatically(
+/** Whether a kind handled customer message `messageId` (replied to it or set its ticket aside). */
+export function handledAutomatically(
   store: RoutingStore,
   accountId: number,
   conversationId: number,
   messageId: number,
 ): boolean {
-  const answered = store.get(answeredKey(accountId, conversationId));
-  return answered !== undefined && messageId <= Number(answered);
+  const handled = store.get(handledKey(accountId, conversationId));
+  return handled !== undefined && messageId <= Number(handled);
 }
 
-/** Whether the account's routing kinds may reply to a ticket. */
-export function repliesAutomatically(settings: Settings, accountId: number): boolean {
+/** Whether the account's routing kinds may act on a ticket: reply to it or set it aside. */
+export function actsAutomatically(settings: Settings, accountId: number): boolean {
   const kinds = settings.config.routing?.kinds?.[String(accountId)] ?? {};
-  return settings.botToken(accountId) !== undefined && Object.values(kinds).some((kind) => kind.cannedResponse);
+  const replies = settings.botToken(accountId) !== undefined;
+  return Object.values(kinds).some((kind) => kind.status !== undefined || (replies && kind.cannedResponse));
 }
 
 /**
@@ -170,7 +175,7 @@ async function replyOnce(
   store.set(replyKey(accountId, conversationId), decision.kind ?? "");
   const bot = chatwootClient(settings.config.chatwoot.baseUrl, botToken, ctx.fetch);
   await bot.createMessage(accountId, conversationId, { content: reply, private: false, files: [] });
-  store.set(answeredKey(accountId, conversationId), String(decision.lastMessageId));
+  store.set(handledKey(accountId, conversationId), String(decision.lastMessageId));
   return true;
 }
 
@@ -253,6 +258,7 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     if (labels !== current.labels) await chatwoot.setLabels(accountId, conversationId, labels);
     const replied = await replyOnce(ctx, accountId, conversationId, decision, kind);
     if (current.status !== kind.status) await chatwoot.setStatus(accountId, conversationId, { status: kind.status });
+    store.set(handledKey(accountId, conversationId), String(decision.lastMessageId));
     store.set(key, JSON.stringify({ ...decision, state: "done" }));
     log.info("ticket set aside as its kind", {
       accountId,

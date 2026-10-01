@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { chatwootClient } from "../src/chatwoot/api.ts";
-import { answeredAutomatically, type RoutingStore, routeConversation, sanitize } from "../src/routing.ts";
+import {
+  actsAutomatically,
+  handledAutomatically,
+  type RoutingStore,
+  routeConversation,
+  sanitize,
+} from "../src/routing.ts";
 import { json, mockFetch, on, type Recorded, testSettings } from "./helpers.ts";
 
 const ROUTING = {
@@ -400,8 +406,8 @@ describe("routeConversation with kinds", () => {
     await routeConversation(context(store, KINDS), 1, 5);
     expect(replies(requests)).toEqual([{ content: "Thanks for applying!", message_type: "outgoing", private: false }]);
     // The customer message it answers calls no triage bot; a later one does.
-    expect(answeredAutomatically(store, 1, 5, 1)).toBe(true);
-    expect(answeredAutomatically(store, 1, 5, 3)).toBe(false);
+    expect(handledAutomatically(store, 1, 5, 1)).toBe(true);
+    expect(handledAutomatically(store, 1, 5, 3)).toBe(false);
     // The topic and the kind are labels of their own families.
     expect(sent(requests, "POST", `${CW}/labels`).map((r) => JSON.parse(r.body))).toEqual([
       { labels: ["billing", "startup-program"] },
@@ -421,7 +427,7 @@ describe("routeConversation with kinds", () => {
     await routeConversation(context(store, KINDS), 1, 5);
 
     expect(replies(requests)).toEqual([]);
-    expect(answeredAutomatically(store, 1, 5, 1)).toBe(false);
+    expect(handledAutomatically(store, 1, 5, 1)).toBe(false);
     expect(sent(requests, "POST", `${CW}/labels`).map((r) => JSON.parse(r.body))).toEqual([
       { labels: ["billing", "security"] },
     ]);
@@ -447,7 +453,7 @@ describe("routeConversation with kinds", () => {
 
     expect(replies(requests)).toHaveLength(1);
     // Not sent: the triage bot still answers the customer.
-    expect(answeredAutomatically(store, 1, 5, 1)).toBe(false);
+    expect(handledAutomatically(store, 1, 5, 1)).toBe(false);
   });
 
   it("replies as the account's agent bot, under its name, also before the ticket has an owner", async () => {
@@ -462,9 +468,10 @@ describe("routeConversation with kinds", () => {
   });
 
   it("resolves a spam ticket instead of routing it, without blocking its contact", async () => {
+    const store = new MapStore();
     const { requests } = world({}, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["spam", 0.95] });
 
-    await routeConversation(context(new MapStore(), KINDS), 1, 5);
+    await routeConversation(context(store, KINDS), 1, 5);
 
     expect(sent(requests, "POST", `${CW}/toggle_status`).map((r) => JSON.parse(r.body))).toEqual([
       { status: "resolved" },
@@ -474,6 +481,8 @@ describe("routeConversation with kinds", () => {
     // Its kind is a label; it gets no topic.
     expect(sent(requests, "POST", `${CW}/labels`).map((r) => JSON.parse(r.body))).toEqual([{ labels: ["spam"] }]);
     expect(replies(requests)).toEqual([]);
+    // The customer message it handled calls no triage bot.
+    expect(handledAutomatically(store, 1, 5, 1)).toBe(true);
   });
 
   it("replies to a ticket of a kind that sets it aside, then sets it aside, once", async () => {
@@ -494,7 +503,7 @@ describe("routeConversation with kinds", () => {
     expect(at("POST", "messages")).toBeLessThan(at("POST", "toggle_status"));
     expect(ticket.status).toBe("resolved");
     expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
-    expect(answeredAutomatically(store, 1, 5, 1)).toBe(true);
+    expect(handledAutomatically(store, 1, 5, 1)).toBe(true);
   });
 
   it("completes a set-aside whose status Chatwoot made but whose answer was lost, without setting it again", async () => {
@@ -519,6 +528,22 @@ describe("routeConversation with kinds", () => {
     await routeConversation(context(new MapStore(), KINDS), 1, 5);
 
     expect(sent(requests, "POST", `${CW}/toggle_status`)).toEqual([]);
+  });
+});
+
+describe("actsAutomatically", () => {
+  it("is true for an account whose kinds set tickets aside or reply with its agent bot", () => {
+    const settings = (kinds: object, bots: object) =>
+      testSettings(
+        { routing: { ...ROUTING, kinds: { "1": kinds } } },
+        { TYPESAFE_API_KEY: "ts-key", CHATWOOT_BOT_TOKENS: JSON.stringify(bots) },
+      );
+    expect(actsAutomatically(settings({ spam: { covers: "Spam.", status: "resolved" } }, {}), 1)).toBe(true);
+    expect(actsAutomatically(settings({ security: { covers: "S.", cannedResponse: "s" } }, { "1": "bot" }), 1)).toBe(
+      true,
+    );
+    expect(actsAutomatically(settings({ other: { covers: "Other." } }, {}), 1)).toBe(false);
+    expect(actsAutomatically(settings({ spam: { covers: "Spam.", status: "resolved" } }, {}), 2)).toBe(false);
   });
 });
 

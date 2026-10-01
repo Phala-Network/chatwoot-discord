@@ -32,7 +32,7 @@ import { RoutingPendingError } from "./relay/notify.ts";
 import { latestMessageId, type ProcessorContext, processConversation, relayFor } from "./relay/processor.ts";
 import { isUnknownCard } from "./relay/relay.ts";
 import { processMessageUpdate } from "./relay/updates.ts";
-import { awaitsRouting, repliesAutomatically, routeConversation, routesAccount } from "./routing.ts";
+import { actsAutomatically, awaitsRouting, routeConversation, routesAccount } from "./routing.ts";
 import { loadSettings } from "./settings.ts";
 import { type Job, Store } from "./store.ts";
 
@@ -440,11 +440,11 @@ export class Hub extends DurableObject<Env> {
       budget.fetch,
     );
     const forum = new DiscordForum(rest, this.store);
-    // A customer message waits for its conversation's routing, which may answer it with a kind's reply
-    // (then the triage bot is not called): while the route job is queued and has not failed, up to
-    // ROUTE_WAIT_MS after it was queued.
+    // A customer message waits for its conversation's routing, whose kind may handle it, replying or
+    // setting the ticket aside (then the triage bot is not called): while the route job is queued and
+    // has not failed, up to ROUTE_WAIT_MS after it was queued.
     const relay = relayFor(settings, forum, this.store, (accountId, conversationId) => {
-      if (!repliesAutomatically(settings, accountId)) return false;
+      if (!actsAutomatically(settings, accountId)) return false;
       const age = this.store.pendingJobAge(jobKey({ type: "route", accountId, conversationId }));
       return age !== undefined && age < ROUTE_WAIT_MS;
     });
