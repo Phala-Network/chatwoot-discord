@@ -270,7 +270,7 @@ while the conversation is resolved.
   `accounts[].inboxIds` when it is set. Messages from blocked contacts are not relayed.
 - Messages are posted through the forum webhook, so each shows its sender's name and avatar:
   customers (their https Chatwoot avatar, else `avatars.contact`), agents as `Name · Account`, agent
-  bots by their name and Chatwoot avatar (their own, else their inbox's; else `avatars.chatwoot`), and
+  bots by their name and https Chatwoot avatar (else `avatars.chatwoot`), and
   everything else as `Chatwoot` (`avatars.chatwoot`). Templates (greetings, CSAT) and messages
   with nothing to show are skipped.
 - An agent's replies and notes show the Discord avatar of the agent's linked Discord user

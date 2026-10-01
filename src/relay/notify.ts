@@ -120,14 +120,15 @@ export class Notifier {
     // Decided and counted once per message: a retry after a failed post repeats the decision.
     const decision = store.once(`triage:${account.id}:${message.id}`, () => {
       if (routingPending?.(account.id, conversation.id)) throw new RoutingPendingError();
-      if (handledAutomatically?.(account.id, conversation.id, message.id)) return "handled";
+      // Recorded as "answered" since v0.23, when only replies counted.
+      if (handledAutomatically?.(account.id, conversation.id, message.id)) return "answered";
       const hour = this.options.now().toISOString().slice(0, 13);
       const key = `${message.account.id}:${message.conversation.id}`;
       if (store.increment(`triage:${key}:${hour}`) > triage.perConversationPerHour) return "conversation";
       if (store.increment(`triage:${hour}`) > triage.perHour) return "hour";
       return "mention";
     });
-    if (decision === "handled") return { note: handledNote(triage) };
+    if (decision === "answered") return { note: handledNote(triage) };
     if (decision === "conversation") return { note: conversationBudgetNote(triage) };
     if (decision === "hour") return { note: hourlyBudgetNote(triage) };
     return { mention: triage.userId };

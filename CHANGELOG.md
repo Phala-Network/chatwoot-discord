@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A customer message a routing kind set aside (spam) does not call the triage bot either; the note
   says "handled automatically", and every account whose kinds act waits for routing before relaying.
-- An agent bot's messages (a routing kind's reply) show its Chatwoot avatar (its own, else its
-  inbox's) instead of the Chatwoot avatar.
+- An agent bot's messages (a routing kind's reply) show the bot's https avatar in Chatwoot (set it
+  in Settings → Bots) instead of the Chatwoot avatar.
 
 ## [0.24.0] - 2026-09-30
 

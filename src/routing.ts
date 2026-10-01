@@ -132,7 +132,8 @@ function replyKey(accountId: number, conversationId: number): string {
  * the kind handled.
  */
 function handledKey(accountId: number, conversationId: number): string {
-  return `kind-handled:${accountId}:${conversationId}`;
+  // Named for the replies it first recorded (v0.23): kept, so recorded values still count.
+  return `kind-answered:${accountId}:${conversationId}`;
 }
 
 /** Whether a kind handled customer message `messageId` (replied to it or set its ticket aside). */

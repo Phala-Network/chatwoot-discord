@@ -91,12 +91,12 @@ export interface Avatars {
 /**
  * A customer's own https avatar or the contact default. An agent's message shows the linked
  * agent's Discord avatar, else the agent's own https avatar in Chatwoot; an agent bot's, its https
- * avatar in Chatwoot (its own, else its inbox's). Everything else uses the Chatwoot avatar.
+ * avatar in Chatwoot. Everything else uses the Chatwoot avatar.
  */
 export function senderAvatar(message: RelayMessage, avatars: Avatars): string {
   if (message.messageType === "incoming") return customerAvatar(message.sender?.avatarUrl, avatars);
   if (message.messageType === "outgoing") {
-    // An agent's Discord avatar, else their Chatwoot one; an agent bot's own (or its inbox's).
+    // An agent's Discord avatar, else their Chatwoot one; an agent bot's Chatwoot one.
     const discord = message.sender?.type === "user" ? message.discordAvatarUrl : undefined;
     return discord ?? httpsUrl(message.sender?.avatarUrl) ?? avatars.chatwoot;
   }

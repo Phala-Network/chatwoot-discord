@@ -111,7 +111,7 @@ const messageSchema = z.object({
     })
     .nullish()
     .catch(null),
-  // A user's or contact's picture is `thumbnail`; an agent bot's is `avatar_url` (its own, else its inbox's).
+  // A user's or contact's picture is `thumbnail`; an agent bot's is `avatar_url` ("" without one).
   sender: z
     .object({ id: z.number().nullish(), name: text, email: text, type: text, thumbnail: text, avatar_url: text })
     .nullish(),
