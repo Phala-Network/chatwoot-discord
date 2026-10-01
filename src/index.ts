@@ -11,10 +11,11 @@ import { FAILED } from "./commands/common.ts";
 import { CONTENT_MAX } from "./commands/definitions.ts";
 import { readDraft } from "./commands/draft.ts";
 import { handleInteraction, privately } from "./commands/handler.ts";
-import { ConfigError, loadSettings } from "./config.ts";
+import { ConfigError } from "./config.ts";
 import { DiscordRest } from "./discord/rest.ts";
 import { HUB_NAME } from "./hub.ts";
 import { errorFields, log } from "./log.ts";
+import { loadSettings } from "./settings.ts";
 
 /** Reply with draft may look up the triage bot's answer this long, while Discord waits for the reply editor. */
 const DRAFT_DEADLINE_MS = 2000;
@@ -25,18 +26,18 @@ function hub(env: Env) {
   return env.HUB.getByName(HUB_NAME);
 }
 
-app.get("/healthz", (c) => {
+app.get("/healthz", async (c) => {
   try {
-    loadSettings(c.env);
+    await loadSettings(c.env);
     return c.json({ ok: true });
   } catch (error) {
-    if (error instanceof ConfigError) log.error("configuration invalid", errorFields(error));
+    log.error(error instanceof ConfigError ? "configuration invalid" : "configuration unavailable", errorFields(error));
     return c.json({ ok: false }, 503);
   }
 });
 
 app.post("/chatwoot/webhook", bodyLimit({ maxSize: 2 * 1024 * 1024 }), async (c) => {
-  const settings = loadSettings(c.env);
+  const settings = await loadSettings(c.env);
   const timestamp = c.req.header("x-chatwoot-timestamp");
   if (!timestamp || !isFreshTimestamp(timestamp, Math.floor(Date.now() / 1000))) {
     return c.text("invalid or stale timestamp", 401);
@@ -85,7 +86,7 @@ const answerSchema = z.strictObject({
 });
 
 app.post("/triage/answered", bodyLimit({ maxSize: 64 * 1024 }), async (c) => {
-  const secret = loadSettings(c.env).secrets.TRIAGE_HOOK_SECRET;
+  const secret = (await loadSettings(c.env)).secrets.TRIAGE_HOOK_SECRET;
   if (!secret) return c.text("not found", 404);
   const timestamp = c.req.header("x-timestamp");
   if (!timestamp || !isFreshTimestamp(timestamp, Math.floor(Date.now() / 1000))) {
@@ -106,7 +107,9 @@ app.post("/triage/answered", bodyLimit({ maxSize: 64 * 1024 }), async (c) => {
 });
 
 app.post("/discord/interactions", bodyLimit({ maxSize: 1024 * 1024 }), async (c) => {
-  const settings = loadSettings(c.env);
+  // Discord waits 3 s for the reply editor, counted from the interaction: one deadline for all of it.
+  const deadline = AbortSignal.timeout(DRAFT_DEADLINE_MS);
+  const settings = await loadSettings(c.env);
   const signature = c.req.header("x-signature-ed25519");
   const timestamp = c.req.header("x-signature-timestamp");
   const body = await c.req.arrayBuffer();
@@ -124,7 +127,6 @@ app.post("/discord/interactions", bodyLimit({ maxSize: 1024 * 1024 }), async (c)
     return c.text("bad request", 400);
   }
 
-  const deadline = AbortSignal.timeout(DRAFT_DEADLINE_MS);
   const stub = hub(c.env);
   try {
     const result = await handleInteraction(interaction, {
@@ -133,7 +135,6 @@ app.post("/discord/interactions", bodyLimit({ maxSize: 1024 * 1024 }), async (c)
       draftOf: async (threadId, answerId) => {
         const kept = await stub.answerDraft(answerId);
         if (kept !== null) return { text: kept };
-        // Discord waits 3 s for the editor, counted from the interaction: one deadline for all of it.
         const rest = new DiscordRest(settings.secrets.DISCORD_BOT_TOKEN, (request) =>
           fetch(request, { signal: deadline }),
         );

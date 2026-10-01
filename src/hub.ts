@@ -22,7 +22,7 @@ import { chatwootClient, toRelayConversation } from "./chatwoot/api.ts";
 import { executeCommand } from "./commands/actions.ts";
 import { text } from "./commands/components.ts";
 import { type CommandJob, commandJobSchema } from "./commands/job.ts";
-import { loadSettings, relaysInbox, type Settings } from "./config.ts";
+import { relaysInbox, type Settings } from "./config.ts";
 import { DiscordForum } from "./discord/forum.ts";
 import { DiscordHttpError, DiscordRest } from "./discord/rest.ts";
 import { errorFields, log } from "./log.ts";
@@ -32,6 +32,7 @@ import { latestMessageId, type ProcessorContext, processConversation, relayFor }
 import { isUnknownCard } from "./relay/relay.ts";
 import { processMessageUpdate } from "./relay/updates.ts";
 import { awaitsRouting, routeConversation, routesAccount } from "./routing.ts";
+import { loadSettings } from "./settings.ts";
 import { type Job, Store } from "./store.ts";
 
 export const HUB_NAME = "global";
@@ -63,10 +64,11 @@ const MIN_BUDGET = 2;
 /**
  * Reading the conversation; for a decision not applied yet, whether the customer wrote since (up
  * to 3 pages); the messages; asking Jev; reading the conversation again; assigning; setting the
- * topic; a kind's reply; checking again before a snooze (up to 3 pages); and the snooze (a kind that
- * sets the status takes that instead of the assignment and what follows).
+ * topic; a kind's reply (reading its canned response, then sending it); checking again before a
+ * snooze (up to 3 pages); and the snooze (a kind that sets the status takes that instead of the
+ * assignment and what follows).
  */
-const ROUTE_BUDGET = 15;
+const ROUTE_BUDGET = 16;
 /**
  * Pages of conversations (25 each by default) a sweep job reads; a longer pass continues in the
  * next job. One, so a command waiting runs between pages rather than after the whole pass.
@@ -117,7 +119,8 @@ export class Hub extends DurableObject<Env> {
    */
   async enqueueConversation(accountId: number, conversationId: number, delayMs = 0): Promise<void> {
     this.enqueue({ type: "conversation", accountId, conversationId }, Date.now() + delayMs);
-    if (routesAccount(loadSettings(this.env), accountId)) this.enqueue({ type: "route", accountId, conversationId });
+    if (routesAccount(await loadSettings(this.env), accountId))
+      this.enqueue({ type: "route", accountId, conversationId });
     await this.schedule();
   }
 
@@ -142,14 +145,14 @@ export class Hub extends DurableObject<Env> {
 
   /** Queues a reconciliation sweep for every configured account (called by the cron trigger). */
   async requestSweep(): Promise<void> {
-    for (const account of loadSettings(this.env).config.accounts)
+    for (const account of (await loadSettings(this.env)).config.accounts)
       this.enqueue({ type: "sweep", accountId: account.id });
     await this.schedule();
   }
 
   /** Queues the hourly support queue, if configured (called by the cron trigger at minute 0). */
   async requestQueue(): Promise<void> {
-    if (!loadSettings(this.env).config.queue) return;
+    if (!(await loadSettings(this.env)).config.queue) return;
     this.enqueue({ type: "queue" });
     await this.schedule();
   }
@@ -182,7 +185,7 @@ export class Hub extends DurableObject<Env> {
   }
 
   private async drain(): Promise<void> {
-    const settings = loadSettings(this.env);
+    const settings = await loadSettings(this.env);
     const budget = new Budget(settings.config.relay.subrequestBudget);
     const services = this.services(settings, budget);
     const startedAt = Date.now();

@@ -1,8 +1,7 @@
-// Configuration: non-secret settings come from the `CONFIG` var (wrangler.jsonc), secrets from
-// Worker secrets. Both are validated once per isolate.
+// Configuration: non-secret settings (CONFIG) and secrets, validated (see settings.ts for where the
+// Worker reads them).
 
 import { z } from "zod";
-import { parseJson } from "./json.ts";
 import { queueBudget } from "./queue-limits.ts";
 import { minimumBudget } from "./relay/limits.ts";
 
@@ -163,15 +162,18 @@ export const configSchema = z
                 .strictObject({
                   /** What the kind is, as Jev's criterion for recognizing it. */
                   covers: z.string().min(1).max(1000),
-                  /** Sent to the customer once, as the account's agent bot (CHATWOOT_BOT_TOKENS). */
-                  reply: z.string().trim().min(1).max(4000).optional(),
+                  /**
+                   * Short code of the account's Chatwoot canned response sent to the customer once, as
+                   * the account's agent bot (CHATWOOT_BOT_TOKENS). None is sent while it does not exist.
+                   */
+                  cannedResponse: z.string().trim().min(1).max(255).optional(),
                   /**
                    * Set instead of routing the ticket: `resolved`, or `snoozed` until the customer's
                    * next message. A new message from the customer reopens either.
                    */
                   status: z.enum(["resolved", "snoozed"]).optional(),
                 })
-                .refine((kind) => !(kind.status && kind.reply), "a ticket set aside gets no reply"),
+                .refine((kind) => !(kind.status && kind.cannedResponse), "a ticket set aside gets no reply"),
             ),
           )
           .optional(),
@@ -303,31 +305,13 @@ export class ConfigError extends Error {
   }
 }
 
-const cache = new WeakMap<object, Settings>();
-
-/** Parses and validates settings; throws ConfigError with the offending paths (never values). */
-export function loadSettings(env: Env): Settings {
-  const cached = cache.get(env);
-  if (cached) return cached;
-
-  const rawConfig: unknown = typeof env.CONFIG === "string" ? parseJson(env.CONFIG) : env.CONFIG;
+/** Validates the configuration and secrets; throws ConfigError with the offending paths (never values). */
+export function parseSettings(rawConfig: unknown, rawSecrets: Record<string, unknown>): Settings {
   const config = configSchema.safeParse(rawConfig);
   if (!config.success) throw new ConfigError(`Invalid CONFIG: ${describe(config.error)}`);
-  const secrets = secretsSchema.safeParse({
-    DISCORD_BOT_TOKEN: env.DISCORD_BOT_TOKEN,
-    DISCORD_PUBLIC_KEY: env.DISCORD_PUBLIC_KEY,
-    CHATWOOT_RELAY_TOKEN: env.CHATWOOT_RELAY_TOKEN,
-    CHATWOOT_WEBHOOK_SECRETS: env.CHATWOOT_WEBHOOK_SECRETS,
-    CHATWOOT_AGENT_TOKENS: env.CHATWOOT_AGENT_TOKENS,
-    CHATWOOT_BOT_TOKENS: env.CHATWOOT_BOT_TOKENS,
-    TYPESAFE_API_KEY: env.TYPESAFE_API_KEY,
-    TRIAGE_HOOK_SECRET: env.TRIAGE_HOOK_SECRET,
-  });
+  const secrets = secretsSchema.safeParse(rawSecrets);
   if (!secrets.success) throw new ConfigError(`Invalid secrets: ${describe(secrets.error)}`);
-
-  const settings = buildSettings(config.data, secrets.data);
-  cache.set(env, settings);
-  return settings;
+  return buildSettings(config.data, secrets.data);
 }
 
 export function buildSettings(config: Config, secrets: Secrets): Settings {
@@ -335,7 +319,7 @@ export function buildSettings(config: Config, secrets: Secrets): Settings {
     throw new ConfigError("Invalid secrets: TYPESAFE_API_KEY: required when routing is configured");
   }
   for (const [accountId, kinds] of Object.entries(config.routing?.kinds ?? {})) {
-    if (Object.values(kinds).some((kind) => kind.reply) && !secrets.CHATWOOT_BOT_TOKENS[accountId]) {
+    if (Object.values(kinds).some((kind) => kind.cannedResponse) && !secrets.CHATWOOT_BOT_TOKENS[accountId]) {
       throw new ConfigError(`Invalid secrets: CHATWOOT_BOT_TOKENS: account ${accountId} has kinds that reply`);
     }
   }

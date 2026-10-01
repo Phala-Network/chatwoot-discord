@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A configuration larger than the 5 KB a Worker var holds can live in a KV namespace bound as
+  `CONFIG_STORE`, under the key in the `CONFIG_KEY` var. `storedConfig` (scripts/stored-config.ts)
+  validates a configuration file (JSON with comments) and derives its key from its content, for a
+  deployment's `cloudflare.config.ts`; `npm run store-config` stores it with the Cloudflare CLI
+  (`cf`, now a dev dependency).
+
+
+### Changed
+
+- **Breaking:** a routing kind replies with a Chatwoot canned response, `cannedResponse: "<short
+  code>"`, instead of a fixed `reply` text: it is edited in Chatwoot, can use Chatwoot's variables,
+  and nothing is sent while it does not exist.
+
 ## [0.21.0] - 2026-09-30
 
 ### Added

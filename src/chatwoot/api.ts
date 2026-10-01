@@ -250,6 +250,15 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
       return list.data?.payload ?? [];
     },
 
+    /** The content of the account's canned response with this short code, if it exists. */
+    async cannedResponse(accountId: number, shortCode: string): Promise<string | undefined> {
+      const responses = await data(
+        "list canned responses",
+        client.GET("/api/v1/accounts/{account_id}/canned_responses", { params: { path: { account_id: accountId } } }),
+      );
+      return responses.find((response) => response.short_code === shortCode)?.content;
+    },
+
     getProfile() {
       return data("get profile", client.GET("/api/v1/profile"));
     },

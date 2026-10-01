@@ -1,5 +1,7 @@
+import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { buildSettings, configSchema, secretsSchema } from "../src/config.ts";
+import { loadSettings } from "../src/settings.ts";
 
 const minimal = {
   chatwoot: { baseUrl: "https://chatwoot.example.com" },
@@ -82,7 +84,7 @@ describe("configuration", () => {
     const kinds = (given: Record<string, unknown>) =>
       configSchema.safeParse({ ...minimal, routing: { accounts: { "1": owners }, kinds: given } });
     expect(kinds({ "1": { spam: { covers: "Spam.", status: "resolved" } } }).success).toBe(true);
-    expect(kinds({ "1": { spam: { covers: "Spam.", status: "resolved", reply: "Hi" } } }).success).toBe(false);
+    expect(kinds({ "1": { spam: { covers: "Spam.", status: "resolved", cannedResponse: "hi" } } }).success).toBe(false);
     expect(kinds({ "1": { spam: { covers: "Spam.", status: "pending" } } }).success).toBe(false);
     expect(kinds({ "1": { none: { covers: "Nothing." } } }).success).toBe(false);
     // Kinds and topics are labels of two families: no name in both.
@@ -112,7 +114,10 @@ describe("configuration", () => {
     // A kind that replies needs its account's agent bot, which sends the reply.
     const replying = configSchema.parse({
       ...minimal,
-      routing: { accounts: { "1": owners }, kinds: { "1": { security: { covers: "Security.", reply: "Thanks." } } } },
+      routing: {
+        accounts: { "1": owners },
+        kinds: { "1": { security: { covers: "Security.", cannedResponse: "security" } } },
+      },
     });
     expect(() => buildSettings(replying, secrets({ TYPESAFE_API_KEY: "key" }))).toThrow(/CHATWOOT_BOT_TOKENS/);
     const withBot = secrets({ TYPESAFE_API_KEY: "key", CHATWOOT_BOT_TOKENS: JSON.stringify({ "1": "bot" }) });
@@ -129,5 +134,26 @@ describe("configuration", () => {
 
   it("bounds the triage bot's name, which its budget notes repeat", () => {
     expect(configSchema.safeParse({ ...minimal, triage: { name: "x".repeat(101) } }).success).toBe(false);
+  });
+});
+
+describe("loadSettings", () => {
+  it("reads the configuration from CONFIG_STORE under CONFIG_KEY, instead of CONFIG", async () => {
+    const { CONFIG, ...stored } = env;
+    await env.CONFIG_STORE?.put("config-test", JSON.stringify(CONFIG));
+
+    const settings = await loadSettings({ ...stored, CONFIG_KEY: "config-test" });
+    expect(settings.config.accounts.map((account) => account.id)).toEqual([3, 1]);
+    await expect(loadSettings({ ...stored, CONFIG_KEY: "config-missing" })).rejects.toThrow(/not in CONFIG_STORE/);
+    await expect(loadSettings({ ...env, CONFIG_KEY: "config-test" })).rejects.toThrow(/either CONFIG or CONFIG_KEY/);
+  });
+
+  it("reads again after a failed read", async () => {
+    const { CONFIG, ...stored } = env;
+    const settingsEnv = { ...stored, CONFIG_KEY: "config-later" };
+    await expect(loadSettings(settingsEnv)).rejects.toThrow(/not in CONFIG_STORE/);
+
+    await env.CONFIG_STORE?.put("config-later", JSON.stringify(CONFIG));
+    expect((await loadSettings(settingsEnv)).config.accounts).toHaveLength(2);
   });
 });
