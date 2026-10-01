@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The card's answering buttons say what they do: **Reply with draft** (was Use draft) and
+  **Write reply** (was Reply), alongside the message command **Reply with this**.
+
+### Changed
+
 - The README describes the sweep's one page per job.
 - Tests fail on any request no mocked route answers, and cover a command that comes during a
   sweep running before the sweep's next page.

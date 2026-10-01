@@ -1,4 +1,4 @@
-// "Use draft": the draft of the triage bot's answer its button is under. The bot's hook sends the
+// "Reply with draft": the draft of the triage bot's answer its button is under. The bot's hook sends the
 // draft with the answer (see Hub.triageAnswered), and it is kept for a while; otherwise it is read
 // from the answer, which needs the Message Content intent on this bot's application (without it
 // Discord returns another bot's message with empty content, and the answer is linked instead).

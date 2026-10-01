@@ -114,7 +114,7 @@ To connect an AI agent, see [Connecting an AI agent](docs/ai-agent.md).
 
 1. Create an application at <https://discord.com/developers/applications>; note its
    **Application ID** and **Public Key**, and create a **bot token**. No privileged intent is
-   needed: **Use draft** takes the draft the triage bot's hook sends (see
+   needed: **Reply with draft** takes the draft the triage bot's hook sends (see
    [Triage bot hook](#triage-bot-hook)). The **Message Content** intent only lets it read an answer
    whose draft was not kept (an app in 100 or more servers, or exposed to a large one, needs
    Discord's review first).
@@ -209,7 +209,7 @@ Used inside a ticket post, by Discord users linked in `agents[]` who have a toke
 
 - Every post ends with the ticket's card, coloured by its status: an overview (the ticket and its
   customer; the channel, the customer's email or phone number, and a link to Chatwoot; the status,
-  the assignee, and the labels), then a row of buttons per concern. Answering: **Reply**. Who owns the
+  the assignee, and the labels), then a row of buttons per concern. Answering: **Write reply**. Who owns the
   ticket: **Take**, and **Assign to…**, named after the assignee once there is one. Its state:
   **Resolve** and **Snooze** (until the next reply) while it is open; **Reopen** and **Resolve**
   while it is snoozed; **Reopen** once it is resolved; then **Block** and **Manage**. The card is
@@ -218,11 +218,11 @@ Used inside a ticket post, by Discord users linked in `agents[]` who have a toke
   under the latest of those (a message posted in Discord by anyone else does not move it).
 - After a triage bot's answer with a draft, reported by the bot's hook (see
   [Triage bot hook](#triage-bot-hook)), the card moves under the answer and is led by
-  **Use draft** (highlighted), until the customer writes again. **Use draft** opens the `/reply`
+  **Reply with draft** (highlighted), until the customer writes again. **Reply with draft** opens the `/reply`
   editor with that draft: the one the hook sent, or else the answer's last code block read from
   Discord, which needs the Message Content intent; without it, it links to the answer for
   **Reply with this**, which works on any message.
-- **Reply** opens the `/reply` editor. **Take** assigns the ticket to you; **Assign to…** shows you a menu of the account's
+- **Write reply** opens the `/reply` editor. **Take** assigns the ticket to you; **Assign to…** shows you a menu of the account's
   agents, and the menu turns into the result. **Resolve** resolves it and **Reopen** opens it again.
   **Block** asks you to confirm first (only you see the question), then blocks the contact as
   `/block` does.
@@ -449,7 +449,7 @@ in the post: `POST
 /triage/answered` with `{"threadId":"<post id>","answerId":"<answer message id>","replyTo":"<the
 message it answers>","draft":"<the reply draft>"}`, signed like a Chatwoot webhook (`x-timestamp`, Unix seconds, and `x-signature`,
 `sha256=` and the hex HMAC-SHA256 of `<timestamp>.<body>` with `TRIAGE_HOOK_SECRET`). The Worker
-keeps the draft for 14 days and moves the post's card under the answer, led by **Use draft**,
+keeps the draft for 14 days and moves the post's card under the answer, led by **Reply with draft**,
 once per answer (a repeated call adds nothing), while the message it answers is the customer's
 latest (an answer to an earlier one, or older than one already reported, changes nothing). Report only answers that have a draft, and only
 after they were sent, so the card follows them (right after the answer unless another message

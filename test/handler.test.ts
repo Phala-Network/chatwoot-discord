@@ -421,7 +421,7 @@ describe("interaction handler", () => {
 });
 
 describe("ticket buttons and the Manage panel", () => {
-  it("Reply opens the editor; Use draft opens it with the draft of the answer it is under", async () => {
+  it("Write reply opens the editor; Reply with draft opens it with the draft of the answer it is under", async () => {
     const { response } = await press("ticket:reply");
     expect(response.type === InteractionResponseType.Modal && response.data.custom_id).toBe("reply:777001");
     expect(editorField(response, "content")).not.toHaveProperty("value");
@@ -430,7 +430,7 @@ describe("ticket buttons and the Manage panel", () => {
     );
   });
 
-  it("Use draft says when the answer has no draft, and links one it cannot read for Reply with this", async () => {
+  it("Reply with draft says when the answer has no draft, and links one it cannot read for Reply with this", async () => {
     draft = { missing: "none" };
     expect(privateText(await press(`ticket:draft:${ANSWER}`))).toMatch(/has no draft/);
     draft = { missing: "unreadable" };
