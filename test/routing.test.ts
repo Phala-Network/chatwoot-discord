@@ -33,6 +33,8 @@ interface Ticket {
   failSnooze?: number;
   /** Replies that fail before Chatwoot answers. */
   failReply?: number;
+  /** Status changes Chatwoot makes but whose answer is lost. */
+  loseStatusAnswer?: number;
 }
 
 /** Chatwoot conversation 5 of account 1 and Jev, faked at the fetch boundary. */
@@ -85,6 +87,10 @@ function world(
         return json({ error: "unavailable" }, { status: 503 });
       }
       ticket.status = JSON.parse(request.body).status;
+      if ((ticket.loseStatusAnswer ?? 0) > 0) {
+        ticket.loseStatusAnswer = (ticket.loseStatusAnswer ?? 0) - 1;
+        return json({ error: "unavailable" }, { status: 503 });
+      }
       return json({});
     }),
     on("POST", "api.typesafe.ai/v1/systemone", () => {
@@ -441,6 +447,19 @@ describe("routeConversation with kinds", () => {
     // Its kind is a label; it gets no topic.
     expect(sent(requests, "POST", `${CW}/labels`).map((r) => JSON.parse(r.body))).toEqual([{ labels: ["spam"] }]);
     expect(replies(requests)).toEqual([]);
+  });
+
+  it("completes a set-aside whose status Chatwoot made but whose answer was lost, without setting it again", async () => {
+    const store = new MapStore();
+    const ticket: Ticket = { loseStatusAnswer: 1 };
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["spam", 0.95] });
+
+    await expect(routeConversation(context(store, KINDS), 1, 5)).rejects.toThrow();
+    await routeConversation(context(store, KINDS), 1, 5);
+
+    expect(ticket.status).toBe("resolved");
+    expect(sent(requests, "POST", `${CW}/toggle_status`)).toHaveLength(1);
+    expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("done");
   });
 
   it("does not set aside a ticket someone took while Jev was answering", async () => {

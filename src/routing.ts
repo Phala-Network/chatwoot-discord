@@ -187,8 +187,6 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     current = toRelayConversation(conversationId, now);
   }
 
-  // Closed meanwhile (and nobody took it): keep the decision pending until it opens again.
-  if (current.status !== "open" && !current.assignee) return;
   const kinds = routing.kinds?.[String(accountId)] ?? {};
   const kindName =
     decision.kind !== null && decision.kindConfidence >= routing.minConfidence && Object.hasOwn(kinds, decision.kind)
@@ -197,11 +195,12 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
   const kind = kindName === null ? undefined : kinds[kindName];
   const withKind = (labels: string[]) =>
     kindName === null || labels.includes(kindName) ? labels : [...labels, kindName];
-  // Not a ticket someone took meanwhile. Labels and a status set twice change nothing: a retry is safe.
-  if (kind?.status && !current.assignee) {
+  // Not a ticket someone took meanwhile. A retry finishes what an attempt began: labels and a status
+  // set twice change nothing, and a status already set (its answer lost) is not set again.
+  if (kind?.status && !current.assignee && (current.status === "open" || current.status === kind.status)) {
     const labels = withKind(current.labels);
     if (labels !== current.labels) await chatwoot.setLabels(accountId, conversationId, labels);
-    await chatwoot.setStatus(accountId, conversationId, { status: kind.status });
+    if (current.status !== kind.status) await chatwoot.setStatus(accountId, conversationId, { status: kind.status });
     store.set(key, JSON.stringify({ ...decision, state: "done" }));
     log.info("ticket set aside as its kind", {
       accountId,
@@ -212,6 +211,8 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     });
     return;
   }
+  // Closed meanwhile (and nobody took it): keep the decision pending until it opens again.
+  if (current.status !== "open" && !current.assignee) return;
   const owner =
     decision.owner !== null && decision.ownerConfidence >= routing.minConfidence ? owners[decision.owner] : undefined;
   const assign = owner !== undefined && !current.assignee;

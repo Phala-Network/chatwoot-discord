@@ -85,6 +85,12 @@ describe("configuration", () => {
     expect(kinds({ "1": { spam: { covers: "Spam.", status: "resolved", reply: "Hi" } } }).success).toBe(false);
     expect(kinds({ "1": { spam: { covers: "Spam.", status: "pending" } } }).success).toBe(false);
     expect(kinds({ "1": { none: { covers: "Nothing." } } }).success).toBe(false);
+    // Kinds and topics are labels of two families: no name in both.
+    const clash = configSchema.safeParse({
+      ...minimal,
+      routing: { accounts: { "1": owners }, topics: { spam: "Spam." }, kinds: { "1": { spam: { covers: "Spam." } } } },
+    });
+    expect(clash.error?.issues.map((issue) => issue.path.join("."))).toEqual(["routing.kinds"]);
     expect(
       kinds({ "2": { spam: { covers: "Spam.", status: "resolved" } } }).error?.issues.map((issue) =>
         issue.path.join("."),

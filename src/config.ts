@@ -163,7 +163,7 @@ export const configSchema = z
                 .strictObject({
                   /** What the kind is, as Jev's criterion for recognizing it. */
                   covers: z.string().min(1).max(1000),
-                  /** Sent to the customer once the ticket has an owner. */
+                  /** Sent to the customer once, as the account's agent bot (CHATWOOT_BOT_TOKENS). */
                   reply: z.string().trim().min(1).max(4000).optional(),
                   /**
                    * Set instead of routing the ticket: `resolved`, or `snoozed` until the customer's
@@ -228,7 +228,14 @@ export const configSchema = z
   .refine((config) => Object.keys(config.routing?.kinds ?? {}).every((id) => config.routing?.accounts[id]), {
     path: ["routing", "kinds"],
     message: "must only name routed accounts",
-  });
+  })
+  .refine(
+    (config) =>
+      Object.values(config.routing?.kinds ?? {}).every((kinds) =>
+        Object.keys(kinds).every((kind) => !Object.hasOwn(config.routing?.topics ?? {}, kind)),
+      ),
+    { path: ["routing", "kinds"], message: "a kind cannot be named as a topic: they are labels of two families" },
+  );
 
 type Config = z.infer<typeof configSchema>;
 type AccountConfig = Config["accounts"][number];

@@ -371,7 +371,7 @@ replace:
 | `routing.accounts` | object: account id → (owner name → owner) | required | Routed accounts (configured in `accounts[]`) and the owners Jev chooses from. Owner names are 1–40 lower-case letters, digits, or `_`; `unclear` is reserved. |
 | `routing.accounts.<id>.<name>.assignee` | integer > 0 | required | Chatwoot user id to assign. |
 | `routing.accounts.<id>.<name>.covers` | 1–1000 characters | required | What the owner handles: Jev's criterion for choosing them. |
-| `routing.topics` | object: label → what it covers | unset | Topic labels (Chatwoot label names, lower case) Jev chooses from; one is added when a ticket has none of them. Show them as forum tags with `label:<label>` keys in `forumTags`. Unset: no topic. |
+| `routing.topics` | object: label → what it covers | unset | Topic labels (Chatwoot label names, lower case) Jev chooses from; one is added when a ticket has no label other than its kinds (an automation rule's label is kept alone). Show them as forum tags with `label:<label>` keys in `forumTags`. Unset: no topic. |
 | `routing.kinds` | object: account id → (kind name → kind) | unset | Kinds of ticket Jev recognizes in routed accounts, added as labels beside the topic, and what is done once when it does ([routing](#routing)). Kind names are the account's label names (1–40 lower-case letters, digits, `_`, or `-`); `none` is reserved. Unset: none. |
 | `routing.kinds.<id>.<name>.covers` | 1–1000 characters | required | What the kind is: Jev's criterion for recognizing it. |
 | `routing.kinds.<id>.<name>.reply` | 1–4000 characters | unset | Sent to the customer once, by the account's agent bot (`CHATWOOT_BOT_TOKENS`). |
@@ -419,7 +419,7 @@ tokens, phone numbers, IP addresses, @handles, and the contact's name are replac
 `[REDACTED]`. This is best-effort redaction of common identifiers, not anonymization: other personal
 details in the text still reach TypeSafe, so check that its data policy suits you. An owner at
 `minConfidence` or above is assigned, and a topic at or above it is added as a label when the ticket
-has no label yet (a ticket has one label, so one an automation rule set stays alone). When no owner
+has no label other than its kinds (a ticket has one topic label, so one an automation rule set stays alone). When no owner
 is clear, Jev is asked again each time the customer adds a message, until one is or three customer
 messages were seen; the ticket then stays for a person. With `snoozeUnclear`, a ticket without a
 clear owner is snoozed until the customer's next message, which reopens it and asks Jev again, so it
