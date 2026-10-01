@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Built and deployed with the [Cloudflare CLI](https://developers.cloudflare.com/cf/) (`cf`) and Vite instead of
+  Wrangler: `cloudflare.config.ts` replaces `wrangler.jsonc`, `npm run dev`, `build`, and `deploy` run `cf`, and
+  secrets are uploaded with `npx cf deploy --secrets-file <file>`. To upgrade a deployment from a checkout, move your
+  `CONFIG` from `wrangler.jsonc` into `cloudflare.config.ts` and deploy with `npx cf deploy`: the Worker keeps its
+  secrets and its Hub Durable Object. A deploy now fails while a required secret is not set. The Deploy to Cloudflare
+  button is gone, as it needs a Wrangler configuration: deploy a copy made with it from a checkout or from CI (see
+  [Use cf in CI](https://developers.cloudflare.com/cf/ci/)). A deployment from a repository of your own can build with
+  Vite instead of Wrangler with `vite`, `@cloudflare/vite-plugin`, and a `vite.config.ts` (see the README).
+
 ### Fixed
 
 - The package's `bin` path has no leading `./`: `npm publish` rewrote it with a warning that it was

@@ -19,7 +19,7 @@ jobs:
     runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.CI_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 15
     env:
-      WRANGLER_SEND_METRICS: "false"
+      CF_SEND_TELEMETRY: "false"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -40,8 +40,10 @@ jobs:
         run: |
           node scripts/register-commands.ts || [ $? -eq 2 ]
           node scripts/forum-tags.ts || [ $? -eq 2 ]
-      - name: Build (wrangler dry run, no deploy)
-        run: npm run build
+      - name: Build, and check the deploy (dry run)
+        run: |
+          npm run build
+          npx cf deploy --prebuilt --dry-run
       - name: Package (what npm publish would ship), installed and type-checked by a consumer
         # The command prints its usage and exits 2 without arguments.
         run: |

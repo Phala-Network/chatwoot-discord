@@ -6,14 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": [
-      "**",
-      "!**/node_modules",
-      "!**/.wrangler",
-      "!src/chatwoot/schema.d.ts",
-      "!worker-configuration.d.ts",
-      "!**/*.jsonc"
-    ]
+    "includes": ["**", "!**/node_modules", "!src/chatwoot/schema.d.ts", "!**/.cloudflare", "!**/*.jsonc"]
   },
   "formatter": {
     "enabled": true,

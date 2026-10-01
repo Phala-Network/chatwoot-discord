@@ -1,6 +1,5 @@
 version: 2
 updates:
-  # A wrangler update also needs `npm run types` (see CONTRIBUTING.md).
   - package-ecosystem: npm
     directory: /
     schedule:
