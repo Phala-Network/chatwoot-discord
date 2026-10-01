@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-09-30
+
 ### Changed
 
 - A routing kind may have both `cannedResponse` and `status`: it replies, then sets the ticket aside
@@ -519,7 +521,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-invocation subrequest budget, and a cron reconciliation sweep for missed webhooks.
 - Verification of Chatwoot webhook HMAC signatures and Discord Ed25519 interaction signatures.
 
-[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.23.0...HEAD
+[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.20.1...v0.21.0
