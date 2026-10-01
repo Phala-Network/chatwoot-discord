@@ -1,8 +1,8 @@
-# chatwoot-discord
+# chatwoot-discord-relay
 
-[![CI](https://github.com/Phala-Network/chatwoot-discord/actions/workflows/ci.yml/badge.svg)](https://github.com/Phala-Network/chatwoot-discord/actions/workflows/ci.yml)
-[![CodeQL](https://github.com/Phala-Network/chatwoot-discord/actions/workflows/codeql.yml/badge.svg)](https://github.com/Phala-Network/chatwoot-discord/actions/workflows/codeql.yml)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Phala-Network/chatwoot-discord/badge)](https://scorecard.dev/viewer/?uri=github.com/Phala-Network/chatwoot-discord)
+[![CI](https://github.com/Phala-Network/chatwoot-discord-relay/actions/workflows/ci.yml/badge.svg)](https://github.com/Phala-Network/chatwoot-discord-relay/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/Phala-Network/chatwoot-discord-relay/actions/workflows/codeql.yml/badge.svg)](https://github.com/Phala-Network/chatwoot-discord-relay/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Phala-Network/chatwoot-discord-relay/badge)](https://scorecard.dev/viewer/?uri=github.com/Phala-Network/chatwoot-discord-relay)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Mirror every [Chatwoot](https://www.chatwoot.com/) conversation into a Discord forum post, and
@@ -20,7 +20,7 @@ Cloudflare Workers (the Free plan is enough).
 a minor release may change configuration or setup; the [changelog](CHANGELOG.md) says what to
 do when it does.
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Phala-Network/chatwoot-discord)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Phala-Network/chatwoot-discord-relay)
 
 ![A Discord forum with one post per Chatwoot conversation, filtered by brand, status, assignee, and topic tags](docs/assets/forum.png)
 
@@ -699,8 +699,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and releases, and
 
 ## Getting help
 
-- Questions and setup help: [GitHub Discussions](https://github.com/Phala-Network/chatwoot-discord/discussions).
-- Bug reports and feature requests: [GitHub Issues](https://github.com/Phala-Network/chatwoot-discord/issues).
+- Questions and setup help: [GitHub Discussions](https://github.com/Phala-Network/chatwoot-discord-relay/discussions).
+- Bug reports and feature requests: [GitHub Issues](https://github.com/Phala-Network/chatwoot-discord-relay/issues).
 - Security vulnerabilities: report privately as described in [SECURITY.md](SECURITY.md), not in a
   public issue.
 - Chatwoot or Discord behaviour itself: their own documentation and support channels.

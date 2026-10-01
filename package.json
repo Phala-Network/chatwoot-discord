@@ -10,13 +10,13 @@
     "helpdesk",
     "customer-support"
   ],
-  "homepage": "https://github.com/Phala-Network/chatwoot-discord#readme",
+  "homepage": "https://github.com/Phala-Network/chatwoot-discord-relay#readme",
   "bugs": {
-    "url": "https://github.com/Phala-Network/chatwoot-discord/issues"
+    "url": "https://github.com/Phala-Network/chatwoot-discord-relay/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Phala-Network/chatwoot-discord.git"
+    "url": "git+https://github.com/Phala-Network/chatwoot-discord-relay.git"
   },
   "license": "MIT",
   "type": "module",
@@ -72,7 +72,7 @@
   "cloudflare": {
     "bindings": {
       "CONFIG": {
-        "description": "Non-secret settings (JSON): Chatwoot URL, accounts and their forum channels, linked agents, and the optional triage bot. The committed values are placeholders; see the [configuration reference](https://github.com/Phala-Network/chatwoot-discord#configuration-reference)."
+        "description": "Non-secret settings (JSON): Chatwoot URL, accounts and their forum channels, linked agents, and the optional triage bot. The committed values are placeholders; see the [configuration reference](https://github.com/Phala-Network/chatwoot-discord-relay#configuration-reference)."
       },
       "DISCORD_BOT_TOKEN": {
         "description": "Bot token of your Discord application (Developer Portal > your application > **Bot**)."
