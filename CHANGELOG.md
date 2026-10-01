@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-10-01
+
 ### Changed
 
 - `routing.snoozeUnclear` snoozes only a ticket in which the customer asked for nothing yet (Jev is
@@ -536,7 +538,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-invocation subrequest budget, and a cron reconciliation sweep for missed webhooks.
 - Verification of Chatwoot webhook HMAC signatures and Discord Ed25519 interaction signatures.
 
-[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.22.0...v0.23.0
