@@ -381,6 +381,10 @@ describe("routeConversation with kinds", () => {
 
     await routeConversation(context(store, KINDS), 1, 5);
     expect(replies(requests)).toEqual([{ content: "Thanks for applying!", message_type: "outgoing", private: false }]);
+    // The topic and the kind are labels of their own families.
+    expect(sent(requests, "POST", `${CW}/labels`).map((r) => JSON.parse(r.body))).toEqual([
+      { labels: ["billing", "startup-program"] },
+    ]);
     // The reply is sent once the ticket has its owner.
     const at = (method: string, path: string) =>
       requests.findIndex((request) => request.method === method && request.url.pathname.endsWith(path));
@@ -391,6 +395,16 @@ describe("routeConversation with kinds", () => {
     const unsure = world({}, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["startup-program", 0.5] });
     await routeConversation(context(new MapStore(), KINDS), 1, 5);
     expect(replies(unsure.requests)).toEqual([]);
+  });
+
+  it("adds the topic to a ticket whose only labels are kinds", async () => {
+    const { requests } = world({ labels: ["spam"] }, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["none", 1] });
+
+    await routeConversation(context(new MapStore(), KINDS), 1, 5);
+
+    expect(sent(requests, "POST", `${CW}/labels`).map((r) => JSON.parse(r.body))).toEqual([
+      { labels: ["spam", "billing"] },
+    ]);
   });
 
   it("never sends a reply twice, even when sending it failed", async () => {
@@ -434,7 +448,8 @@ describe("routeConversation with kinds", () => {
     ]);
     expect(sent(requests, "PUT", "chatwoot.example.com/api/v1/accounts/1/contacts/88")).toEqual([]);
     expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
-    expect(sent(requests, "POST", `${CW}/labels`)).toEqual([]);
+    // Its kind is a label; it gets no topic.
+    expect(sent(requests, "POST", `${CW}/labels`).map((r) => JSON.parse(r.body))).toEqual([{ labels: ["spam"] }]);
     expect(replies(requests)).toEqual([]);
   });
 

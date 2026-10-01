@@ -19,7 +19,8 @@
 // the customer's next message reopens the ticket; the support queue lists it meanwhile.)
 //
 // With `kinds`, Jev also tells which configured kind of ticket it is, if any. A kind Jev is confident
-// about acts with the decision: `status` sets it aside (resolved, or snoozed until the customer's next
+// about is added as a label beside the ticket's one topic label (kinds are labels too, of another
+// family: a topic is a category, a kind may act), and acts with the decision: `status` sets it aside (resolved, or snoozed until the customer's next
 // message, either of which that message reopens) instead of routing it; `reply` sends a fixed reply
 // once the ticket has an owner (Chatwoot assigns an unassigned ticket
 // to whoever replies). A reply is sent at most once per ticket: it is recorded before it is sent, so
@@ -120,6 +121,11 @@ function replyKey(accountId: number, conversationId: number): string {
   return `kind-reply:${accountId}:${conversationId}`;
 }
 
+/** The account's kinds: labels Jev adds beside a ticket's one topic label (see `kinds`). */
+export function kindLabels(settings: Settings, accountId: number): ReadonlySet<string> {
+  return new Set(Object.keys(settings.config.routing?.kinds?.[String(accountId)] ?? {}));
+}
+
 /** Whether routing is configured for the account. */
 export function routesAccount(settings: Settings, accountId: number): boolean {
   return settings.config.routing?.accounts[String(accountId)] !== undefined;
@@ -182,12 +188,17 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
   // Closed meanwhile (and nobody took it): keep the decision pending until it opens again.
   if (current.status !== "open" && !current.assignee) return;
   const kinds = routing.kinds?.[String(accountId)] ?? {};
-  const kind =
+  const kindName =
     decision.kind !== null && decision.kindConfidence >= routing.minConfidence && Object.hasOwn(kinds, decision.kind)
-      ? kinds[decision.kind]
-      : undefined;
-  // Not a ticket someone took meanwhile. Setting a status twice changes nothing, so a retry is safe.
+      ? decision.kind
+      : null;
+  const kind = kindName === null ? undefined : kinds[kindName];
+  const withKind = (labels: string[]) =>
+    kindName === null || labels.includes(kindName) ? labels : [...labels, kindName];
+  // Not a ticket someone took meanwhile. Labels and a status set twice change nothing: a retry is safe.
   if (kind?.status && !current.assignee) {
+    const labels = withKind(current.labels);
+    if (labels !== current.labels) await chatwoot.setLabels(accountId, conversationId, labels);
     await chatwoot.setStatus(accountId, conversationId, { status: kind.status });
     store.set(key, JSON.stringify({ ...decision, state: "done" }));
     log.info("ticket set aside as its kind", {
@@ -204,16 +215,17 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
   const assign = owner !== undefined && !current.assignee;
   if (assign) await chatwoot.assign(accountId, conversationId, owner.assignee);
 
-  // The topic is a label, and a ticket has one label: added when Jev is confident and the ticket
-  // has no label yet (an automation rule's label, such as an inbox's, is kept alone).
+  // The topic is a label, and a ticket has one besides its kinds: added when Jev is confident and the
+  // ticket has no other label yet (an automation rule's label, such as an inbox's, is kept alone).
   const topic =
     decision.topic !== null &&
     Object.hasOwn(routing.topics ?? {}, decision.topic) &&
     decision.topicConfidence >= routing.minConfidence &&
-    current.labels.length === 0
+    current.labels.every((label) => Object.hasOwn(kinds, label))
       ? decision.topic
       : null;
-  if (topic !== null) await chatwoot.setLabels(accountId, conversationId, [...current.labels, topic]);
+  const labels = withKind(topic === null ? current.labels : [...current.labels, topic]);
+  if (labels !== current.labels) await chatwoot.setLabels(accountId, conversationId, labels);
 
   // Only with an owner: Chatwoot would assign an unassigned ticket to the relay, as its sender.
   const reply =

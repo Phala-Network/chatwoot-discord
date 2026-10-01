@@ -227,8 +227,8 @@ Used inside a ticket post, by Discord users linked in `agents[]` who have a toke
   **Block** asks you to confirm first (only you see the question), then blocks the contact as
   `/block` does.
 - **Manage** opens a card only you see, drawn with the ticket as it is and coloured by its status:
-  menus for its assignee and its label (the card sets one: choosing one replaces the ticket's
-  labels), and **Open**, **Resolve**, and **Snooze** (until the next reply) buttons with the
+  menus for its assignee and its label (the card sets the one topic label: choosing one replaces
+  the ticket's labels except its [kinds](#routing)), and **Open**, **Resolve**, and **Snooze** (until the next reply) buttons with the
   current status highlighted. A change is made at once, and the card is drawn again with the
   result; a change someone else makes shows the next time it is drawn. A menu lists at most 25
   choices (the current assignee and label among them; a label longer than a menu option can be
@@ -371,7 +371,7 @@ replace:
 | `routing.accounts.<id>.<name>.assignee` | integer > 0 | required | Chatwoot user id to assign. |
 | `routing.accounts.<id>.<name>.covers` | 1–1000 characters | required | What the owner handles: Jev's criterion for choosing them. |
 | `routing.topics` | object: label → what it covers | unset | Topic labels (Chatwoot label names, lower case) Jev chooses from; one is added when a ticket has none of them. Show them as forum tags with `label:<label>` keys in `forumTags`. Unset: no topic. |
-| `routing.kinds` | object: account id → (kind name → kind) | unset | Kinds of ticket Jev recognizes in routed accounts, and what is done once when it does ([routing](#routing)). Kind names are 1–40 lower-case letters, digits, `_`, or `-`; `none` is reserved. Unset: none. |
+| `routing.kinds` | object: account id → (kind name → kind) | unset | Kinds of ticket Jev recognizes in routed accounts, added as labels beside the topic, and what is done once when it does ([routing](#routing)). Kind names are the account's label names (1–40 lower-case letters, digits, `_`, or `-`); `none` is reserved. Unset: none. |
 | `routing.kinds.<id>.<name>.covers` | 1–1000 characters | required | What the kind is: Jev's criterion for recognizing it. |
 | `routing.kinds.<id>.<name>.reply` | 1–4000 characters | unset | Sent to the customer once, after the ticket has an owner. |
 | `routing.kinds.<id>.<name>.status` | `resolved` or `snoozed` | unset | Set instead of routing the ticket (`snoozed`: until the customer's next message); a new customer message reopens it. Not with `reply`. |
@@ -434,8 +434,10 @@ with `CHATWOOT_RELAY_TOKEN`, whose user must be an agent in the routed inboxes; 
 assignment as made by that user. The sweep queues routing for open, unassigned tickets in its
 window, so a missed webhook only delays it.
 
-With `kinds`, Jev is also asked which of the account's kinds the ticket is (or `none`), and a kind
-it is confident about acts with the decision: a kind with a `status` (spam, for example) sets the
+With `kinds`, Jev is also asked which of the account's kinds the ticket is (or `none`). Kinds are
+labels of a second family: a ticket has one topic label, the category, and a kind Jev is confident
+about is added beside it (create each kind as a label in its account; it needs no forum tag, and
+the card shows it). It also acts with the decision: a kind with a `status` (spam, for example) sets the
 ticket aside, resolved or snoozed until the customer's next message, instead of routing it; the
 contact is not blocked, so a new message reopens the ticket as usual. A kind with a `reply` sends that fixed text to the customer once
 the ticket has an owner (an unassigned ticket would become the relay user's, Chatwoot assigning a

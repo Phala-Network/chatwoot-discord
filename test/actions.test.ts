@@ -374,6 +374,24 @@ describe("executeCommand", () => {
       expect(await cleared.result).toBe("✅ Labels removed.");
       expect(sent(cleared.requests)).toEqual([{ labels: [] }]);
     });
+
+    it("keeps the ticket's kinds when it sets its topic label", async () => {
+      const withKinds = testSettings(
+        {
+          routing: {
+            accounts: { "3": { cloud: { assignee: 42, covers: "Cloud." } } },
+            kinds: { "3": { security: { covers: "A security report." } } },
+          },
+        },
+        { TYPESAFE_API_KEY: "ts-key" },
+      );
+      const ticket = on("GET", conversation, () =>
+        json({ id: 15, status: "open", labels: ["security", "vip"], meta: {} }),
+      );
+      const set = runWith(withKinds, { type: "labels", labels: ["refund"] }, accountLabels, setLabels, ticket);
+      expect(await set.result).toBe("✅ Label set to refund.");
+      expect(sent(set.requests)).toEqual([{ labels: ["refund", "security"] }]);
+    });
   });
 
   describe("Manage panel", () => {
