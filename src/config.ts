@@ -260,6 +260,12 @@ export const secretsSchema = z.object({
   CHATWOOT_WEBHOOK_SECRETS: jsonRecord,
   /** JSON: {"<Discord user id>": "<that agent's Chatwoot access token>"} */
   CHATWOOT_AGENT_TOKENS: jsonRecord.default({}),
+  /**
+   * JSON: {"<account id>": "<access token of that account's Chatwoot agent bot>"}: the bot that sends
+   * routing kinds' replies, under its own name (e.g. "Acme Support"); required for an account whose
+   * kinds reply.
+   */
+  CHATWOOT_BOT_TOKENS: jsonRecord.default({}),
   /** TypeSafe API key; required when `routing` is configured. */
   TYPESAFE_API_KEY: z.string().min(1).optional(),
   /** Shared with the triage bot's hook, which signs POST /triage/answered. Unset: the route is off. */
@@ -279,6 +285,8 @@ export interface Settings {
   /** Chatwoot user id -> the linked agent. */
   linkedAgent(chatwootUserId: number | null | undefined): AgentConfig | undefined;
   agentToken(discordUserId: string): string | undefined;
+  /** The account's Chatwoot agent bot token (see CHATWOOT_BOT_TOKENS). */
+  botToken(accountId: number): string | undefined;
 }
 
 export class ConfigError extends Error {
@@ -304,6 +312,7 @@ export function loadSettings(env: Env): Settings {
     CHATWOOT_RELAY_TOKEN: env.CHATWOOT_RELAY_TOKEN,
     CHATWOOT_WEBHOOK_SECRETS: env.CHATWOOT_WEBHOOK_SECRETS,
     CHATWOOT_AGENT_TOKENS: env.CHATWOOT_AGENT_TOKENS,
+    CHATWOOT_BOT_TOKENS: env.CHATWOOT_BOT_TOKENS,
     TYPESAFE_API_KEY: env.TYPESAFE_API_KEY,
     TRIAGE_HOOK_SECRET: env.TRIAGE_HOOK_SECRET,
   });
@@ -317,6 +326,11 @@ export function loadSettings(env: Env): Settings {
 export function buildSettings(config: Config, secrets: Secrets): Settings {
   if (config.routing && !secrets.TYPESAFE_API_KEY) {
     throw new ConfigError("Invalid secrets: TYPESAFE_API_KEY: required when routing is configured");
+  }
+  for (const [accountId, kinds] of Object.entries(config.routing?.kinds ?? {})) {
+    if (Object.values(kinds).some((kind) => kind.reply) && !secrets.CHATWOOT_BOT_TOKENS[accountId]) {
+      throw new ConfigError(`Invalid secrets: CHATWOOT_BOT_TOKENS: account ${accountId} has kinds that reply`);
+    }
   }
   const accounts = new Map(config.accounts.map((account) => [account.id, account]));
   const chatwootUsers = new Map(config.agents.map((agent) => [agent.discordUserId, agent.chatwootUserId]));
@@ -335,6 +349,7 @@ export function buildSettings(config: Config, secrets: Secrets): Settings {
     chatwootUserFor: (discordUserId) => chatwootUsers.get(discordUserId),
     linkedAgent: (chatwootUserId) => (chatwootUserId == null ? undefined : linkedAgents.get(chatwootUserId)),
     agentToken: (discordUserId) => secrets.CHATWOOT_AGENT_TOKENS[discordUserId],
+    botToken: (accountId) => secrets.CHATWOOT_BOT_TOKENS[String(accountId)],
   };
 }
 

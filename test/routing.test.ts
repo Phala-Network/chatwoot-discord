@@ -105,7 +105,10 @@ function world(
 }
 
 function context(store = new MapStore(), routing: object = ROUTING) {
-  const settings = testSettings({ routing }, { TYPESAFE_API_KEY: "ts-key" });
+  const settings = testSettings(
+    { routing },
+    { TYPESAFE_API_KEY: "ts-key", CHATWOOT_BOT_TOKENS: JSON.stringify({ "1": "bot-token" }) },
+  );
   const fetch = (request: Request) => globalThis.fetch(request);
   return { settings, store, chatwoot: chatwootClient(settings.config.chatwoot.baseUrl, "relay-token", fetch), fetch };
 }
@@ -385,10 +388,6 @@ describe("routeConversation with kinds", () => {
     expect(sent(requests, "POST", `${CW}/labels`).map((r) => JSON.parse(r.body))).toEqual([
       { labels: ["billing", "startup-program"] },
     ]);
-    // The reply is sent once the ticket has its owner.
-    const at = (method: string, path: string) =>
-      requests.findIndex((request) => request.method === method && request.url.pathname.endsWith(path));
-    expect(at("POST", "/assignments")).toBeLessThan(at("POST", "/messages"));
     await routeConversation(context(store, KINDS), 1, 5);
     expect(replies(requests)).toHaveLength(1);
 
@@ -418,24 +417,15 @@ describe("routeConversation with kinds", () => {
     expect(replies(requests)).toHaveLength(1);
   });
 
-  it("replies only once the ticket has an owner", async () => {
-    const store = new MapStore();
-    const message = (id: number) => ({ id, content: `Message ${id}`, message_type: 0 });
-    const ticket: Ticket = { messages: [message(1)] };
-    const jev = {
-      owner: ["unclear", 1] as [string, number],
-      topic: ["billing", 1] as [string, number],
-      kind: ["startup-program", 1] as [string, number],
-    };
-    const { requests } = world(ticket, jev);
+  it("replies as the account's agent bot, under its name, also before the ticket has an owner", async () => {
+    const { requests } = world({}, { owner: ["unclear", 1], topic: ["billing", 1], kind: ["startup-program", 1] });
 
-    await routeConversation(context(store, KINDS), 1, 5);
-    expect(replies(requests)).toEqual([]);
-    ticket.messages = [message(1), message(2)];
-    jev.owner = ["cloud", 1];
-    await routeConversation(context(store, KINDS), 1, 5);
+    await routeConversation(context(new MapStore(), KINDS), 1, 5);
 
-    expect(replies(requests)).toHaveLength(1);
+    const [reply] = sent(requests, "POST", `${CW}/messages`);
+    expect(reply?.headers.get("api_access_token")).toBe("bot-token");
+    // A bot's reply assigns nobody.
+    expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
   });
 
   it("resolves a spam ticket instead of routing it, without blocking its contact", async () => {

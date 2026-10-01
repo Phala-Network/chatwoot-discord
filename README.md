@@ -173,6 +173,7 @@ npx wrangler secret put CHATWOOT_RELAY_TOKEN
 npx wrangler secret put CHATWOOT_WEBHOOK_SECRETS   # {} for now; filled in step 4
 npx wrangler secret put CHATWOOT_AGENT_TOKENS      # {"<discord user id>":"<chatwoot token>"}
 npx wrangler secret put TYPESAFE_API_KEY           # only with routing
+npx wrangler secret put CHATWOOT_BOT_TOKENS        # only with routing kinds that reply: {"<account id>":"<bot token>"}
 npx wrangler secret put TRIAGE_HOOK_SECRET         # only with a triage bot hook (see Triage bot hook)
 npm run deploy
 ```
@@ -373,7 +374,7 @@ replace:
 | `routing.topics` | object: label → what it covers | unset | Topic labels (Chatwoot label names, lower case) Jev chooses from; one is added when a ticket has none of them. Show them as forum tags with `label:<label>` keys in `forumTags`. Unset: no topic. |
 | `routing.kinds` | object: account id → (kind name → kind) | unset | Kinds of ticket Jev recognizes in routed accounts, added as labels beside the topic, and what is done once when it does ([routing](#routing)). Kind names are the account's label names (1–40 lower-case letters, digits, `_`, or `-`); `none` is reserved. Unset: none. |
 | `routing.kinds.<id>.<name>.covers` | 1–1000 characters | required | What the kind is: Jev's criterion for recognizing it. |
-| `routing.kinds.<id>.<name>.reply` | 1–4000 characters | unset | Sent to the customer once, after the ticket has an owner. |
+| `routing.kinds.<id>.<name>.reply` | 1–4000 characters | unset | Sent to the customer once, by the account's agent bot (`CHATWOOT_BOT_TOKENS`). |
 | `routing.kinds.<id>.<name>.status` | `resolved` or `snoozed` | unset | Set instead of routing the ticket (`snoozed`: until the customer's next message); a new customer message reopens it. Not with `reply`. |
 | `reconcile.lookbackSeconds` | integer ≥ 60 | `3600` | Minimum sweep window (conversations with activity within it are checked). Messages older than this are relayed without notifications. |
 | `reconcile.maxCatchUpSeconds` | integer ≥ 60 | `604800` (7 days) | Maximum sweep window after downtime. |
@@ -391,6 +392,7 @@ Secrets (Worker secrets, never in config), also validated at startup:
 | `CHATWOOT_WEBHOOK_SECRETS` | JSON object, `{"<account id>":"<secret>"}` | Each account's webhook secret. |
 | `CHATWOOT_AGENT_TOKENS` | JSON object, `{"<Discord user id>":"<token>"}`; optional, default `{}` | Each linked agent's own Chatwoot access token; commands act with it. |
 | `TYPESAFE_API_KEY` | non-empty; required with `routing` | TypeSafe API key for routing. |
+| `CHATWOOT_BOT_TOKENS` | JSON object, `{"<account id>":"<token>"}`; optional, default `{}` | Each account's Chatwoot agent bot, which sends routing kinds' replies under its own name; required for an account whose kinds reply. |
 | `TRIAGE_HOOK_SECRET` | 32+ characters; optional | Signs the triage bot's hook ([triage bot hook](#triage-bot-hook)). Unset: the route is off. |
 
 ### Support queue
@@ -439,11 +441,13 @@ labels of a second family: a ticket has one topic label, the category, and a kin
 about is added beside it (create each kind as a label in its account; it needs no forum tag, and
 the card shows it). It also acts with the decision: a kind with a `status` (spam, for example) sets the
 ticket aside, resolved or snoozed until the customer's next message, instead of routing it; the
-contact is not blocked, so a new message reopens the ticket as usual. A kind with a `reply` sends that fixed text to the customer once
-the ticket has an owner (an unassigned ticket would become the relay user's, Chatwoot assigning a
-ticket to whoever replies), for example to acknowledge an application or point a security report
-to its process. A reply goes out at most once per ticket: it is recorded before it is sent, so a
-failed send is not retried. Rules that need no judgement of the text (by inbox, sender, or
+contact is not blocked, so a new message reopens the ticket as usual. A kind with a `reply` sends that fixed text to the customer, for
+example to acknowledge an application or point a security report to its process, as the account's
+Chatwoot agent bot (`CHATWOOT_BOT_TOKENS`): customers see the bot's name, such as "Acme Support"; a
+bot's message assigns nobody and is no human first reply, and Chatwoot then counts the customer as
+answered (no longer waiting) until they write again. Create the bot in the account (Settings →
+Bots), without connecting it to an inbox. A reply goes out at most once per ticket: it is recorded
+before it is sent, so a failed send is not retried. Rules that need no judgement of the text (by inbox, sender, or
 subject) are Chatwoot's automation rules.
 
 ```jsonc

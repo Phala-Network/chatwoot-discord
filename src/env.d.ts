@@ -10,6 +10,7 @@ declare namespace Cloudflare {
     CHATWOOT_RELAY_TOKEN: string;
     CHATWOOT_WEBHOOK_SECRETS: string;
     CHATWOOT_AGENT_TOKENS?: string;
+    CHATWOOT_BOT_TOKENS?: string;
     TYPESAFE_API_KEY?: string;
     TRIAGE_HOOK_SECRET?: string;
   }

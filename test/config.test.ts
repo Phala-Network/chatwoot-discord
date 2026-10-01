@@ -102,6 +102,15 @@ describe("configuration", () => {
     const config = configSchema.parse({ ...minimal, routing: { accounts: { "1": owners } } });
     expect(() => buildSettings(config, secrets())).toThrow(/TYPESAFE_API_KEY/);
     expect(buildSettings(config, secrets({ TYPESAFE_API_KEY: "key" })).config.routing?.accounts["1"]).toEqual(owners);
+
+    // A kind that replies needs its account's agent bot, which sends the reply.
+    const replying = configSchema.parse({
+      ...minimal,
+      routing: { accounts: { "1": owners }, kinds: { "1": { security: { covers: "Security.", reply: "Thanks." } } } },
+    });
+    expect(() => buildSettings(replying, secrets({ TYPESAFE_API_KEY: "key" }))).toThrow(/CHATWOOT_BOT_TOKENS/);
+    const withBot = secrets({ TYPESAFE_API_KEY: "key", CHATWOOT_BOT_TOKENS: JSON.stringify({ "1": "bot" }) });
+    expect(buildSettings(replying, withBot).botToken(1)).toBe("bot");
   });
 
   it("requires a subrequest budget that fits the support queue", () => {
