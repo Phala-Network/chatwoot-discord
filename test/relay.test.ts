@@ -298,6 +298,17 @@ describe("Relay", () => {
     expect(forum.calls.every(([, payload]) => payload.allowed_mentions?.parse?.length === 0)).toBe(true);
   });
 
+  it("does not call the triage bot for a message a routing kind's reply answered", async () => {
+    ({ relay, forum } = relayWith({ triage, answeredAutomatically: (_account, _conversation, id) => id <= 101 }));
+    await relay.relay(message());
+    await relay.relay(message({ id: 102, content: "One more thing" }));
+    const [answered, later] = forum.contents().slice(1);
+    expect(answered).toBe(
+      "My agent will not connect\n-# Triage bot not called: answered automatically. Ask it here if needed.",
+    );
+    expect(later).toBe(`One more thing\n-# <@${TRIAGE}>`);
+  });
+
   it("calls the triage bot within its hourly budgets", async () => {
     ({ relay, forum } = relayWith({ triage }));
     for (let i = 0; i < 7; i += 1) await relay.relay(message({ id: 200 + i, content: `msg ${i}` }));

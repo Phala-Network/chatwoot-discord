@@ -49,12 +49,14 @@ const payloadSchema = z.discriminatedUnion("type", [
 ]);
 type JobPayload = z.infer<typeof payloadSchema>;
 
+// Routing comes before relaying a conversation's new messages, so a message a routing kind's reply
+// answers is relayed without calling the triage bot.
 const PRIORITY = {
   command: 0,
   answer: 1,
   sweep: 1,
+  route: 1,
   conversation: 2,
-  route: 2,
   "message-updated": 3,
   queue: 4,
 } as const;

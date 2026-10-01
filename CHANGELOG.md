@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A customer message a routing kind's reply answered does not call the triage bot; a note says so,
+  and the customer's next message calls it as usual. Routing now runs before a conversation's new
+  messages are relayed, so a new post also opens with its ticket assigned and labelled.
+
 ## [0.22.0] - 2026-09-30
 
 ### Added

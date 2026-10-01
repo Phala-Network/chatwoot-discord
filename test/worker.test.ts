@@ -1188,6 +1188,11 @@ describe("worker", () => {
     await drain();
 
     expect(world.sent("POST", /^\/v1\/systemone$/)).toHaveLength(1);
+    // Routed before its message is relayed, so the post opens with the ticket assigned.
+    const jev = world.requests.findIndex((request) => request.url.pathname === "/v1/systemone");
+    const firstPost = world.requests.findIndex((request) => request.url.pathname.startsWith("/api/v10/webhooks/"));
+    expect(jev).toBeGreaterThanOrEqual(0);
+    expect(firstPost).toBeGreaterThan(jev);
     expect(world.sent("POST", /\/accounts\/1\/conversations\/7\/assignments$/).map((r) => JSON.parse(r.body))).toEqual([
       { assignee_id: 6 },
     ]);

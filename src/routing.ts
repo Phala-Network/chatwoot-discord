@@ -25,7 +25,9 @@
 // reopens) instead of routing it; `cannedResponse` sends that Chatwoot canned response, read when
 // it is sent (none while it does not exist), as the account's Chatwoot agent bot, under its own name,
 // which assigns nobody and is no human first reply. A reply is sent at most once per ticket: it is
-// recorded before it is sent, so a failed send is not retried, and a reply is never repeated.
+// recorded before it is sent, so a failed send is not retried, and a reply is never repeated. The
+// customer messages it answers (those Jev was given) do not call the triage bot (see
+// answeredAutomatically): routing runs before a new message is relayed.
 
 import { z } from "zod";
 import {
@@ -118,9 +120,23 @@ function routingKey(accountId: number, conversationId: number): string {
   return `route:${accountId}:${conversationId}`;
 }
 
-/** Recorded once a kind's reply is (about to be) sent to the ticket's customer. */
+/**
+ * Recorded once a kind's reply is (about to be) sent to the ticket's customer: the id of the latest
+ * customer message it answers.
+ */
 function replyKey(accountId: number, conversationId: number): string {
   return `kind-reply:${accountId}:${conversationId}`;
+}
+
+/** Whether a kind's reply answered customer message `messageId`. */
+export function answeredAutomatically(
+  store: RoutingStore,
+  accountId: number,
+  conversationId: number,
+  messageId: number,
+): boolean {
+  const answered = Number(store.get(replyKey(accountId, conversationId)));
+  return Number.isInteger(answered) && messageId <= answered;
 }
 
 /** The account's kinds: labels Jev adds beside a ticket's one topic label (see `kinds`). */
@@ -234,7 +250,7 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
   const botToken = settings.botToken(accountId);
   const reply = shortCode !== undefined && botToken ? await chatwoot.cannedResponse(accountId, shortCode) : undefined;
   if (reply !== undefined && botToken) {
-    store.set(replyKey(accountId, conversationId), decision.kind ?? "");
+    store.set(replyKey(accountId, conversationId), String(decision.lastMessageId));
     const bot = chatwootClient(settings.config.chatwoot.baseUrl, botToken, ctx.fetch);
     await bot.createMessage(accountId, conversationId, { content: reply, private: false, files: [] });
   }
