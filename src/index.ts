@@ -16,7 +16,7 @@ import { DiscordRest } from "./discord/rest.ts";
 import { HUB_NAME } from "./hub.ts";
 import { errorFields, log } from "./log.ts";
 
-/** Use draft may look up the triage bot's answer this long, while Discord waits for the reply editor. */
+/** Reply with draft may look up the triage bot's answer this long, while Discord waits for the reply editor. */
 const DRAFT_DEADLINE_MS = 2000;
 
 const app = new Hono<{ Bindings: Env }>();

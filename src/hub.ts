@@ -96,7 +96,7 @@ const RUN_WALL_MS = 5 * 60 * 1000;
  */
 const COMMAND_START_DEADLINE_MS = 12 * 60 * 1000;
 const EXPIRED = "❌ This could not start in time, so nothing was done. Please try again.";
-/** How long a triage answer's draft is kept for Use draft, and the answer remembered. */
+/** How long a triage answer's draft is kept for Reply with draft, and the answer remembered. */
 const ANSWER_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 /** How long the support queue may be posted after it is due: Discord's nonce check covers a few minutes. */
 const QUEUE_RETRY_MS = 3 * 60 * 1000;
@@ -155,7 +155,7 @@ export class Hub extends DurableObject<Env> {
 
   /**
    * The triage bot's answer `answerId` to message `replyTo` is in the post, with the reply draft it proposes: the
-   * draft is kept for Use draft, and the post's card offers it under the answer (Relay.answered).
+   * draft is kept for Reply with draft, and the post's card offers it under the answer (Relay.answered).
    * Each answer is taken once, so a repeated call adds nothing.
    */
   async triageAnswered(threadId: string, answerId: string, replyTo: string, draft: string): Promise<void> {

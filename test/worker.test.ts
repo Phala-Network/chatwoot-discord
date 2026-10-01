@@ -177,7 +177,7 @@ class World {
       ),
       on("PATCH", /^discord\.com\/api\/v10\/webhooks\/1\/tok\/messages\/[\w-]+$/, () => json({})),
       on("GET", /^discord\.com\/api\/v10\/channels\/\d+\/messages$/, () => json([])),
-      // A message read (Use draft without a kept draft): Discord does not give it back.
+      // A message read (Reply with draft without a kept draft): Discord does not give it back.
       on("GET", /^discord\.com\/api\/v10\/channels\/\d+\/messages\/\d+$/, () =>
         json({ message: "Service Unavailable" }, { status: 503 }),
       ),
@@ -487,7 +487,7 @@ describe("worker", () => {
     expect(moved[0]).toMatchObject({ thread, body: { username: "Chatwoot", allowed_mentions: { parse: [] } } });
     expect(buttons(moved[0]?.body)).toEqual([[`ticket:draft:${answerId}`, "ticket:reply"], OWNER, STATE]);
 
-    // Use draft opens the editor with the draft the hook sent: no Discord read, no intent needed.
+    // Reply with draft opens the editor with the draft the hook sent: no Discord read, no intent needed.
     const pressed = await discordInteraction({
       id: "900211",
       application_id: "100000000000000001",

@@ -373,7 +373,7 @@ function defer(context: Context, action: CommandAction): HandlerResult {
 /** A ticket button, or a change in the Manage panel. */
 async function component(context: Context, interaction: APIMessageComponentInteraction): Promise<HandlerResult> {
   const { data } = interaction;
-  // Use draft carries its answer: "ticket:draft:<answer message id>".
+  // Reply with draft carries its answer: "ticket:draft:<answer message id>".
   const answerId = data.custom_id.startsWith(`${BUTTONS.draft}:`) ? data.custom_id.slice(BUTTONS.draft.length + 1) : "";
   if (/^\d{17,20}$/.test(answerId)) {
     const draft = await context.deps.draftOf(context.threadId, answerId);
