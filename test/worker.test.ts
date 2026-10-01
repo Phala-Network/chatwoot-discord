@@ -1248,7 +1248,7 @@ describe("worker", () => {
     expect(reply?.headers.get("api_access_token")).toBe("bot-globex");
     const relayed = world.webhookPosts().map((post) => String(post.body.content ?? ""));
     const message = relayed.find((content) => content.startsWith("I would like to apply"));
-    expect(message).toMatch(/not called: answered automatically/);
+    expect(message).toMatch(/not called: handled automatically/);
     expect(relayed.some((content) => content.includes("<@100000000000000777>"))).toBe(false);
   });
 

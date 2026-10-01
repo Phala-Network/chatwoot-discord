@@ -269,13 +269,14 @@ while the conversation is resolved.
 - Every conversation of a configured account is relayed, or only those of the inboxes in
   `accounts[].inboxIds` when it is set. Messages from blocked contacts are not relayed.
 - Messages are posted through the forum webhook, so each shows its sender's name and avatar:
-  customers (their https Chatwoot avatar, else `avatars.contact`), agents as `Name · Account`, and
+  customers (their https Chatwoot avatar, else `avatars.contact`), agents as `Name · Account`, agent
+  bots by their name and https Chatwoot avatar (else `avatars.chatwoot`), and
   everything else as `Chatwoot` (`avatars.chatwoot`). Templates (greetings, CSAT) and messages
   with nothing to show are skipped.
 - An agent's replies and notes show the Discord avatar of the agent's linked Discord user
   (`agents[]`), else the agent's https Chatwoot avatar, else `avatars.chatwoot`. The bot looks
   each linked agent up at most once a day (one extra Discord request); if that fails, it uses the
-  fallback and tries again an hour later. Agent bots keep `avatars.chatwoot`.
+  fallback and tries again an hour later.
 - Tags are the forum's `forumTags` for what the conversation has; anything without a tag there is
   skipped. Discord applies at most 5 per post, taken in this order: account, status, assignee
   (by Chatwoot user id, so a renamed agent keeps their tag), topic (the conversation's
@@ -387,7 +388,7 @@ read that fails is retried with the next request. Set `CONFIG` or `CONFIG_KEY`, 
 | `relay.startAfterMessageId` | integer ≥ 0 | `0` | Messages with an id at or below this are never relayed (cutover watermark). |
 | `relay.maxAttempts` | integer ≥ 1 | `5` | Attempts before a message Discord refuses as invalid is skipped with a notice. |
 | `relay.subrequestBudget` | integer 20–1000, and ≥ `relay.maxChunks` + 28 | `45` | Outbound requests per alarm invocation (Free plan limit: 50). The minimum fits a run's setup and one message's worst case (`src/relay/limits.ts`). |
-| `avatars.chatwoot` | https URL | `<publicUrl>/favicon-512x512.png` | Avatar of activity lines, cards, notices, agent bots, and agents with neither a linked Discord user nor an https Chatwoot avatar. |
+| `avatars.chatwoot` | https URL | `<publicUrl>/favicon-512x512.png` | Avatar of activity lines, cards, notices, agent bots without an https Chatwoot avatar, and agents with neither a linked Discord user nor an https Chatwoot avatar. |
 | `avatars.contact` | https URL | Gravatar "mystery person" | Avatar of customers without an https avatar in Chatwoot. |
 | `queue` | object | unset | The hourly [support queue](#support-queue). Unset: off. Requires `relay.subrequestBudget` ≥ 5 × accounts + 4. |
 | `queue.channelId` | Discord id (17–20 digits) | required | Channel or forum post the queue is posted in. The bot needs *Send Messages* there (*Send Messages in Threads* for a post). |
@@ -480,11 +481,11 @@ Chatwoot agent bot (`CHATWOOT_BOT_TOKENS`): customers see the bot's name, such a
 bot's message assigns nobody and is no human first reply, and Chatwoot then counts the customer as
 answered (no longer waiting) until they write again. Create the bot in the account (Settings →
 Bots), without connecting it to an inbox. A reply goes out at most once per ticket: it is recorded
-before it is sent, so a failed send is not retried. Once sent, the customer messages it answers (those
-Jev was given) are relayed without calling the triage bot, with a note. In an account whose kinds
-reply, a ticket's new customer message is not posted while the ticket's routing is queued (and has
-not failed), up to 30 seconds after it was queued; a routing that fails or stays queued longer lets it
-through with the mention as usual. The customer's next message calls the bot as usual. Rules that need no judgement of the text (by inbox, sender, or
+before it is sent, so a failed send is not retried. Once a kind replied or set the ticket aside, the
+customer messages it handled (those Jev was given) are relayed without calling the triage bot, with a
+note. In an account whose kinds act, a ticket's new customer message is not posted while the ticket's
+routing is queued (and has not failed), up to 30 seconds after it was queued; a routing that fails or
+stays queued longer lets it through with the mention as usual. The customer's next message calls the bot as usual. Rules that need no judgement of the text (by inbox, sender, or
 subject) are Chatwoot's automation rules.
 
 ```jsonc

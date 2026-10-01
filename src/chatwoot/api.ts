@@ -111,7 +111,10 @@ const messageSchema = z.object({
     })
     .nullish()
     .catch(null),
-  sender: z.object({ id: z.number().nullish(), name: text, email: text, type: text, thumbnail: text }).nullish(),
+  // A user's or contact's picture is `thumbnail`; an agent bot's is `avatar_url` ("" without one).
+  sender: z
+    .object({ id: z.number().nullish(), name: text, email: text, type: text, thumbnail: text, avatar_url: text })
+    .nullish(),
   attachments: z.array(attachmentSchema).nullish(),
 });
 export type ChatwootMessage = z.infer<typeof messageSchema>;
@@ -459,7 +462,7 @@ export function toRelayMessage(
           name: message.sender.name,
           email: message.sender.email,
           type: message.sender.type,
-          avatarUrl: message.sender.thumbnail,
+          avatarUrl: message.sender.thumbnail ?? message.sender.avatar_url,
         }
       : undefined,
     account: context.account,

@@ -145,8 +145,8 @@ export interface RelayOptions {
   linkedAgent?: ((chatwootUserId: number) => LinkedAgent | undefined) | undefined;
   /** Whether the conversation's routing is still to run: its new customer messages wait for it. */
   routingPending?: ((accountId: number, conversationId: number) => boolean) | undefined;
-  /** Whether a routing kind's reply answered a customer message: it does not call the triage bot. */
-  answeredAutomatically?: ((accountId: number, conversationId: number, messageId: number) => boolean) | undefined;
+  /** Whether a routing kind handled a customer message (replied or set it aside): it does not call the triage bot. */
+  handledAutomatically?: ((accountId: number, conversationId: number, messageId: number) => boolean) | undefined;
   /** The post's card for the ticket, offering the draft of the triage bot's answer `answerId`; none if unset. */
   card?: ((ticket: CardTicket, answerId: string | undefined) => MessageComponents) | undefined;
   /** Messages created longer ago than this are relayed without notifications. */
@@ -186,7 +186,7 @@ export class Relay {
       triage: options.triage,
       linkedAgent: options.linkedAgent,
       routingPending: options.routingPending,
-      answeredAutomatically: options.answeredAutomatically,
+      handledAutomatically: options.handledAutomatically,
       liveSeconds: options.liveSeconds,
       now: options.now ?? (() => new Date()),
     });

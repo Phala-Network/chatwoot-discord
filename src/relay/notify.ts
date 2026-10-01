@@ -1,5 +1,5 @@
 // Who a relayed message notifies, as lines added to its last part: the triage bot mention
-// (within its hourly budgets, and not for a message a routing kind's reply answered) and the
+// (within its hourly budgets, and not for a message a routing kind handled) and the
 // linked assignee's ping on customer messages. Also who a
 // post announces as newly assigned, which Relay posts after the live messages of a run. Only
 // live messages notify; history relayed later (the first sync of an older conversation, a
@@ -21,10 +21,10 @@ interface NotifierOptions {
   triage?: TriageOptions | undefined;
   /** The agent linked to a Chatwoot user id, if any. */
   linkedAgent?: ((chatwootUserId: number) => LinkedAgent | undefined) | undefined;
-  /** Whether the conversation's routing, which may answer its customer messages, is still to run. */
+  /** Whether the conversation's routing, which may handle its customer messages, is still to run. */
   routingPending?: ((accountId: number, conversationId: number) => boolean) | undefined;
-  /** Whether a routing kind's reply answered a customer message (see routing.ts). */
-  answeredAutomatically?: ((accountId: number, conversationId: number, messageId: number) => boolean) | undefined;
+  /** Whether a routing kind handled a customer message: replied to it or set its ticket aside (see routing.ts). */
+  handledAutomatically?: ((accountId: number, conversationId: number, messageId: number) => boolean) | undefined;
   /** A message created longer ago than this is history. */
   liveSeconds: number;
   now: () => Date;
@@ -46,7 +46,7 @@ export function assigneeKey(conversation: RelayConversation): string {
 const LONGEST_MENTION = `<@${"9".repeat(20)}>`;
 
 /**
- * A customer message waits for its conversation's routing, which may answer it: the relay stops
+ * A customer message waits for its conversation's routing, which may handle it: the relay stops
  * before posting it, and its job runs again shortly.
  */
 export class RoutingPendingError extends Error {
@@ -64,7 +64,7 @@ export class Notifier {
     const { triage } = options;
     const lines = [
       `-# ${LONGEST_MENTION} ${LONGEST_MENTION}`,
-      ...(triage ? [conversationBudgetNote(triage), hourlyBudgetNote(triage), answeredNote(triage)] : []),
+      ...(triage ? [conversationBudgetNote(triage), hourlyBudgetNote(triage), handledNote(triage)] : []),
     ];
     this.reserve = lines.reduce((sum, line) => sum + line.length + 1, 0);
   }
@@ -109,25 +109,26 @@ export class Notifier {
   }
 
   /**
-   * The triage bot mention for a customer message, or a note when a routing kind's reply answered
+   * The triage bot mention for a customer message, or a note when a routing kind handled
    * it or the bot's hourly budget is used up. Throws RoutingPendingError while the conversation's
    * routing is still to run.
    */
   private triage(message: RelayMessage): { mention?: string; note?: string } {
-    const { triage, store, routingPending, answeredAutomatically } = this.options;
+    const { triage, store, routingPending, handledAutomatically } = this.options;
     if (!triage || !fromCustomer(message)) return {};
     const { account, conversation } = message;
     // Decided and counted once per message: a retry after a failed post repeats the decision.
     const decision = store.once(`triage:${account.id}:${message.id}`, () => {
       if (routingPending?.(account.id, conversation.id)) throw new RoutingPendingError();
-      if (answeredAutomatically?.(account.id, conversation.id, message.id)) return "answered";
+      // Recorded as "answered" since v0.23, when only replies counted.
+      if (handledAutomatically?.(account.id, conversation.id, message.id)) return "answered";
       const hour = this.options.now().toISOString().slice(0, 13);
       const key = `${message.account.id}:${message.conversation.id}`;
       if (store.increment(`triage:${key}:${hour}`) > triage.perConversationPerHour) return "conversation";
       if (store.increment(`triage:${hour}`) > triage.perHour) return "hour";
       return "mention";
     });
-    if (decision === "answered") return { note: answeredNote(triage) };
+    if (decision === "answered") return { note: handledNote(triage) };
     if (decision === "conversation") return { note: conversationBudgetNote(triage) };
     if (decision === "hour") return { note: hourlyBudgetNote(triage) };
     return { mention: triage.userId };
@@ -148,8 +149,10 @@ function conversationBudgetNote(triage: TriageOptions): string {
   return `-# ${triage.name} not called: more than ${triage.perConversationPerHour} customer messages in this conversation this hour. Ask it here if needed.`;
 }
 
-function answeredNote(triage: TriageOptions): string {
-  return `-# ${triage.name} not called: answered automatically. Ask it here if needed.`;
+function handledNote(triage: TriageOptions): string {
+  // As long as v0.23's "answered automatically. Ask it here if needed.": the notes' length decides where a
+  // message splits (see reserve), which a retry across versions relies on.
+  return `-# ${triage.name} not called: handled automatically. Ask it here, if needed.`;
 }
 
 function hourlyBudgetNote(triage: TriageOptions): string {

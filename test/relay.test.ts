@@ -2,7 +2,7 @@ import { ComponentType } from "discord-api-types/v10";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ticketCard } from "../src/commands/components.ts";
 import { CONTENT_LIMIT } from "../src/relay/format.ts";
-import { RoutingPendingError } from "../src/relay/notify.ts";
+import { Notifier, RoutingPendingError } from "../src/relay/notify.ts";
 import { Relay, type RelayOptions, type WebhookMessage } from "../src/relay/relay.ts";
 import type { LinkedAgent, RelayAssignee, RelayMessage } from "../src/relay/types.ts";
 import { FakeForum, FORUM, MemoryStore, message, snowflake, TAGS, TRIAGE } from "./helpers.ts";
@@ -104,7 +104,7 @@ describe("Relay", () => {
     expect(forum.patches).toEqual([]);
   });
 
-  it("gives agents their linked Discord avatar, else their https Chatwoot avatar, else the Chatwoot avatar", async () => {
+  it("gives agents their linked Discord avatar, else their https Chatwoot avatar, else the Chatwoot avatar; agent bots theirs", async () => {
     const discord = "https://cdn.discordapp.com/avatars/100000000000000012/abc.png";
     const agent = (id: number, avatarUrl: string, extra: { discordAvatarUrl?: string; private?: boolean } = {}) =>
       message({ id, messageType: "outgoing", sender: { name: "Sam", type: "user", avatarUrl }, ...extra });
@@ -124,7 +124,7 @@ describe("Relay", () => {
       "https://files.example.com/sam.png",
       AVATARS.chatwoot,
       AVATARS.chatwoot,
-      AVATARS.chatwoot,
+      "https://files.example.com/bot.png",
     ]);
   });
 
@@ -300,12 +300,12 @@ describe("Relay", () => {
   });
 
   it("does not call the triage bot for a message a routing kind's reply answered", async () => {
-    ({ relay, forum } = relayWith({ triage, answeredAutomatically: (_account, _conversation, id) => id <= 101 }));
+    ({ relay, forum } = relayWith({ triage, handledAutomatically: (_account, _conversation, id) => id <= 101 }));
     await relay.relay(message());
     await relay.relay(message({ id: 102, content: "One more thing" }));
     const [answered, later] = forum.contents().slice(1);
     expect(answered).toBe(
-      "My agent will not connect\n-# Triage bot not called: answered automatically. Ask it here if needed.",
+      "My agent will not connect\n-# Triage bot not called: handled automatically. Ask it here, if needed.",
     );
     expect(later).toBe(`One more thing\n-# <@${TRIAGE}>`);
   });
@@ -318,6 +318,11 @@ describe("Relay", () => {
     pending = false;
     await relay.relay(message());
     expect(forum.contents().at(-1)).toBe(`My agent will not connect\n-# <@${TRIAGE}>`);
+  });
+
+  it("keeps the room for notification lines that messages were split with since v0.23", () => {
+    // A retry resumes a message after the parts already posted: the split must not move between versions.
+    expect(new Notifier({ store: new MemoryStore(), triage, liveSeconds: 3600, now: () => NOW }).reserve).toBe(326);
   });
 
   it("calls the triage bot within its hourly budgets", async () => {
