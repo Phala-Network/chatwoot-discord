@@ -49,5 +49,6 @@ jobs:
           node lib/scripts/store-config.js || [ $? -eq 2 ]
           cd test/package
           npm install --no-save --no-audit --no-fund ./chatwoot-discord-relay-*.tgz typescript @cloudflare/workers-types @types/node@24
-          npx tsc
+          npx tsc -p tsconfig.json
+          npx tsc -p tsconfig.worker.json
 
