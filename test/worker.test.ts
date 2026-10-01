@@ -1054,10 +1054,10 @@ describe("worker", () => {
   });
 
   it("runs a command that comes during a sweep before the sweep's next page", async () => {
-    const thread = "100000000000030017";
+    const thread = "100000000000030036";
     await runInDurableObject(hub(), (_instance, state) => {
       state.storage.sql.exec(
-        "INSERT INTO conversations (account_id, conversation_id, thread_id, cursor) VALUES (3, 18, ?, 0)",
+        "INSERT INTO conversations (account_id, conversation_id, thread_id, cursor) VALUES (3, 36, ?, 0)",
         thread,
       );
     });
@@ -1084,10 +1084,10 @@ describe("worker", () => {
     const profile = on("GET", "chatwoot.example.com/api/v1/profile", () =>
       json({ id: 42, name: "Alice", email: "alice@example.com", accounts: [{ id: 3 }] }),
     );
-    const toggle = on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/18/toggle_status", () => json({}));
+    const toggle = on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/36/toggle_status", () => json({}));
     world.mock.spy.mockRestore();
     world = new World([pages, profile, toggle]);
-    world.conversation(18, [], {}, "resolved");
+    world.conversation(36, [], {}, "resolved");
     const isPage = (request: Recorded) => request.url.pathname === "/api/v1/accounts/3/conversations";
 
     const ctx = createExecutionContext();
