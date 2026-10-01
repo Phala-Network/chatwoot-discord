@@ -13,6 +13,7 @@ import { readDraft } from "./commands/draft.ts";
 import { handleInteraction, privately } from "./commands/handler.ts";
 import { ConfigError } from "./config.ts";
 import { DiscordRest } from "./discord/rest.ts";
+import type { Env } from "./env.ts";
 import { HUB_NAME } from "./hub.ts";
 import { errorFields, log } from "./log.ts";
 import { loadSettings } from "./settings.ts";

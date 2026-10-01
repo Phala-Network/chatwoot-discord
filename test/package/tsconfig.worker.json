@@ -1,0 +1,8 @@
+// The README's src/index.ts, with Workers types only; declarations checked too.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types"]
+  },
+  "include": ["src"]
+}

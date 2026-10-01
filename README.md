@@ -1,8 +1,8 @@
-# chatwoot-discord
+# chatwoot-discord-relay
 
-[![CI](https://github.com/Phala-Network/chatwoot-discord/actions/workflows/ci.yml/badge.svg)](https://github.com/Phala-Network/chatwoot-discord/actions/workflows/ci.yml)
-[![CodeQL](https://github.com/Phala-Network/chatwoot-discord/actions/workflows/codeql.yml/badge.svg)](https://github.com/Phala-Network/chatwoot-discord/actions/workflows/codeql.yml)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Phala-Network/chatwoot-discord/badge)](https://scorecard.dev/viewer/?uri=github.com/Phala-Network/chatwoot-discord)
+[![CI](https://github.com/Phala-Network/chatwoot-discord-relay/actions/workflows/ci.yml/badge.svg)](https://github.com/Phala-Network/chatwoot-discord-relay/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/Phala-Network/chatwoot-discord-relay/actions/workflows/codeql.yml/badge.svg)](https://github.com/Phala-Network/chatwoot-discord-relay/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Phala-Network/chatwoot-discord-relay/badge)](https://scorecard.dev/viewer/?uri=github.com/Phala-Network/chatwoot-discord-relay)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Mirror every [Chatwoot](https://www.chatwoot.com/) conversation into a Discord forum post, and
@@ -20,7 +20,7 @@ Cloudflare Workers (the Free plan is enough).
 a minor release may change configuration or setup; the [changelog](CHANGELOG.md) says what to
 do when it does.
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Phala-Network/chatwoot-discord)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Phala-Network/chatwoot-discord-relay)
 
 ![A Discord forum with one post per Chatwoot conversation, filtered by brand, status, assignee, and topic tags](docs/assets/forum.png)
 
@@ -339,30 +339,50 @@ replace.
 A var holds at most 5 KB ([Workers limits](https://developers.cloudflare.com/workers/platform/limits/)).
 A larger configuration goes in a [KV namespace](https://developers.cloudflare.com/kv/) bound as
 `CONFIG_STORE`, and is deployed with the [Cloudflare CLI](https://developers.cloudflare.com/cf/)
-(`cf`, in beta; a dev dependency here). Write the configuration, as JSON with comments, in a file
-of its own, and in `cloudflare.config.ts` (see
-[Migrate a Wrangler project](https://developers.cloudflare.com/cf/wrangler/migrate/)) bind the
-namespace and the configuration's key instead of `CONFIG`:
+(`cf`, in beta). Set `CONFIG` or `CONFIG_KEY`, not both.
+
+**From a repository of your own** (to keep your configuration private), depend on the
+[`chatwoot-discord-relay`](https://www.npmjs.com/package/chatwoot-discord-relay) package, published from
+this repository's releases with npm provenance, at an exact version. Your project needs `cf` and `wrangler`
+as dev dependencies, `src/index.ts` with `export { default, Hub } from "chatwoot-discord-relay";`, the
+configuration as JSON with comments in a file of its own (`config.jsonc`), and a `cloudflare.config.ts`
+that binds the namespace and the configuration's key instead of `CONFIG`:
 
 ```ts
-import { storedConfig } from "./scripts/stored-config.ts";
-// …
-env: {
-  CONFIG_STORE: bindings.kv({ id: "<namespace id>" }),
-  CONFIG_KEY: bindings.text(storedConfig("config.jsonc").key),
-},
+import { bindings, defineConfig, exports, triggers } from "cf/config";
+import { storedConfig } from "chatwoot-discord-relay/stored-config";
+
+export default defineConfig({
+  accountId: "<account id>",
+  worker: {
+    name: "chatwoot-discord",
+    entrypoint: "src/index.ts",
+    compatibilityDate: "2026-08-15",
+    domains: ["<worker host>"],
+    triggers: [triggers.scheduled({ schedule: "*/5 * * * *" })],
+    exports: { Hub: exports.durableObject({ storage: "sqlite" }) },
+    env: {
+      HUB: bindings.durableObject({ worker: "chatwoot-discord", exportName: "Hub" }),
+      CONFIG_STORE: bindings.kv({ id: "<namespace id>" }),
+      CONFIG_KEY: bindings.text(storedConfig(new URL("config.jsonc", import.meta.url)).key),
+    },
+  },
+});
 ```
 
-Then store the configuration before deploying:
+Store the configuration, then deploy. In CI, follow [Use cf in CI](https://developers.cloudflare.com/cf/ci/) without
+`--mode` (this configuration has no modes): `npx cf build`, then `npx cf deploy --prebuilt` after storing the
+configuration. By hand:
 
 ```sh
 npx cf kv namespaces create --title chatwoot-discord-config   # once
-npm run -s store-config -- config.jsonc --namespace-id <namespace id> && npx cf deploy
+npx chatwoot-discord-store-config config.jsonc --namespace-id <namespace id> && npx cf deploy
 ```
 
 Both validate the file. Its key is derived from its content, so each version reads the configuration
 it was deployed with, also after a rollback (stored keys are kept). KV is eventually consistent: a
-read that fails is retried with the next request. Set `CONFIG` or `CONFIG_KEY`, not both.
+read that fails is retried with the next request. In this repository, the same command is
+`npm run -s store-config --`, and `cloudflare.config.ts` imports `./scripts/stored-config.ts`.
 
 | Key | Type and constraints | Default | Meaning |
 |---|---|---|---|
@@ -680,8 +700,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and releases, and
 
 ## Getting help
 
-- Questions and setup help: [GitHub Discussions](https://github.com/Phala-Network/chatwoot-discord/discussions).
-- Bug reports and feature requests: [GitHub Issues](https://github.com/Phala-Network/chatwoot-discord/issues).
+- Questions and setup help: [GitHub Discussions](https://github.com/Phala-Network/chatwoot-discord-relay/discussions).
+- Bug reports and feature requests: [GitHub Issues](https://github.com/Phala-Network/chatwoot-discord-relay/issues).
 - Security vulnerabilities: report privately as described in [SECURITY.md](SECURITY.md), not in a
   public issue.
 - Chatwoot or Discord behaviour itself: their own documentation and support channels.

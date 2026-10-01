@@ -1,5 +1,5 @@
 {
-  "name": "chatwoot-discord",
+  "name": "chatwoot-discord-relay",
   "version": "0.26.0",
   "description": "Mirror Chatwoot conversations into a Discord forum and handle tickets with Discord commands.",
   "keywords": [
@@ -10,17 +10,33 @@
     "helpdesk",
     "customer-support"
   ],
-  "homepage": "https://github.com/Phala-Network/chatwoot-discord#readme",
+  "homepage": "https://github.com/Phala-Network/chatwoot-discord-relay#readme",
   "bugs": {
-    "url": "https://github.com/Phala-Network/chatwoot-discord/issues"
+    "url": "https://github.com/Phala-Network/chatwoot-discord-relay/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Phala-Network/chatwoot-discord.git"
+    "url": "git+https://github.com/Phala-Network/chatwoot-discord-relay.git"
   },
   "license": "MIT",
-  "private": true,
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./lib/src/index.d.ts",
+      "default": "./lib/src/index.js"
+    },
+    "./stored-config": {
+      "types": "./lib/scripts/stored-config.d.ts",
+      "default": "./lib/scripts/stored-config.js"
+    }
+  },
+  "bin": {
+    "chatwoot-discord-store-config": "./lib/scripts/store-config.js"
+  },
+  "files": [
+    "lib",
+    "CHANGELOG.md"
+  ],
   "packageManager": "npm@12.1.0",
   "engines": {
     "node": ">=24.15.0"
@@ -37,14 +53,16 @@
     "gen:chatwoot": "npx --yes --package=openapi-typescript@7.13.0 --package=typescript@5.9.3 -- openapi-typescript https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/swagger/swagger.json --empty-objects-unknown -o src/chatwoot/schema.d.ts",
     "register-commands": "node scripts/register-commands.ts",
     "forum-tags": "node scripts/forum-tags.ts",
-    "store-config": "node scripts/store-config.ts"
+    "store-config": "node scripts/store-config.ts",
+    "build:package": "rm -rf lib && esbuild src/index.ts scripts/stored-config.ts scripts/store-config.ts --bundle --platform=node --format=esm --packages=external --outbase=. --outdir=lib && tsc -p tsconfig.package.json && tsc -p tsconfig.package-node.json",
+    "prepack": "npm run build:package"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.14",
     "@cloudflare/vitest-pool-workers": "0.22.0",
     "@types/node": "^24.19.0",
     "cf": "1.0.0-beta.9",
-    "jsonc-parser": "^3.3.1",
+    "esbuild": "0.28.1",
     "typescript": "~7.0.2",
     "vitest": "^4.1.11",
     "wrangler": "^4.142.0"
@@ -53,13 +71,14 @@
     "discord-api-types": "^0.38.55",
     "discord-interactions": "^4.4.0",
     "hono": "^4.13.9",
+    "jsonc-parser": "^3.3.1",
     "openapi-fetch": "^0.17.0",
     "zod": "^4.6.5"
   },
   "cloudflare": {
     "bindings": {
       "CONFIG": {
-        "description": "Non-secret settings (JSON): Chatwoot URL, accounts and their forum channels, linked agents, and the optional triage bot. The committed values are placeholders; see the [configuration reference](https://github.com/Phala-Network/chatwoot-discord#configuration-reference)."
+        "description": "Non-secret settings (JSON): Chatwoot URL, accounts and their forum channels, linked agents, and the optional triage bot. The committed values are placeholders; see the [configuration reference](https://github.com/Phala-Network/chatwoot-discord-relay#configuration-reference)."
       },
       "DISCORD_BOT_TOKEN": {
         "description": "Bot token of your Discord application (Developer Portal > your application > **Bot**)."

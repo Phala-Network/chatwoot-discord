@@ -3,6 +3,7 @@
 // var (see scripts/store-config.ts); and the Worker secrets.
 
 import { ConfigError, parseSettings, type Settings } from "./config.ts";
+import type { Env } from "./env.ts";
 import { parseJson } from "./json.ts";
 
 const cache = new WeakMap<object, Promise<Settings>>();

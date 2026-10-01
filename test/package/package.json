@@ -1,0 +1,6 @@
+{
+  "name": "chatwoot-discord-relay-consumer",
+  "private": true,
+  "description": "CI fixture: a project that depends on the packed package, type-checked as the README shows it.",
+  "type": "module"
+}

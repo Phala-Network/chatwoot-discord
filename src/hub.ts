@@ -25,6 +25,7 @@ import { type CommandJob, commandJobSchema } from "./commands/job.ts";
 import { relaysInbox, type Settings } from "./config.ts";
 import { DiscordForum } from "./discord/forum.ts";
 import { DiscordHttpError, DiscordRest } from "./discord/rest.ts";
+import type { Env } from "./env.ts";
 import { errorFields, log } from "./log.ts";
 import { postQueue } from "./queue.ts";
 import { queueBudget } from "./queue-limits.ts";

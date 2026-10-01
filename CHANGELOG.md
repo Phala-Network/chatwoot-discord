@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Published to npm as [`chatwoot-discord-relay`](https://www.npmjs.com/package/chatwoot-discord-relay) from
+  each GitHub release, with trusted publishing and provenance, so a deployment can live in a repository
+  of its own: the package exports the Worker (`default`, `Hub`), `storedConfig`
+  (`chatwoot-discord-relay/stored-config`), and the `chatwoot-discord-store-config` command.
+
 ## [0.26.0] - 2026-10-01
 
 ### Changed
@@ -538,37 +545,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-invocation subrequest budget, and a cron reconciliation sweep for missed webhooks.
 - Verification of Chatwoot webhook HMAC signatures and Discord Ed25519 interaction signatures.
 
-[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.26.0...HEAD
-[0.26.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.25.0...v0.26.0
-[0.25.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.24.0...v0.25.0
-[0.24.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.23.0...v0.24.0
-[0.23.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.22.0...v0.23.0
-[0.22.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.21.0...v0.22.0
-[0.21.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.20.1...v0.21.0
-[0.20.1]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.20.0...v0.20.1
-[0.20.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.19.1...v0.20.0
-[0.19.1]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.19.0...v0.19.1
-[0.19.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.18.1...v0.19.0
-[0.18.1]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.18.0...v0.18.1
-[0.18.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.17.0...v0.18.0
-[0.17.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.16.0...v0.17.0
-[0.16.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.15.0...v0.16.0
-[0.15.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.14.0...v0.15.0
-[0.14.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.13.1...v0.14.0
-[0.13.1]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.13.0...v0.13.1
-[0.13.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.12.0...v0.13.0
-[0.12.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.11.0...v0.12.0
-[0.11.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.10.0...v0.11.0
-[0.10.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.9.0...v0.10.0
-[0.9.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.8.1...v0.9.0
-[0.8.1]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.8.0...v0.8.1
-[0.8.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.7.1...v0.8.0
-[0.7.1]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.7.0...v0.7.1
-[0.7.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.6.1...v0.7.0
-[0.6.1]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.6.0...v0.6.1
-[0.6.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/Phala-Network/chatwoot-discord/releases/tag/v0.1.0
+[Unreleased]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.25.0...v0.26.0
+[0.25.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.24.0...v0.25.0
+[0.24.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.23.0...v0.24.0
+[0.23.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.22.0...v0.23.0
+[0.22.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.21.0...v0.22.0
+[0.21.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.20.1...v0.21.0
+[0.20.1]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.20.0...v0.20.1
+[0.20.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.19.1...v0.20.0
+[0.19.1]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.19.0...v0.19.1
+[0.19.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.18.1...v0.19.0
+[0.18.1]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.18.0...v0.18.1
+[0.18.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.17.0...v0.18.0
+[0.17.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.16.0...v0.17.0
+[0.16.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.15.0...v0.16.0
+[0.15.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.14.0...v0.15.0
+[0.14.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.13.1...v0.14.0
+[0.13.1]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.13.0...v0.13.1
+[0.13.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.12.0...v0.13.0
+[0.12.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.11.0...v0.12.0
+[0.11.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.10.0...v0.11.0
+[0.10.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.8.1...v0.9.0
+[0.8.1]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.7.1...v0.8.0
+[0.7.1]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.6.1...v0.7.0
+[0.6.1]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/Phala-Network/chatwoot-discord-relay/releases/tag/v0.1.0
