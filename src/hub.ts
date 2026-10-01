@@ -288,6 +288,25 @@ export class Hub extends DurableObject<Env> {
     if (conversationGone)
       this.enqueue({ type: "conversation", accountId: job.accountId, conversationId: job.conversationId });
     await respond(services.rest, job, content, components);
+    if (!conversationGone) await this.syncAfterCommand(job, services);
+  }
+
+  /**
+   * Brings the post's tags and card in line right after a command, rather than with Chatwoot's
+   * event for the change, whose job waits for the change's activity line (see ACTIVITY_WAIT_MS)
+   * and then posts it, moving the card under it. Best effort: should this fail or run out of
+   * budget, that job does it.
+   */
+  private async syncAfterCommand(job: CommandJob, { chatwoot, relay }: ProcessorContext): Promise<void> {
+    const { accountId, conversationId } = job;
+    const threadId = this.store.conversation(accountId, conversationId)?.threadId;
+    if (!threadId) return;
+    try {
+      const conversation = await chatwoot.getConversation(accountId, conversationId);
+      if (conversation) await relay.sync(accountId, toRelayConversation(conversationId, conversation), threadId);
+    } catch (error) {
+      log.warn("post not synced after command", { accountId, conversationId, ...errorFields(error) });
+    }
   }
 
   /**
