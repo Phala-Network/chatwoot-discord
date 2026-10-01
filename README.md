@@ -7,9 +7,31 @@
 
 Mirror every [Chatwoot](https://www.chatwoot.com/) conversation into a Discord forum post, and
 answer customers from Discord with slash commands and buttons. It is for support teams that
-already work in Discord and use Chatwoot as their help desk, and who want humans and an AI agent
+already work in Discord and use Chatwoot as their help desk, and who want humans and AI agents
 to handle tickets together without leaving Discord. It runs on Cloudflare Workers (the Free plan
 is enough).
+
+- **One forum post per conversation**, kept in sync: every message, private note, and activity
+  line, tagged by account, status, assignee, topic, and priority; resolved posts are archived.
+- **Work from Discord.** Slash commands and each ticket's card reply, add notes, assign, label,
+  snooze, resolve, and block, with the agent's own Chatwoot token, so Chatwoot's permissions and
+  audit trail apply ([Commands and buttons](#commands-and-buttons)).
+- **Ready for AI workflows.** Any Discord bot joins as an AI agent without integration code: it is
+  called on each customer message, reads the whole ticket in its post, and proposes a reply that
+  a human sends with **Reply with draft**. Budgets per ticket and per hour bound its cost
+  ([Connecting an AI agent](docs/ai-agent.md)).
+- **AI triage with [TypeSafe Jev](https://docs.typesafe.ai).** A new ticket is assigned to its
+  owner and gets a topic label. Kinds you describe in plain words, such as spam or security
+  reports, get their label and, if you choose, a canned response and resolution; optionally, a
+  greeting with no request yet is snoozed until the customer says more. Jev acts only when it is confident, and
+  common identifiers are redacted before the text leaves the Worker ([Routing](#routing)).
+- **A support queue.** Every hour, the tickets waiting for a reply or an assignee, pinging their
+  assignees and escalating long-unassigned ones ([Support queue](#support-queue)).
+- **Reliable and secure.** Work is queued durably, retried, and swept every 5 minutes for anything
+  missed; webhooks and interactions are signature-checked, mentions are locked down, and logs hold
+  no message bodies ([Security model](#security-model)).
+- **Private configuration.** Deploy from a repository of your own with the npm package, published
+  with provenance ([Deploy](#3-cloudflare)).
 
 > [!NOTE]
 > An independent, community-maintained integration. It is not affiliated with, endorsed by, or

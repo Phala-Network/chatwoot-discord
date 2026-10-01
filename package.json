@@ -1,14 +1,16 @@
 {
   "name": "chatwoot-discord-relay",
   "version": "0.27.0",
-  "description": "Mirror Chatwoot conversations into a Discord forum and handle tickets with Discord commands.",
+  "description": "Run Chatwoot support from a Discord forum with humans and AI agents: a post per conversation, slash commands, AI drafts, and AI triage.",
   "keywords": [
     "chatwoot",
     "discord",
     "cloudflare-workers",
     "durable-objects",
     "helpdesk",
-    "customer-support"
+    "customer-support",
+    "ai-agents",
+    "triage"
   ],
   "homepage": "https://github.com/Phala-Network/chatwoot-discord-relay#readme",
   "bugs": {
