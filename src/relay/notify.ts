@@ -150,7 +150,9 @@ function conversationBudgetNote(triage: TriageOptions): string {
 }
 
 function handledNote(triage: TriageOptions): string {
-  return `-# ${triage.name} not called: handled automatically. Ask it here if needed.`;
+  // As long as v0.23's "answered automatically. Ask it here if needed.": the notes' length decides where a
+  // message splits (see reserve), which a retry across versions relies on.
+  return `-# ${triage.name} not called: handled automatically. Ask it here, if needed.`;
 }
 
 function hourlyBudgetNote(triage: TriageOptions): string {
