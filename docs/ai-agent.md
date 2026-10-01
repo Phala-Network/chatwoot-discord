@@ -84,7 +84,13 @@ I have issued a corrected copy; you will find it under Billing → Invoices.
 - Keep the draft under 4,000 characters, the reply editor's limit.
 
 A human agent then uses **Apps → Reply with this** on that message. It opens the `/reply` editor
-prefilled with the draft; they can edit it, add attachments, and submit. The reply is sent in
+prefilled with the draft; they can edit it, add attachments, and submit.
+
+Optionally, the agent's side reports each answer with a draft once it is in the post (the
+[triage bot hook](../README.md#triage-bot-hook): the answer's message id, the message it replies
+to, and the draft, signed with `TRIAGE_HOOK_SECRET`). The post's card then moves under the
+answer, led by **Use draft**, which opens the same editor with that draft. Reply to the message
+you answer, so the card knows which question the draft is for. The reply is sent in
 Chatwoot with that human's own access token, so it appears under their name, Chatwoot's
 permissions apply, and an unassigned conversation is assigned to them.
 

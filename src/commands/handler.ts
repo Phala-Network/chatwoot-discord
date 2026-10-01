@@ -335,7 +335,7 @@ function editor(context: Context, kind: "reply" | "note", value: string | undefi
               },
             ]
           : []),
-        ...(kind === "reply"
+        ...(kind === "reply" && context.deps.settings.config.chatwoot.sendAsAgent
           ? [
               {
                 type: ComponentType.Label as const,

@@ -127,7 +127,15 @@ describe("interaction handler", () => {
     expect(response.data.title).toBe("Reply · Acme #15");
     expect(editorField(response, "content")).toMatchObject({ custom_id: "content:777001", style: 2, max_length: 4000 });
     expect(editorField(response, "content")).not.toHaveProperty("value");
-    expect(editorField(response, "from")).toEqual({ type: 23, custom_id: "from:777001" });
+    // Sending from the agent's own address needs a Chatwoot build that can (chatwoot.sendAsAgent).
+    expect(editorField(response, "from")).toBeUndefined();
+    const sendingAsAgent = {
+      ...deps,
+      settings: testSettings({ chatwoot: { baseUrl: "https://chatwoot.example.com", sendAsAgent: true } }),
+    };
+    const offering = (await handleInteraction(interaction({ name: "reply" }), sendingAsAgent)).response;
+    if (offering.type !== InteractionResponseType.Modal) return;
+    expect(editorField(offering, "from")).toEqual({ type: 23, custom_id: "from:777001" });
     expect(editorField(response, "files")).toEqual({
       type: 19,
       custom_id: "files:777001",

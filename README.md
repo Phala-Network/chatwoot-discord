@@ -114,8 +114,9 @@ To connect an AI agent, see [Connecting an AI agent](docs/ai-agent.md).
 
 1. Create an application at <https://discord.com/developers/applications>; note its
    **Application ID** and **Public Key**, and create a **bot token**. No privileged intent is
-   needed; with a triage bot whose hook does not send its drafts, turn on the **Message Content**
-   intent for **Use draft** (an app in 100 or more servers, or exposed to a large one, needs
+   needed: **Use draft** takes the draft the triage bot's hook sends (see
+   [Triage bot hook](#triage-bot-hook)). The **Message Content** intent only lets it read an answer
+   whose draft was not kept (an app in 100 or more servers, or exposed to a large one, needs
    Discord's review first).
 2. Invite the bot with the `bot` and `applications.commands` scopes.
 3. Create a **forum channel**. Give the bot *View Channels*, *Read Message History* (**Use
@@ -231,7 +232,8 @@ Used inside a ticket post, by Discord users linked in `agents[]` who have a toke
   current status highlighted. A change is made at once, and the card is drawn again with the
   result; a change someone else makes shows the next time it is drawn. A menu lists at most 25
   choices (the current assignee and label among them; a label longer than a menu option can be
-  is named in the menu's placeholder instead); assign others with `/assign`, and
+  is named in the menu's placeholder instead, and changed in Chatwoot); assign other linked agents
+  with `/assign` (agents not linked to Discord in Chatwoot), and
   set priority, "pending", and several labels with `/priority`, `/pending`, and `/label`.
 
 A post from before cards gets its card from the sweep while its ticket is not resolved, or with
@@ -239,7 +241,7 @@ its next message; buttons under older messages keep working. The commands work e
 
 | Command | Effect in Chatwoot |
 |---|---|
-| `/reply [message] [attachment]` | Without options, an editor with a message field and an optional upload field; with either option, sends it at once. Sends to the customer; an unassigned conversation is assigned to the sender. Refused when the channel does not accept a reply (Chatwoot's `can_reply`, e.g. after WhatsApp's 24-hour window). The editor's **Send from my email address** sends an email reply from the agent's own mailbox name on the inbox's domain (alice@corp.example answering support@acme.example sends as alice@acme.example); it needs a Chatwoot build that reads `content_attributes.send_as_agent` ([Phala-Network/chatwoot](https://github.com/Phala-Network/chatwoot), `phala/*` branches), and standard Chatwoot sends from the inbox as usual. |
+| `/reply [message] [attachment]` | Without options, an editor with a message field and an optional upload field; with either option, sends it at once. Sends to the customer; an unassigned conversation is assigned to the sender. Refused when the channel does not accept a reply (Chatwoot's `can_reply`, e.g. after WhatsApp's 24-hour window). With `chatwoot.sendAsAgent`, the editor's **Send from my email address** sends an email reply from the agent's own mailbox name on the inbox's domain (alice@corp.example answering support@acme.example sends as alice@acme.example); it needs a Chatwoot build that reads `content_attributes.send_as_agent` ([Phala-Network/chatwoot](https://github.com/Phala-Network/chatwoot), `phala/*` branches), so it is off by default. |
 | Apps → **Reply with this** (message menu) | The `/reply` editor, prefilled: from the triage bot, the last code block of its message (none: no draft); from anyone else, the last code block or the whole message. |
 | `/note [message] [attachment]` | Like `/reply`, for a private note. |
 | `/resolve`, `/reopen` | Change the status. |
@@ -335,6 +337,7 @@ replace:
 |---|---|---|---|
 | `chatwoot.baseUrl` | http(s) URL | required | Chatwoot base URL for API calls. |
 | `chatwoot.publicUrl` | http(s) URL | `baseUrl` | Base URL for dashboard links posted in Discord. |
+| `chatwoot.sendAsAgent` | boolean | `false` | The Chatwoot build sends email replies with `content_attributes.send_as_agent` from the agent's own address; the reply editor offers **Send from my email address**. |
 | `accounts[]` | at least one; unique `id` | required | Relayed Chatwoot accounts. Accounts may share a forum. |
 | `accounts[].id` | integer > 0 | required | Chatwoot account id. |
 | `accounts[].name` | non-empty string | required | Shown in post titles (`[<name> #12] …`) and command confirmations. |
@@ -509,12 +512,14 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
   support volumes are far below its throughput. Jobs run by priority (commands first), failures
   retry with exponential backoff (5 s … 30 min), and a run yields before the subrequest limit.
   A job that Discord rate limits waits as long as Discord asks, without counting an attempt.
-  A job is never dropped, with two exceptions: a command that could not start while Discord's
-  15-minute interaction window left time to report is answered that nothing was done, and the
-  support queue posts nothing after its first three minutes (Discord's nonce, which keeps a
-  retried post from appearing twice, lasts only a few minutes; the next hour's queue lists the
-  same tickets). Otherwise, after a few failures a job's log turns into errors,
-  and it keeps retrying at most every 30 minutes, so an outage of any length loses no work. Every outbound request
+  A command runs at most once: it is not retried, since running it again could, for example,
+  send a reply twice, and one that could not start while Discord's 15-minute interaction window
+  left time to report is answered that nothing was done. Background jobs (syncing posts,
+  routing, the sweep) retry until they succeed: after a few failures a job's log turns into
+  errors, and it keeps retrying at most every 30 minutes, so an outage of any length loses no
+  background work. The support queue is the exception: it posts nothing after its first three
+  minutes (Discord's nonce, which keeps a retried post from appearing twice, lasts only a few
+  minutes; the next hour's queue lists the same tickets). Every outbound request
   times out after 60 seconds, which counts as a failed attempt. While a conversation's job is
   backing off, new events for it wait for its next attempt.
 - **Relaying** (`src/relay/`): a webhook only queues "sync conversation N" (conversation events

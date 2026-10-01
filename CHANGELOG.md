@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** the reply editor's **Send from my email address** is offered only with the new
+  `chatwoot.sendAsAgent` (default `false`), for a Chatwoot build that reads
+  `content_attributes.send_as_agent`; standard Chatwoot ignores it.
+- A sweep job reads one page of conversations, so a command waiting runs between pages instead
+  of after the whole pass; the card backfill runs once per pass. Jobs taking over five seconds,
+  and commands that waited as long, are logged.
+- Opening Manage or the assignee menu no longer syncs the post (they change nothing).
+- A label too long for the Manage menu is to be changed in Chatwoot (the placeholder said
+  `/label`, which takes at most 100 characters).
+- Documentation: Use draft needs no Message Content intent; commands run at most once (only
+  background jobs retry until they succeed); the AI agent guide describes the hook.
+
 ## [0.19.1] - 2026-09-30
 
 ### Fixed

@@ -27,6 +27,11 @@ export const configSchema = z
       baseUrl: z.url({ protocol: /^https?$/ }),
       /** Base URL for dashboard links in Discord. Defaults to baseUrl. */
       publicUrl: z.url({ protocol: /^https?$/ }).optional(),
+      /**
+       * The Chatwoot build sends an email reply with `content_attributes.send_as_agent` from the
+       * agent's own address (Phala-Network/chatwoot); the reply editor then offers it.
+       */
+      sendAsAgent: z.boolean().default(false),
     }),
     accounts: z
       .array(

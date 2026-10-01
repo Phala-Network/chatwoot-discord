@@ -263,10 +263,6 @@ export function fromCustomer(message: RelayMessage): boolean {
   return message.messageType === "incoming" && !message.private;
 }
 
-/**
- * The assignee's `name`, which is what Chatwoot's dashboard shows as the assignee and in
- * assignment activity messages: the assignee tag of an agent without a configured tag.
- */
 /** Tag for the topic the customer picked (a conversation custom attribute), if any. */
 export function topicTag(conversation: RelayConversation, attribute: string): string | undefined {
   return filled(conversation.customAttributes[attribute]);
@@ -292,7 +288,7 @@ export function tagKeys(accountId: number, conversation: RelayConversation, topi
 
 /** The last fenced code block of a message, if it has one. */
 export function lastCodeBlock(content: string): string | undefined {
-  return codeBlocks(content.split("\n")).at(-1)?.text.trim();
+  return codeBlocks(content.split("\n")).at(-1)?.trim();
 }
 
 /** The last fenced code block of a message, or the whole message when it has none. */
@@ -301,13 +297,13 @@ export function draftFromMessage(content: string): string {
 }
 
 /**
- * Fenced code blocks with the line each opens on, by CommonMark's rules (spec 0.31, "Fenced code
+ * The text of fenced code blocks, by CommonMark's rules (spec 0.31, "Fenced code
  * blocks"): a fence of at least three backticks or tildes, indented at most three spaces, opens a
  * block (a backtick fence's info string has no backticks); a fence of the same character, at
  * least as long, alone on its line, closes it; an unclosed block runs to the end.
  */
-function codeBlocks(lines: string[]): Array<{ line: number; text: string }> {
-  const blocks: Array<{ line: number; text: string }> = [];
+function codeBlocks(lines: string[]): string[] {
+  const blocks: string[] = [];
   for (let line = 0; line < lines.length; line += 1) {
     const open = /^( {0,3})(`{3,}(?!.*`)|~{3,})/.exec(lines[line] ?? "");
     if (!open) continue;
@@ -318,7 +314,7 @@ function codeBlocks(lines: string[]): Array<{ line: number; text: string }> {
     // Content lines lose as much indentation as the opening fence had.
     const unindent = new RegExp(`^ {0,${indent.length}}`);
     const text = lines.slice(line + 1, end).map((row) => row.replace(unindent, ""));
-    blocks.push({ line, text: text.join("\n") });
+    blocks.push(text.join("\n"));
     line = end;
   }
   return blocks;
