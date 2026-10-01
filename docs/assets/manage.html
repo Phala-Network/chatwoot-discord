@@ -1,0 +1,67 @@
+<!doctype html>
+<!--
+  Illustration of the private card that the Manage button opens (see panel in
+  src/commands/components.ts), drawn again after a change made from it: menus for the ticket's
+  assignee and its label, and its status buttons, the current one highlighted. Every name and
+  ticket is fictional. Regenerate docs/assets/manage.png with docs/assets/render.sh.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Manage card (illustration)</title>
+    <link rel="stylesheet" href="discord.css" />
+    <style>
+      .container {
+        width: 440px;
+      }
+      .container p {
+        margin-bottom: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <svg aria-hidden="true" width="0" height="0" style="position: absolute">
+      <symbol id="app" viewBox="0 0 40 40">
+        <rect width="40" height="40" fill="#1f93ff" />
+        <path d="M20.5 11a8.5 8.5 0 0 1 0 17H12v-8.5a8.5 8.5 0 0 1 8.5-8.5z" fill="#fff" />
+      </symbol>
+      <symbol id="chevron" viewBox="0 0 24 24">
+        <path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" d="m6 9 6 6 6-6" />
+      </symbol>
+    </svg>
+
+    <div class="messages">
+      <div class="group message">
+        <svg aria-hidden="true" class="avatar"><use href="#app" /></svg>
+        <span class="header"
+          ><span class="name">Chatwoot Relay</span><span class="badge">APP</span><span class="time">09:12</span></span
+        >
+        <div class="content">
+          <div class="container" style="--accent: #3ba55c">
+            <h3>Acme #142 · Dana Whitfield</h3>
+            <p><span class="e">✅</span> Label set to billing.</p>
+            <div class="row">
+              <span class="select"
+                ><span class="e">👤</span>Sam Carter<svg aria-hidden="true" class="chevron"><use href="#chevron" /></svg
+              ></span>
+            </div>
+            <div class="row">
+              <span class="select"
+                ><span class="e">🏷️</span>billing<svg aria-hidden="true" class="chevron"><use href="#chevron" /></svg
+              ></span>
+            </div>
+            <div class="row">
+              <span class="button primary"><span class="e">🟢</span>Open</span
+              ><span class="button"><span class="e">✅</span>Resolved</span
+              ><span class="button"><span class="e">😴</span>Snooze</span>
+            </div>
+          </div>
+          <div class="ephemeral">
+            <span class="e small">👁️</span> Only you can see this · <span class="link">Dismiss message</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="caption">Illustration with fictional data.</div>
+  </body>
+</html>
