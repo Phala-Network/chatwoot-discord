@@ -1,0 +1,362 @@
+/*
+  Discord's dark (Onyx) theme, as the README illustrations use it. Measurements follow Discord's
+  desktop client at 100% zoom; Noto Sans stands in for gg sans, and Twemoji is Discord's emoji.
+*/
+:root {
+  --bg: #000;
+  --raised: #121213;
+  --card: #0a0a0b;
+  --border: #262629;
+  --divider: #1e1e20;
+  --text: #dcdcdf;
+  --body: #d4d5d8;
+  --muted: #96979e;
+  --faint: #73747c;
+  --link: #437fe0;
+  --blurple: #5b65ea;
+  --mention-bg: #161838;
+  --mention: #90a0f7;
+  --button: #1b1b1d;
+  --button-border: #2e2e31;
+  --code-bg: #070812;
+  --code-border: #20212b;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--body);
+  font: 16px/1.375 "Noto Sans", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+/* An emoji, drawn with Twemoji at Discord's inline size. */
+.e {
+  display: inline-block;
+  font-family: "Twemoji", "Noto Color Emoji", sans-serif;
+  font-size: 1.375em;
+  font-style: normal;
+  font-weight: 400;
+  line-height: 1;
+  vertical-align: -0.2em;
+}
+.e.small {
+  font-size: 1.125em;
+  vertical-align: -0.15em;
+}
+/* A custom emoji: a brand's logo. */
+.logo {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  color: #000;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: -3px;
+}
+.acme {
+  background: #f0b232;
+}
+.globex {
+  background: #3ba55c;
+}
+.initech {
+  background: #eb459e;
+  color: #fff;
+}
+.link {
+  color: var(--link);
+  text-decoration: underline;
+}
+.mention {
+  padding: 0 2px;
+  border-radius: 3px;
+  background: var(--mention-bg);
+  color: var(--mention);
+  font-size: 15px;
+  font-weight: 500;
+}
+.badge {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 4.5px;
+  border-radius: 4px;
+  background: var(--blurple);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 15px;
+  vertical-align: 1px;
+}
+
+/* Messages. */
+.messages {
+  padding: 0 0 16px;
+}
+.group {
+  margin-top: 17px;
+}
+.message {
+  position: relative;
+  min-height: 26px;
+  padding: 2px 48px 2px 72px;
+}
+.avatar {
+  position: absolute;
+  top: 4px;
+  left: 16px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  overflow: hidden;
+}
+.avatar svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.header {
+  display: block;
+  line-height: 22px;
+}
+.name {
+  color: var(--text);
+  font-weight: 500;
+}
+.time {
+  margin-left: 6px;
+  color: var(--faint);
+  font-size: 12px;
+}
+.content p {
+  margin: 0;
+}
+.sub {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.375;
+}
+.reply {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding-left: 72px;
+  margin-bottom: 2px;
+  color: var(--muted);
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.reply::before {
+  content: "";
+  position: absolute;
+  top: 11px;
+  left: 36px;
+  width: 30px;
+  height: 10px;
+  border-top: 2px solid #4e5058;
+  border-left: 2px solid #4e5058;
+  border-top-left-radius: 6px;
+}
+.reply .mini {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  overflow: hidden;
+  flex: none;
+}
+.reply .mini svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.reply .badge {
+  margin: 0;
+  font-size: 10px;
+  line-height: 13px;
+  vertical-align: 0;
+}
+.reply .who {
+  color: var(--text);
+  font-weight: 500;
+  opacity: 0.8;
+}
+.reply .quote {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #b5b6bc;
+}
+pre {
+  max-width: 700px;
+  margin: 6px 0 0;
+  padding: 7px 9px;
+  border: 1px solid var(--code-border);
+  border-radius: 4px;
+  background: var(--code-bg);
+  color: #c9cace;
+  font: 14px/1.43 "Liberation Mono", monospace;
+  white-space: pre-wrap;
+}
+.reactions {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+}
+.reaction {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--raised);
+  border-radius: 8px;
+  background: var(--raised);
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+}
+.reaction .e {
+  font-size: 18px;
+  vertical-align: 0;
+}
+
+/* Components V2: a container with its accent bar, text, and rows of buttons and menus. */
+.container {
+  display: inline-block;
+  position: relative;
+  margin-top: 4px;
+  max-width: 560px;
+  padding: 16px 16px 16px 20px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  overflow: hidden;
+}
+.container::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 4px;
+  background: var(--accent);
+}
+.container h3 {
+  margin: 0 0 4px;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 700;
+}
+.container .sub {
+  margin-bottom: 2px;
+}
+.container b {
+  color: var(--text);
+  font-weight: 700;
+}
+.row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.row:first-of-type {
+  margin-top: 12px;
+}
+.button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--button-border);
+  border-radius: 8px;
+  background: var(--button);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.button .e {
+  font-size: 18px;
+  vertical-align: 0;
+}
+.button.primary {
+  border-color: var(--blurple);
+  background: var(--blurple);
+  color: #fff;
+}
+.select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--button-border);
+  border-radius: 8px;
+  background: var(--button);
+  color: var(--text);
+  font-size: 15px;
+}
+.select .e {
+  font-size: 18px;
+  vertical-align: 0;
+}
+.select .chevron {
+  margin-left: auto;
+  width: 18px;
+  height: 18px;
+  color: var(--muted);
+}
+.ephemeral {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.ephemeral .link {
+  text-decoration: none;
+}
+
+/* Forum tags. */
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid #2d2d2f;
+  border-radius: 12px;
+  background: var(--raised);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.tag .e {
+  font-size: 15px;
+  vertical-align: 0;
+}
+.icon {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  color: var(--muted);
+}
+.caption {
+  padding: 0 16px 12px;
+  color: var(--faint);
+  font-size: 12px;
+  text-align: right;
+}
