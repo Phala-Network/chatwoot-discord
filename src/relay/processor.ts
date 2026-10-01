@@ -30,7 +30,12 @@ const AVATAR_CACHE_MS = 24 * 60 * 60 * 1000;
 const AVATAR_RETRY_MS = 60 * 60 * 1000;
 
 /** The relay as configured by `settings`. */
-export function relayFor(settings: Settings, forum: ForumClient, store: RelayStore & RoutingStore): Relay {
+export function relayFor(
+  settings: Settings,
+  forum: ForumClient,
+  store: RelayStore & RoutingStore,
+  routingPending?: (accountId: number, conversationId: number) => boolean,
+): Relay {
   const triageUserId = settings.config.triage.userId;
   return new Relay({
     forum,
@@ -48,6 +53,7 @@ export function relayFor(settings: Settings, forum: ForumClient, store: RelaySto
     triage: triageUserId ? { ...settings.config.triage, userId: triageUserId } : undefined,
     card: ticketCard,
     linkedAgent: settings.linkedAgent,
+    routingPending,
     answeredAutomatically: (accountId, conversationId, messageId) =>
       answeredAutomatically(store, accountId, conversationId, messageId),
     // Normally every message is relayed within the sweep's window (by its webhook, or else by

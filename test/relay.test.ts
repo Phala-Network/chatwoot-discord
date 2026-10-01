@@ -2,6 +2,7 @@ import { ComponentType } from "discord-api-types/v10";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ticketCard } from "../src/commands/components.ts";
 import { CONTENT_LIMIT } from "../src/relay/format.ts";
+import { RoutingPendingError } from "../src/relay/notify.ts";
 import { Relay, type RelayOptions, type WebhookMessage } from "../src/relay/relay.ts";
 import type { LinkedAgent, RelayAssignee, RelayMessage } from "../src/relay/types.ts";
 import { FakeForum, FORUM, MemoryStore, message, snowflake, TAGS, TRIAGE } from "./helpers.ts";
@@ -307,6 +308,16 @@ describe("Relay", () => {
       "My agent will not connect\n-# Triage bot not called: answered automatically. Ask it here if needed.",
     );
     expect(later).toBe(`One more thing\n-# <@${TRIAGE}>`);
+  });
+
+  it("posts nothing of a customer message while its conversation's routing is still to run", async () => {
+    let pending = true;
+    ({ relay, forum } = relayWith({ triage, routingPending: () => pending }));
+    await expect(relay.relay(message())).rejects.toBeInstanceOf(RoutingPendingError);
+    expect(forum.calls).toEqual([]);
+    pending = false;
+    await relay.relay(message());
+    expect(forum.contents().at(-1)).toBe(`My agent will not connect\n-# <@${TRIAGE}>`);
   });
 
   it("calls the triage bot within its hourly budgets", async () => {

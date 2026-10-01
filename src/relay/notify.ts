@@ -21,6 +21,8 @@ interface NotifierOptions {
   triage?: TriageOptions | undefined;
   /** The agent linked to a Chatwoot user id, if any. */
   linkedAgent?: ((chatwootUserId: number) => LinkedAgent | undefined) | undefined;
+  /** Whether the conversation's routing, which may answer its customer messages, is still to run. */
+  routingPending?: ((accountId: number, conversationId: number) => boolean) | undefined;
   /** Whether a routing kind's reply answered a customer message (see routing.ts). */
   answeredAutomatically?: ((accountId: number, conversationId: number, messageId: number) => boolean) | undefined;
   /** A message created longer ago than this is history. */
@@ -42,6 +44,17 @@ export function assigneeKey(conversation: RelayConversation): string {
 
 /** The longest user mention (snowflakes have at most 20 digits). */
 const LONGEST_MENTION = `<@${"9".repeat(20)}>`;
+
+/**
+ * A customer message waits for its conversation's routing, which may answer it: the relay stops
+ * before posting it, and its job runs again shortly.
+ */
+export class RoutingPendingError extends Error {
+  constructor() {
+    super("routing pending");
+    this.name = "RoutingPendingError";
+  }
+}
 
 export class Notifier {
   /** The most room the notification lines of a message can take, in UTF-16 units. */
@@ -97,14 +110,17 @@ export class Notifier {
 
   /**
    * The triage bot mention for a customer message, or a note when a routing kind's reply answered
-   * it or the bot's hourly budget is used up.
+   * it or the bot's hourly budget is used up. Throws RoutingPendingError while the conversation's
+   * routing is still to run.
    */
   private triage(message: RelayMessage): { mention?: string; note?: string } {
-    const { triage, store, answeredAutomatically } = this.options;
+    const { triage, store, routingPending, answeredAutomatically } = this.options;
     if (!triage || !fromCustomer(message)) return {};
+    const { account, conversation } = message;
     // Decided and counted once per message: a retry after a failed post repeats the decision.
-    const decision = store.once(`triage:${message.account.id}:${message.id}`, () => {
-      if (answeredAutomatically?.(message.account.id, message.conversation.id, message.id)) return "answered";
+    const decision = store.once(`triage:${account.id}:${message.id}`, () => {
+      if (routingPending?.(account.id, conversation.id)) throw new RoutingPendingError();
+      if (answeredAutomatically?.(account.id, conversation.id, message.id)) return "answered";
       const hour = this.options.now().toISOString().slice(0, 13);
       const key = `${message.account.id}:${message.conversation.id}`;
       if (store.increment(`triage:${key}:${hour}`) > triage.perConversationPerHour) return "conversation";
