@@ -1,6 +1,6 @@
 {
   "name": "chatwoot-discord",
-  "version": "0.25.0",
+  "version": "0.26.0",
   "description": "Mirror Chatwoot conversations into a Discord forum and handle tickets with Discord commands.",
   "keywords": [
     "chatwoot",
