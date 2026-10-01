@@ -45,9 +45,9 @@ jobs:
       - name: Package (what npm publish would ship), installed and type-checked by a consumer
         # The command prints its usage and exits 2 without arguments.
         run: |
-          # npm publish drops package.json fields it finds invalid (a bin whose file is missing) with only a warning.
-          npm publish --dry-run 2>&1 | tee "$RUNNER_TEMP/publish.log"
-          ! grep -q "auto-corrected" "$RUNNER_TEMP/publish.log"
+          # npm publish rewrites what `npm pkg fix` fixes, with only a warning: package.json must need no fix.
+          npm pkg fix
+          git diff --exit-code package.json
           npm pack --pack-destination test/package
           cd test/package
           npm install --no-save --no-audit --no-fund ./chatwoot-discord-relay-*.tgz typescript @cloudflare/workers-types @types/node@24

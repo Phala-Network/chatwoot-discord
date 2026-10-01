@@ -9,9 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- A package published by the release workflow keeps its `chatwoot-discord-store-config` command:
-  `build:package` no longer empties `lib/` first, which made `npm publish` drop the `bin` entry as
-  invalid (0.27.0, published by hand, has it). CI now fails when `npm publish` would change
+- The package's `bin` path has no leading `./`: `npm publish` rewrote it with a warning that it was
+  "invalid and removed", though the command was published. CI now fails when `npm pkg fix` would change
   `package.json`, and runs the installed command.
 
 ## [0.27.0] - 2026-10-01
