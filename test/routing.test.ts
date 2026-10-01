@@ -78,6 +78,7 @@ function world(
       json([
         { id: 1, short_code: "startup", content: "Hello" },
         { id: 2, short_code: "startup-program", content: "Thanks for applying!" },
+        { id: 3, short_code: "security", content: "Please report it to security@example.com." },
       ]),
     ),
     on("POST", `${CW}/messages`, () => {
@@ -380,6 +381,7 @@ describe("routeConversation with kinds", () => {
         "startup-program": { covers: "A Startup Program application.", cannedResponse: "startup-program" },
         security: { covers: "A security report.", cannedResponse: "security-report" },
         spam: { covers: "Spam.", status: "resolved" },
+        "beg-bounty": { covers: "A templated security report.", cannedResponse: "security", status: "resolved" },
       },
     },
   };
@@ -472,6 +474,27 @@ describe("routeConversation with kinds", () => {
     // Its kind is a label; it gets no topic.
     expect(sent(requests, "POST", `${CW}/labels`).map((r) => JSON.parse(r.body))).toEqual([{ labels: ["spam"] }]);
     expect(replies(requests)).toEqual([]);
+  });
+
+  it("replies to a ticket of a kind that sets it aside, then sets it aside, once", async () => {
+    const store = new MapStore();
+    const ticket: Ticket = { loseStatusAnswer: 1 };
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["beg-bounty", 0.95] });
+
+    await expect(routeConversation(context(store, KINDS), 1, 5)).rejects.toThrow();
+    await routeConversation(context(store, KINDS), 1, 5);
+
+    expect(replies(requests)).toEqual([
+      { content: "Please report it to security@example.com.", message_type: "outgoing", private: false },
+    ]);
+    // Replied before it is resolved.
+    const at = (method: string, path: string) =>
+      requests.findIndex((r) => r.method === method && r.url.pathname === `/api/v1/accounts/1/conversations/5/${path}`);
+    expect(at("POST", "messages")).toBeGreaterThan(-1);
+    expect(at("POST", "messages")).toBeLessThan(at("POST", "toggle_status"));
+    expect(ticket.status).toBe("resolved");
+    expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
+    expect(answeredAutomatically(store, 1, 5, 1)).toBe(true);
   });
 
   it("completes a set-aside whose status Chatwoot made but whose answer was lost, without setting it again", async () => {

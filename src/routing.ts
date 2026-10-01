@@ -24,7 +24,8 @@
 // ticket aside (resolved, or snoozed until the customer's next message, either of which that message
 // reopens) instead of routing it; `cannedResponse` sends that Chatwoot canned response, read when
 // it is sent (none while it does not exist), as the account's Chatwoot agent bot, under its own name,
-// which assigns nobody and is no human first reply. A reply is sent at most once per ticket: it is
+// which assigns nobody and is no human first reply; a kind with both replies, then sets the ticket
+// aside (a reply to a junk report, for example). A reply is sent at most once per ticket: it is
 // recorded before it is sent, so a failed send is not retried, and a reply is never repeated. Once
 // it is sent, the customer messages it answers (those Jev was given) do not call the triage bot
 // (see answeredAutomatically): the Hub relays them after routing, unless routing fails or is late.
@@ -147,6 +148,32 @@ export function repliesAutomatically(settings: Settings, accountId: number): boo
   return settings.botToken(accountId) !== undefined && Object.values(kinds).some((kind) => kind.cannedResponse);
 }
 
+/**
+ * Sends the kind's canned response to the ticket's customer as the account's agent bot, once per
+ * ticket: recorded before it is sent (so a failed send is not retried), then the customer messages it
+ * answers. Whether it was sent now.
+ */
+async function replyOnce(
+  ctx: RoutingContext,
+  accountId: number,
+  conversationId: number,
+  decision: Decision,
+  kind: Kind,
+): Promise<boolean> {
+  const { settings, store, chatwoot } = ctx;
+  const botToken = settings.botToken(accountId);
+  if (kind.cannedResponse === undefined || !botToken || store.get(replyKey(accountId, conversationId)) !== undefined) {
+    return false;
+  }
+  const reply = await chatwoot.cannedResponse(accountId, kind.cannedResponse);
+  if (reply === undefined) return false;
+  store.set(replyKey(accountId, conversationId), decision.kind ?? "");
+  const bot = chatwootClient(settings.config.chatwoot.baseUrl, botToken, ctx.fetch);
+  await bot.createMessage(accountId, conversationId, { content: reply, private: false, files: [] });
+  store.set(answeredKey(accountId, conversationId), String(decision.lastMessageId));
+  return true;
+}
+
 /** The account's kinds: labels Jev adds beside a ticket's one topic label (see `kinds`). */
 export function kindLabels(settings: Settings, accountId: number): ReadonlySet<string> {
   return new Set(Object.keys(settings.config.routing?.kinds?.[String(accountId)] ?? {}));
@@ -224,6 +251,7 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
   if (kind?.status && !current.assignee && (current.status === "open" || current.status === kind.status)) {
     const labels = withKind(current.labels);
     if (labels !== current.labels) await chatwoot.setLabels(accountId, conversationId, labels);
+    const replied = await replyOnce(ctx, accountId, conversationId, decision, kind);
     if (current.status !== kind.status) await chatwoot.setStatus(accountId, conversationId, { status: kind.status });
     store.set(key, JSON.stringify({ ...decision, state: "done" }));
     log.info("ticket set aside as its kind", {
@@ -231,6 +259,7 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
       conversationId,
       kind: decision.kind,
       kindConfidence: decision.kindConfidence,
+      replied,
       status: kind.status,
     });
     return;
@@ -254,15 +283,7 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
   const labels = withKind(topic === null ? current.labels : [...current.labels, topic]);
   if (labels !== current.labels) await chatwoot.setLabels(accountId, conversationId, labels);
 
-  const shortCode = store.get(replyKey(accountId, conversationId)) === undefined ? kind?.cannedResponse : undefined;
-  const botToken = settings.botToken(accountId);
-  const reply = shortCode !== undefined && botToken ? await chatwoot.cannedResponse(accountId, shortCode) : undefined;
-  if (reply !== undefined && botToken) {
-    store.set(replyKey(accountId, conversationId), decision.kind ?? "");
-    const bot = chatwootClient(settings.config.chatwoot.baseUrl, botToken, ctx.fetch);
-    await bot.createMessage(accountId, conversationId, { content: reply, private: false, files: [] });
-    store.set(answeredKey(accountId, conversationId), String(decision.lastMessageId));
-  }
+  const replied = kind ? await replyOnce(ctx, accountId, conversationId, decision, kind) : false;
 
   const final = owner !== undefined || current.assignee != null || decision.messages >= MAX_MESSAGES;
   const state: RoutingState = final ? "done" : "waiting";
@@ -286,7 +307,7 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     topicSet: topic !== null,
     kind: decision.kind,
     kindConfidence: decision.kindConfidence,
-    replied: reply !== undefined,
+    replied,
     snoozed: snooze,
     state,
   });
@@ -360,6 +381,7 @@ export function sanitize(text: string, identities: Array<string | null | undefin
 type Owners = NonNullable<Settings["config"]["routing"]>["accounts"][string];
 
 type Kinds = NonNullable<NonNullable<Settings["config"]["routing"]>["kinds"]>[string];
+type Kind = Kinds[string];
 
 async function decide(
   ctx: RoutingContext,

@@ -158,22 +158,21 @@ export const configSchema = z
                 .string()
                 .regex(/^[a-z0-9_-]{1,40}$/, "must be a short lower-case name")
                 .refine((name) => name !== "none", "none is reserved"),
-              z
-                .strictObject({
-                  /** What the kind is, as Jev's criterion for recognizing it. */
-                  covers: z.string().min(1).max(1000),
-                  /**
-                   * Short code of the account's Chatwoot canned response sent to the customer once, as
-                   * the account's agent bot (CHATWOOT_BOT_TOKENS). None is sent while it does not exist.
-                   */
-                  cannedResponse: z.string().trim().min(1).max(255).optional(),
-                  /**
-                   * Set instead of routing the ticket: `resolved`, or `snoozed` until the customer's
-                   * next message. A new message from the customer reopens either.
-                   */
-                  status: z.enum(["resolved", "snoozed"]).optional(),
-                })
-                .refine((kind) => !(kind.status && kind.cannedResponse), "a ticket set aside gets no reply"),
+              z.strictObject({
+                /** What the kind is, as Jev's criterion for recognizing it. */
+                covers: z.string().min(1).max(1000),
+                /**
+                 * Short code of the account's Chatwoot canned response sent to the customer once, as
+                 * the account's agent bot (CHATWOOT_BOT_TOKENS). None is sent while it does not exist.
+                 */
+                cannedResponse: z.string().trim().min(1).max(255).optional(),
+                /**
+                 * Set instead of routing the ticket (after the reply, with cannedResponse): `resolved`,
+                 * or `snoozed` until the customer's next message. A new message from the customer
+                 * reopens either.
+                 */
+                status: z.enum(["resolved", "snoozed"]).optional(),
+              }),
             ),
           )
           .optional(),

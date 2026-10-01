@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A routing kind may have both `cannedResponse` and `status`: it replies, then sets the ticket aside
+  (for example a templated security report: acknowledged, then resolved).
+
 ## [0.23.0] - 2026-09-30
 
 ### Changed
