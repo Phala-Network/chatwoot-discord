@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A change made with a button or command shows on the post's card and tags at once, instead of
+  with Chatwoot's event for it, which waits ten seconds for the change's activity line.
+- A post deleted in Discord is recognized when Discord answers with Unknown Channel (HTTP 400
+  for a webhook), so its jobs no longer retry forever.
+
 ## [0.19.0] - 2026-09-30
 
 ### Changed

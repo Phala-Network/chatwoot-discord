@@ -41,6 +41,23 @@ function forum() {
 afterEach(() => vi.restoreAllMocks());
 
 describe("DiscordForum", () => {
+  it("takes Discord's Unknown Channel for a post that no longer exists", async () => {
+    mockFetch(
+      application,
+      on("GET", `${api}/channels/55/webhooks`, () =>
+        json([{ id: "1", token: "abc", type: 1, name: "Chatwoot", application_id: "100000000000000001" }]),
+      ),
+      // Discord answers a webhook's request into a deleted post with 400.
+      on("POST", `${api}/webhooks/1/abc`, () => json({ message: "Unknown Channel", code: 10003 }, { status: 400 })),
+      on("DELETE", `${api}/webhooks/1/abc/messages/m1`, () =>
+        json({ message: "Unknown Channel", code: 10003 }, { status: 400 }),
+      ),
+    );
+    const client = forum();
+    await expect(client.execute("55", { content: "hi" }, "thread-9")).rejects.toBeInstanceOf(UnknownThreadError);
+    await expect(client.deleteMessage("55", "thread-9", "m1")).resolves.toBeUndefined();
+  });
+
   it("finds the webhook's cards in a page of a post's messages after one, and where the next page starts", async () => {
     const id = (n: number) => String(200000000000000000n + BigInt(n));
     const page = Array.from({ length: 100 }, (_, index) => ({

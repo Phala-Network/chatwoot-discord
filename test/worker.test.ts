@@ -797,6 +797,7 @@ describe("worker", () => {
     const toggle = on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/17/toggle_status", () => json({}));
     world.mock.spy.mockRestore();
     world = new World([profile, toggle]);
+    world.conversation(17, [], {}, "resolved"); // as Chatwoot has it after the command
     const response = await discordInteraction({
       id: "900001",
       application_id: "100000000000000001",
@@ -819,6 +820,11 @@ describe("worker", () => {
     expect(JSON.parse(edit?.body ?? "")).toEqual({ content: "✅ Resolved.", allowed_mentions: { parse: [] } });
     const toggled = world.requests.find((request) => request.url.pathname.endsWith("/toggle_status"));
     expect(toggled?.headers.get("api_access_token")).toBe("token-alice");
+    // The post shows the change at once, without waiting for Chatwoot's event.
+    expect(buttons(world.cards().at(-1)?.body)?.at(-1)).toEqual(["ticket:reopen", "ticket:block", "ticket:manage"]);
+    expect(JSON.parse(world.sent("PATCH", new RegExp(`^/api/v10/channels/${thread}$`)).at(-1)?.body ?? "")).toEqual({
+      archived: true,
+    });
   });
 
   it("shows a failed change from the Manage panel as text in that panel (a Components V2 message)", async () => {

@@ -29,6 +29,8 @@ import { type ForumClient, UnknownThreadError, type WebhookMessage } from "../re
 import { DiscordHttpError, type DiscordRest } from "./rest.ts";
 
 const WEBHOOK_NAME = "Chatwoot";
+/** Discord answers a request to a deleted post with this code, with HTTP 404 or, for a webhook, 400. */
+const UNKNOWN_CHANNEL = 10003;
 const UNKNOWN_WEBHOOK = 10015;
 const UNKNOWN_MESSAGE = 10008;
 const UNKNOWN_TAG = 10087;
@@ -70,6 +72,7 @@ export class DiscordForum implements ForumClient {
       );
       return { channelId: sent.channel_id, messageId: sent.id };
     } catch (error) {
+      if (threadId && isUnknownChannel(error)) throw new UnknownThreadError(threadId);
       if (error instanceof DiscordHttpError && error.status === 404) {
         if (error.code === UNKNOWN_WEBHOOK) {
           // Someone deleted the webhook: forget it so the next attempt creates a new one.
@@ -120,6 +123,7 @@ export class DiscordForum implements ForumClient {
       });
       return true;
     } catch (error) {
+      if (isUnknownChannel(error)) throw new UnknownThreadError(threadId);
       if (error instanceof DiscordHttpError && error.status === 404) {
         if (error.code === UNKNOWN_MESSAGE) return false;
         if (error.code === UNKNOWN_WEBHOOK) this.cache.delete(webhookKey(forumChannelId));
@@ -150,7 +154,9 @@ export class DiscordForum implements ForumClient {
       const next = messages.map((message) => BigInt(message.id)).reduce((a, b) => (a > b ? a : b));
       return { cards, next: String(next) };
     } catch (error) {
-      if (error instanceof DiscordHttpError && error.status === 404) throw new UnknownThreadError(threadId);
+      if (isUnknownChannel(error) || (error instanceof DiscordHttpError && error.status === 404)) {
+        throw new UnknownThreadError(threadId);
+      }
       throw error;
     }
   }
@@ -163,6 +169,8 @@ export class DiscordForum implements ForumClient {
         { query: { thread_id: threadId }, auth: false },
       );
     } catch (error) {
+      // Gone with its post, or by itself.
+      if (isUnknownChannel(error)) return;
       if (error instanceof DiscordHttpError && error.status === 404) {
         if (error.code === UNKNOWN_MESSAGE) return;
         if (error.code === UNKNOWN_WEBHOOK) this.cache.delete(webhookKey(forumChannelId));
@@ -254,6 +262,10 @@ export class DiscordForum implements ForumClient {
       return send(tags.filter((id) => existing.has(id)));
     }
   }
+}
+
+function isUnknownChannel(error: unknown): boolean {
+  return error instanceof DiscordHttpError && error.code === UNKNOWN_CHANNEL;
 }
 
 function webhookKey(forumChannelId: string): string {

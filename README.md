@@ -212,7 +212,7 @@ Used inside a ticket post, by Discord users linked in `agents[]` who have a toke
   ticket: **Take**, and **Assign to…**, named after the assignee once there is one. Its state:
   **Resolve** and **Snooze** (until the next reply) while it is open; **Reopen** and **Resolve**
   while it is snoozed; **Reopen** once it is resolved; then **Block** and **Manage**. The card is
-  edited when the ticket changes, and moves to the bottom (posted again, the previous one deleted)
+  edited when the ticket changes (at once after a button or command), and moves to the bottom (posted again, the previous one deleted)
   when the relay posts messages or the triage bot reports an answer, so a post has one card,
   under the latest of those (a message posted in Discord by anyone else does not move it).
 - After a triage bot's answer with a draft, reported by the bot's hook (see
