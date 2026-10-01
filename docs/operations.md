@@ -7,7 +7,8 @@ state, and running without Cloudflare. See the [README](../README.md) for the se
 
 Conversations with activity within `reconcile.lookbackSeconds` get a post from the first sweep;
 older ones get a post with their next message. A new post relays the conversation's whole
-history (without notifications, see [Pings and notifications](relay.md#pings-and-notifications)).
+history; its messages older than `reconcile.lookbackSeconds` notify no one (see
+[Pings and notifications](relay.md#pings-and-notifications)).
 To start with new messages only, set `relay.startAfterMessageId` to the newest message id in
 Chatwoot when you install (for example the id in the newest conversation's `messages` from
 `GET /api/v1/accounts/<id>/conversations`).
