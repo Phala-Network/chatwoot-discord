@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-09-30
+
 ### Added
 
 - A configuration larger than the 5 KB a Worker var holds can live in a KV namespace bound as
@@ -14,7 +16,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validates a configuration file (JSON with comments) and derives its key from its content, for a
   deployment's `cloudflare.config.ts`; `npm run store-config` stores it with the Cloudflare CLI
   (`cf`, now a dev dependency).
-
 
 ### Changed
 
@@ -504,7 +505,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-invocation subrequest budget, and a cron reconciliation sweep for missed webhooks.
 - Verification of Chatwoot webhook HMAC signatures and Discord Ed25519 interaction signatures.
 
-[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.20.1...v0.21.0
 [0.20.1]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.19.1...v0.20.0
