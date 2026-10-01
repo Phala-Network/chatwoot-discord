@@ -385,7 +385,7 @@ export class Hub extends DurableObject<Env> {
       log.info("sweep done", { accountId, pages: page - 1, seen, queued });
     } else {
       this.store.set(passKey, JSON.stringify({ ...pass, page }), SWEEP_PASS_TTL_MS);
-      this.enqueue({ type: "sweep", accountId }); // Continues in the next run.
+      this.enqueue({ type: "sweep", accountId }); // Continues in the next job.
       log.info("sweep continues", { accountId, nextPage: page, seen, queued });
     }
   }

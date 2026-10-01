@@ -177,6 +177,10 @@ class World {
       ),
       on("PATCH", /^discord\.com\/api\/v10\/webhooks\/1\/tok\/messages\/[\w-]+$/, () => json({})),
       on("GET", /^discord\.com\/api\/v10\/channels\/\d+\/messages$/, () => json([])),
+      // A message read (Use draft without a kept draft): Discord does not give it back.
+      on("GET", /^discord\.com\/api\/v10\/channels\/\d+\/messages\/\d+$/, () =>
+        json({ message: "Service Unavailable" }, { status: 503 }),
+      ),
       on("POST", "discord.com/api/v10/webhooks/1/tok", (request) => {
         const thread = request.url.searchParams.get("thread_id");
         if (thread) {
@@ -1047,6 +1051,66 @@ describe("worker", () => {
     expect(world.cards()).toHaveLength(cards + 1);
     await sweep();
     expect(world.cards()).toHaveLength(cards + 1);
+  });
+
+  it("runs a command that comes during a sweep before the sweep's next page", async () => {
+    const thread = "100000000000030036";
+    await runInDurableObject(hub(), (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO conversations (account_id, conversation_id, thread_id, cursor) VALUES (3, 36, ?, 0)",
+        thread,
+      );
+    });
+    const start = Math.floor(Date.now() / 1000);
+    let release = () => {};
+    const paused = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // Three pages of quiet conversations; the first answers only once released.
+    const pages = on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations", async (request) => {
+      const page = Number(request.url.searchParams.get("page"));
+      if (page === 1) await paused;
+      const payload =
+        page > 3
+          ? []
+          : Array.from({ length: 25 }, (_, index) => ({
+              id: 70000 + (page - 1) * 25 + index,
+              status: "open",
+              last_activity_at: start,
+              messages: [],
+            }));
+      return json({ data: { meta: {}, payload } });
+    });
+    const profile = on("GET", "chatwoot.example.com/api/v1/profile", () =>
+      json({ id: 42, name: "Alice", email: "alice@example.com", accounts: [{ id: 3 }] }),
+    );
+    const toggle = on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/36/toggle_status", () => json({}));
+    world.mock.spy.mockRestore();
+    world = new World([pages, profile, toggle]);
+    world.conversation(36, [], {}, "resolved");
+    const isPage = (request: Recorded) => request.url.pathname === "/api/v1/accounts/3/conversations";
+
+    const ctx = createExecutionContext();
+    await worker.scheduled?.(createScheduledController({ cron: "*/5 * * * *" }), env, ctx);
+    await waitOnExecutionContext(ctx);
+    await vi.waitFor(() => expect(world.requests.some(isPage)).toBe(true));
+    await discordInteraction({
+      id: "900018",
+      application_id: "100000000000000001",
+      token: "interaction-token",
+      type: 2,
+      channel_id: thread,
+      channel: { id: thread, type: 11 },
+      member: { user: { id: ALICE } },
+      data: { type: 1, name: "resolve" },
+    });
+    release();
+    await drain();
+
+    const order = world.requests
+      .filter((request) => isPage(request) || request.url.pathname.endsWith("/toggle_status"))
+      .map((request) => (isPage(request) ? `page ${request.url.searchParams.get("page")}` : "command"));
+    expect(order).toEqual(["page 1", "command", "page 2", "page 3", "page 4"]);
   });
 
   it("a sweep longer than a run's page limit continues where it stopped, down to its window's start", async () => {

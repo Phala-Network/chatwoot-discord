@@ -76,7 +76,11 @@ describe("executeCommand", () => {
   });
 
   it("still reads status jobs queued before snoozing existed", () => {
-    const queued = JSON.parse(JSON.stringify(job({ type: "status", status: "resolved" })));
+    // As stored then, with no snooze fields.
+    const queued = JSON.parse(
+      '{"interactionId":"1","applicationId":"100000000000000001","token":"tok","discordUserId":"100000000000000011",' +
+        '"accountId":3,"conversationId":15,"action":{"type":"status","status":"resolved"}}',
+    );
     expect(commandJobSchema.parse(queued).action).toEqual({ type: "status", status: "resolved" });
   });
 
