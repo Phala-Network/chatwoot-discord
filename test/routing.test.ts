@@ -444,6 +444,8 @@ describe("routeConversation with kinds", () => {
     await routeConversation(context(store, KINDS), 1, 5);
 
     expect(replies(requests)).toHaveLength(1);
+    // Not sent: the triage bot still answers the customer.
+    expect(answeredAutomatically(store, 1, 5, 1)).toBe(false);
   });
 
   it("replies as the account's agent bot, under its name, also before the ticket has an owner", async () => {

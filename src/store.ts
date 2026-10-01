@@ -508,6 +508,11 @@ export class Store implements RelayStore, Cache {
     if (removed === 0) this.sql.exec("UPDATE jobs SET attempts = 0, not_before = ? WHERE key = ?", this.now(), job.key);
   }
 
+  /** Whether a job is queued and has not failed. */
+  hasPendingJob(key: string): boolean {
+    return this.sql.exec("SELECT 1 FROM jobs WHERE key = ? AND attempts = 0", key).toArray().length > 0;
+  }
+
   deleteJob(key: string): void {
     this.sql.exec("DELETE FROM jobs WHERE key = ?", key);
   }

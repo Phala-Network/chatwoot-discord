@@ -10,8 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - A customer message a routing kind's reply answered does not call the triage bot; a note says so,
-  and the customer's next message calls it as usual. Routing now runs before a conversation's new
-  messages are relayed, so a new post also opens with its ticket assigned and labelled.
+  and the customer's next message calls it as usual. In an account whose kinds reply, a ticket's new
+  messages wait for its pending routing, up to 30 seconds, before they are relayed; if routing fails
+  or takes longer, they are relayed with the mention as before.
 
 ## [0.22.0] - 2026-09-30
 

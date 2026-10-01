@@ -25,9 +25,9 @@
 // reopens) instead of routing it; `cannedResponse` sends that Chatwoot canned response, read when
 // it is sent (none while it does not exist), as the account's Chatwoot agent bot, under its own name,
 // which assigns nobody and is no human first reply. A reply is sent at most once per ticket: it is
-// recorded before it is sent, so a failed send is not retried, and a reply is never repeated. The
-// customer messages it answers (those Jev was given) do not call the triage bot (see
-// answeredAutomatically): routing runs before a new message is relayed.
+// recorded before it is sent, so a failed send is not retried, and a reply is never repeated. Once
+// it is sent, the customer messages it answers (those Jev was given) do not call the triage bot
+// (see answeredAutomatically): the Hub relays them after routing, unless routing fails or is late.
 
 import { z } from "zod";
 import {
@@ -120,12 +120,14 @@ function routingKey(accountId: number, conversationId: number): string {
   return `route:${accountId}:${conversationId}`;
 }
 
-/**
- * Recorded once a kind's reply is (about to be) sent to the ticket's customer: the id of the latest
- * customer message it answers.
- */
+/** Recorded once a kind's reply is (about to be) sent to the ticket's customer. */
 function replyKey(accountId: number, conversationId: number): string {
   return `kind-reply:${accountId}:${conversationId}`;
+}
+
+/** Recorded once a kind's reply was sent: the id of the latest customer message it answers. */
+function answeredKey(accountId: number, conversationId: number): string {
+  return `kind-answered:${accountId}:${conversationId}`;
 }
 
 /** Whether a kind's reply answered customer message `messageId`. */
@@ -135,8 +137,14 @@ export function answeredAutomatically(
   conversationId: number,
   messageId: number,
 ): boolean {
-  const answered = Number(store.get(replyKey(accountId, conversationId)));
-  return Number.isInteger(answered) && messageId <= answered;
+  const answered = store.get(answeredKey(accountId, conversationId));
+  return answered !== undefined && messageId <= Number(answered);
+}
+
+/** Whether the account's routing kinds may reply to a ticket. */
+export function repliesAutomatically(settings: Settings, accountId: number): boolean {
+  const kinds = settings.config.routing?.kinds?.[String(accountId)] ?? {};
+  return settings.botToken(accountId) !== undefined && Object.values(kinds).some((kind) => kind.cannedResponse);
 }
 
 /** The account's kinds: labels Jev adds beside a ticket's one topic label (see `kinds`). */
@@ -250,9 +258,10 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
   const botToken = settings.botToken(accountId);
   const reply = shortCode !== undefined && botToken ? await chatwoot.cannedResponse(accountId, shortCode) : undefined;
   if (reply !== undefined && botToken) {
-    store.set(replyKey(accountId, conversationId), String(decision.lastMessageId));
+    store.set(replyKey(accountId, conversationId), decision.kind ?? "");
     const bot = chatwootClient(settings.config.chatwoot.baseUrl, botToken, ctx.fetch);
     await bot.createMessage(accountId, conversationId, { content: reply, private: false, files: [] });
+    store.set(answeredKey(accountId, conversationId), String(decision.lastMessageId));
   }
 
   const final = owner !== undefined || current.assignee != null || decision.messages >= MAX_MESSAGES;

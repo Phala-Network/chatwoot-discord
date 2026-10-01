@@ -32,6 +32,7 @@ export default defineConfig({
             "100000000000000011": "token-alice",
             "100000000000000012": "token-bob",
           }),
+          CHATWOOT_BOT_TOKENS: JSON.stringify({ "1": "bot-globex" }),
           TEST_DISCORD_PRIVATE_JWK: privateJwk,
         },
       },

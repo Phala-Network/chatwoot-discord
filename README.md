@@ -479,9 +479,11 @@ Chatwoot agent bot (`CHATWOOT_BOT_TOKENS`): customers see the bot's name, such a
 bot's message assigns nobody and is no human first reply, and Chatwoot then counts the customer as
 answered (no longer waiting) until they write again. Create the bot in the account (Settings →
 Bots), without connecting it to an inbox. A reply goes out at most once per ticket: it is recorded
-before it is sent, so a failed send is not retried. Routing runs before a new message is relayed, so
-the customer messages a reply answers are relayed without calling the triage bot (a note says so);
-the customer's next message calls it as usual. Rules that need no judgement of the text (by inbox, sender, or
+before it is sent, so a failed send is not retried. Once sent, the customer messages it answers (those
+Jev was given) are relayed without calling the triage bot, with a note: while a ticket's routing is
+pending, its new messages wait for it, up to 30 seconds (accounts whose kinds reply only). If routing
+fails or takes longer, they are relayed with the mention as usual. The customer's next message calls
+the bot as usual. Rules that need no judgement of the text (by inbox, sender, or
 subject) are Chatwoot's automation rules.
 
 ```jsonc

@@ -31,7 +31,7 @@ import { queueBudget } from "./queue-limits.ts";
 import { latestMessageId, type ProcessorContext, processConversation, relayFor } from "./relay/processor.ts";
 import { isUnknownCard } from "./relay/relay.ts";
 import { processMessageUpdate } from "./relay/updates.ts";
-import { awaitsRouting, routeConversation, routesAccount } from "./routing.ts";
+import { awaitsRouting, repliesAutomatically, routeConversation, routesAccount } from "./routing.ts";
 import { loadSettings } from "./settings.ts";
 import { type Job, Store } from "./store.ts";
 
@@ -49,17 +49,18 @@ const payloadSchema = z.discriminatedUnion("type", [
 ]);
 type JobPayload = z.infer<typeof payloadSchema>;
 
-// Routing comes before relaying a conversation's new messages, so a message a routing kind's reply
-// answers is relayed without calling the triage bot.
 const PRIORITY = {
   command: 0,
   answer: 1,
   sweep: 1,
-  route: 1,
   conversation: 2,
+  route: 2,
   "message-updated": 3,
   queue: 4,
 } as const;
+/** How long a conversation's relay may wait for its routing, checking this often (see run). */
+const ROUTE_WAIT_MS = 30_000;
+const ROUTE_POLL_MS = 1000;
 /** Requests a job may need before it can start without being cut short. */
 const COMMAND_BUDGET = 20;
 const MIN_BUDGET = 2;
@@ -242,6 +243,18 @@ export class Hub extends DurableObject<Env> {
           this.store.completeJob(job);
           return "done";
         case "conversation": {
+          // A kind's reply may answer the conversation's new customer messages, which are then relayed
+          // without calling the triage bot: while the conversation's routing is pending (and has not
+          // failed), its relay waits for it, up to ROUTE_WAIT_MS.
+          const route = jobKey({ type: "route", accountId: payload.accountId, conversationId: payload.conversationId });
+          if (
+            repliesAutomatically(services.settings, payload.accountId) &&
+            this.store.hasPendingJob(route) &&
+            Date.now() - job.createdAt < ROUTE_WAIT_MS
+          ) {
+            this.store.deferJob(job, ROUTE_POLL_MS);
+            return "done";
+          }
           const outcome = await processConversation(services, payload.accountId, payload.conversationId);
           if (outcome === "done") this.store.completeJob(job);
           return outcome;
