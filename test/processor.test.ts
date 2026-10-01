@@ -27,7 +27,7 @@ interface FakeMessage {
   status?: string;
   content_type?: string;
   content_attributes?: Record<string, unknown>;
-  sender?: { id: number; type: string; name?: string; thumbnail?: string };
+  sender?: { id: number; type: string; name?: string; thumbnail?: string; avatar_url?: string };
   attachments?: Array<Record<string, unknown>>;
 }
 
@@ -601,7 +601,7 @@ describe("agent avatars", () => {
       .map((post) => post.body.avatar_url);
   }
 
-  it("shows linked agents' Discord avatars, looked up once a day, else their Chatwoot avatar", async () => {
+  it("shows linked agents' Discord avatars, looked up once a day, else their Chatwoot avatar, and agent bots' own", async () => {
     const world = new World();
     world.discordUsers = {
       [BOB]: { avatar: "a_bob", discriminator: "0" },
@@ -616,7 +616,7 @@ describe("agent avatars", () => {
         id: 5,
         content: "bot reply",
         message_type: 1,
-        sender: { id: 7, type: "agent_bot", thumbnail: "https://x.example/b.png" },
+        sender: { id: 7, type: "agent_bot", avatar_url: "https://x.example/b.png" },
       },
       {
         id: 6,
@@ -634,7 +634,7 @@ describe("agent avatars", () => {
         `${cdn}/embed/avatars/${(BigInt(ALICE) >> 22n) % 6n}.png`,
         "https://chatwoot.example.com/dana.png",
         "https://chatwoot.example.com/favicon-512x512.png",
-        "https://chatwoot.example.com/favicon-512x512.png",
+        "https://x.example/b.png",
         "https://x.example/c.png",
         `${cdn}/avatars/${BOB}/a_bob.png`,
       ]);

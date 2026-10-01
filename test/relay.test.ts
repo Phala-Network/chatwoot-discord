@@ -104,7 +104,7 @@ describe("Relay", () => {
     expect(forum.patches).toEqual([]);
   });
 
-  it("gives agents their linked Discord avatar, else their https Chatwoot avatar, else the Chatwoot avatar", async () => {
+  it("gives agents their linked Discord avatar, else their https Chatwoot avatar, else the Chatwoot avatar; agent bots theirs", async () => {
     const discord = "https://cdn.discordapp.com/avatars/100000000000000012/abc.png";
     const agent = (id: number, avatarUrl: string, extra: { discordAvatarUrl?: string; private?: boolean } = {}) =>
       message({ id, messageType: "outgoing", sender: { name: "Sam", type: "user", avatarUrl }, ...extra });
@@ -124,7 +124,7 @@ describe("Relay", () => {
       "https://files.example.com/sam.png",
       AVATARS.chatwoot,
       AVATARS.chatwoot,
-      AVATARS.chatwoot,
+      "https://files.example.com/bot.png",
     ]);
   });
 
