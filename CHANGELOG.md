@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.1] - 2026-10-01
+
 ### Fixed
 
 - The package's `bin` path has no leading `./`: `npm publish` rewrote it with a warning that it was
@@ -553,7 +555,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-invocation subrequest budget, and a cron reconciliation sweep for missed webhooks.
 - Verification of Chatwoot webhook HMAC signatures and Discord Ed25519 interaction signatures.
 
-[Unreleased]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.27.0...HEAD
+[Unreleased]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.27.1...HEAD
+[0.27.1]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.27.0...v0.27.1
 [0.27.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.24.0...v0.25.0
