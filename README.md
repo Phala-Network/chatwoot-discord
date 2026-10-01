@@ -461,7 +461,7 @@ came in between). The hook is a convenience: if a call is lost, the card offers 
 | Free plan limit | How this service stays within it |
 |---|---|
 | 10 ms CPU per Worker request | The Worker verifies a signature, parses JSON, and makes one Durable Object call. Bodies over 2 MB are rejected; a very large webhook that fails is relayed by the next sweep. |
-| 50 subrequests per invocation | Alarms count requests against `relay.subrequestBudget` and yield to a fresh invocation before it runs out. A conversation run needs 4 requests to set up; it starts a message only while `relay.maxChunks` + 24 requests remain (its parts, 13 for everything else a message may need, and 11 to finish the run), so the budget must be at least `relay.maxChunks` + 28 (`src/relay/limits.ts`). A command starts only with 20 left, a sweep with 10. |
+| 50 subrequests per invocation | Alarms count requests against `relay.subrequestBudget` and yield to a fresh invocation before it runs out. A conversation run needs 4 requests to set up; it starts a message only while `relay.maxChunks` + 24 requests remain (its parts, 13 for everything else a message may need, and 11 to finish the run), so the budget must be at least `relay.maxChunks` + 28 (`src/relay/limits.ts`). A command starts only with 20 left, a sweep page with 1. |
 | 128 MB memory | Attachments are capped at 25 MB each / 50 MB per command. |
 | 100,000 Worker requests/day | See the estimate below. |
 | Durable Objects (SQLite): 100,000 requests/day, 100,000 rows written/day | See the estimate below. |
@@ -531,8 +531,8 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
   Discord accepted whose response never arrived: Execute Webhook has no idempotency key.
 - **Sweep**: the cron trigger queues a sweep per account that pages through conversations, most
   recent activity first, back to the start of the previous sweep (at least
-  `reconcile.lookbackSeconds`, at most `reconcile.maxCatchUpSeconds`), 10 pages per run and
-  continuing where it stopped, and queues any conversation whose post is behind or whose tags or
+  `reconcile.lookbackSeconds`, at most `reconcile.maxCatchUpSeconds`), one page per job (a command
+  waiting runs between pages) and continuing where it stopped, and queues any conversation whose post is behind or whose tags or
   state differ. Activity means a new message. A change without one (for example only the topic
   attribute) relies on its webhook, and so do deletions, responses, and delivery failures of
   messages already relayed: the sweep does not re-read relayed messages, so a missed webhook for

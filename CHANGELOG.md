@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The README describes the sweep's one page per job.
+- Tests fail on any request no mocked route answers, and cover a command that comes during a
+  sweep running before the sweep's next page.
+
 ## [0.20.0] - 2026-09-30
 
 ### Changed

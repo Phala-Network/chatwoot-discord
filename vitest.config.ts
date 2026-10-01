@@ -12,6 +12,7 @@ export default defineConfig({
   test: {
     // Structured logs from passing tests are noise; failures still print theirs.
     silent: "passed-only",
+    setupFiles: ["./test/setup.ts"],
     // discord-api-types ships CommonJS that re-exports through helpers the Workers pool cannot
     // follow (its enums come through empty). Pre-bundle it to ESM, as wrangler does when deploying.
     deps: { optimizer: { ssr: { enabled: true, include: ["discord-api-types/v10"] } } },

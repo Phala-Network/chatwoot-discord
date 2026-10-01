@@ -245,7 +245,7 @@ export function panel(
     row([{ type: ComponentType.StringSelect, custom_id: customId, placeholder, options }]);
 
   // The ticket's own label first, so it stays in the menu when the account has too many. A label
-  // longer than an option value can be is left to /label; the menu still names the current one.
+  // longer than an option value can be is left to Chatwoot; the menu still names the current one.
   const current = ticket.labels[0];
   const labels = [
     option(NONE, "No label", "🏷️", current === undefined),

@@ -134,6 +134,7 @@ describe("interaction handler", () => {
       settings: testSettings({ chatwoot: { baseUrl: "https://chatwoot.example.com", sendAsAgent: true } }),
     };
     const offering = (await handleInteraction(interaction({ name: "reply" }), sendingAsAgent)).response;
+    expect(offering.type).toBe(InteractionResponseType.Modal);
     if (offering.type !== InteractionResponseType.Modal) return;
     expect(editorField(offering, "from")).toEqual({ type: 23, custom_id: "from:777001" });
     expect(editorField(response, "files")).toEqual({
