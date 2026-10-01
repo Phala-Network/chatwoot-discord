@@ -339,30 +339,49 @@ replace.
 A var holds at most 5 KB ([Workers limits](https://developers.cloudflare.com/workers/platform/limits/)).
 A larger configuration goes in a [KV namespace](https://developers.cloudflare.com/kv/) bound as
 `CONFIG_STORE`, and is deployed with the [Cloudflare CLI](https://developers.cloudflare.com/cf/)
-(`cf`, in beta; a dev dependency here). Write the configuration, as JSON with comments, in a file
-of its own, and in `cloudflare.config.ts` (see
-[Migrate a Wrangler project](https://developers.cloudflare.com/cf/wrangler/migrate/)) bind the
-namespace and the configuration's key instead of `CONFIG`:
+(`cf`, in beta). Set `CONFIG` or `CONFIG_KEY`, not both.
+
+**From a repository of your own** (to keep your configuration private), depend on the
+[`chatwoot-discord-relay`](https://www.npmjs.com/package/chatwoot-discord-relay) package, published from
+this repository's releases with npm provenance, at an exact version. Your project needs `cf` and `wrangler`
+as dev dependencies, `src/index.ts` with `export { default, Hub } from "chatwoot-discord-relay";`, the
+configuration as JSON with comments in a file of its own (`config.jsonc`), and a `cloudflare.config.ts`
+that binds the namespace and the configuration's key instead of `CONFIG`:
 
 ```ts
-import { storedConfig } from "./scripts/stored-config.ts";
-// …
-env: {
-  CONFIG_STORE: bindings.kv({ id: "<namespace id>" }),
-  CONFIG_KEY: bindings.text(storedConfig("config.jsonc").key),
-},
+import { bindings, defineConfig, exports, triggers } from "cf/config";
+import { storedConfig } from "chatwoot-discord-relay/stored-config";
+
+export default defineConfig({
+  accountId: "<account id>",
+  worker: {
+    name: "chatwoot-discord",
+    entrypoint: "src/index.ts",
+    compatibilityDate: "2026-08-15",
+    domains: ["<worker host>"],
+    triggers: [triggers.scheduled({ schedule: "*/5 * * * *" })],
+    exports: { Hub: exports.durableObject({ storage: "sqlite" }) },
+    env: {
+      HUB: bindings.durableObject({ worker: "chatwoot-discord", exportName: "Hub" }),
+      CONFIG_STORE: bindings.kv({ id: "<namespace id>" }),
+      CONFIG_KEY: bindings.text(storedConfig(new URL("config.jsonc", import.meta.url)).key),
+    },
+  },
+});
 ```
 
-Then store the configuration before deploying:
+Store the configuration, then deploy (in CI too, following
+[Use cf in CI](https://developers.cloudflare.com/cf/ci/)):
 
 ```sh
 npx cf kv namespaces create --title chatwoot-discord-config   # once
-npm run -s store-config -- config.jsonc --namespace-id <namespace id> && npx cf deploy
+npx chatwoot-discord-store-config config.jsonc --namespace-id <namespace id> && npx cf deploy
 ```
 
 Both validate the file. Its key is derived from its content, so each version reads the configuration
 it was deployed with, also after a rollback (stored keys are kept). KV is eventually consistent: a
-read that fails is retried with the next request. Set `CONFIG` or `CONFIG_KEY`, not both.
+read that fails is retried with the next request. In this repository, the same command is
+`npm run -s store-config --`, and `cloudflare.config.ts` imports `./scripts/stored-config.ts`.
 
 | Key | Type and constraints | Default | Meaning |
 |---|---|---|---|

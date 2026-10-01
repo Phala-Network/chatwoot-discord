@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Published to npm as [`chatwoot-discord-relay`](https://www.npmjs.com/package/chatwoot-discord-relay) from
+  each GitHub release, with trusted publishing and provenance, so a deployment can live in a repository
+  of its own: the package exports the Worker (`default`, `Hub`), `storedConfig`
+  (`chatwoot-discord-relay/stored-config`), and the `chatwoot-discord-store-config` command.
+
 ## [0.26.0] - 2026-10-01
 
 ### Changed

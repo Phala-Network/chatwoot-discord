@@ -1,7 +1,10 @@
+#!/usr/bin/env node
 // Stores a configuration in the CONFIG_STORE KV namespace (see stored-config.ts) with the Cloudflare
-// CLI (cf), and prints its key:
+// CLI (cf, from the calling project), and prints its key. In this repository:
 //
 //   npm run -s store-config -- config.jsonc --namespace-id <CONFIG_STORE namespace id>
+//
+// From a project that depends on the package: npx chatwoot-discord-store-config <same arguments>
 
 import { execFileSync } from "node:child_process";
 import { parseArgs } from "node:util";
@@ -11,7 +14,7 @@ const { values, positionals } = parseArgs({ options: { "namespace-id": { type: "
 const [file] = positionals;
 const namespaceId = values["namespace-id"];
 if (!file || !namespaceId) {
-  console.error("Usage: npm run -s store-config -- <config.jsonc> --namespace-id <id>");
+  console.error("Usage: chatwoot-discord-store-config <config.jsonc> --namespace-id <id>");
   process.exit(2);
 }
 
