@@ -13,7 +13,7 @@ const relay = defineWorker({
   exports: { Hub: exports.durableObject({ storage: "sqlite" }) },
 });
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   worker: {
     ...relay,
     observability: { enabled: true },
@@ -21,12 +21,18 @@ export default defineConfig({
     triggers: [triggers.scheduled({ schedule: "*/5 * * * *" })],
     env: {
       HUB: bindings.durableObject({ worker: relay, exportName: "Hub" }),
-      // Required secrets (see .dev.vars.example): a deploy fails while one is not set. The optional ones are not
-      // declared; a secrets file sets them all.
+      // Secrets (see .dev.vars.example). A declared secret is required: a deploy fails while one is not set. The
+      // optional ones are declared in development only, so `npm run dev` loads them from .dev.vars too.
       DISCORD_BOT_TOKEN: bindings.secret(),
       DISCORD_PUBLIC_KEY: bindings.secret(),
       CHATWOOT_RELAY_TOKEN: bindings.secret(),
       CHATWOOT_WEBHOOK_SECRETS: bindings.secret(),
+      ...(mode === "development" && {
+        CHATWOOT_AGENT_TOKENS: bindings.secret(),
+        TYPESAFE_API_KEY: bindings.secret(),
+        CHATWOOT_BOT_TOKENS: bindings.secret(),
+        TRIAGE_HOOK_SECRET: bindings.secret(),
+      }),
       CONFIG: bindings.json({
         chatwoot: { baseUrl: "https://chatwoot.example.com" },
         accounts: [
@@ -42,4 +48,4 @@ export default defineConfig({
       }),
     },
   },
-});
+}));

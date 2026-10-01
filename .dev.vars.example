@@ -1,6 +1,6 @@
 # Worker secrets. For a deploy, copy to a file outside the repository and pass it with
-# `npx cf deploy --secrets-file <file>`. For `npm run dev`, copy to .dev.vars (git-ignored); it loads the
-# required secrets only, those declared in cloudflare.config.ts. All values here are placeholders.
+# `npx cf deploy --secrets-file <file>`. For `npm run dev`, copy to .dev.vars (git-ignored). All values here are
+# placeholders.
 
 # Discord application: bot token and the application's public key (hex).
 DISCORD_BOT_TOKEN=replace-with-bot-token
