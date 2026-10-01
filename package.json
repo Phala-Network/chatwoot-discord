@@ -1,6 +1,6 @@
 {
   "name": "chatwoot-discord-relay",
-  "version": "0.27.0",
+  "version": "0.28.0",
   "description": "Run Chatwoot support from a Discord forum with humans and AI agents: a post per conversation, slash commands, AI drafts, and AI triage.",
   "keywords": [
     "chatwoot",
