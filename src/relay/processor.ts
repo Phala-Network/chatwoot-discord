@@ -16,6 +16,7 @@ import { relaysInbox, type Settings } from "../config.ts";
 import { type DiscordRest, isInvalidRequest } from "../discord/rest.ts";
 import { fetchAvatarUrl } from "../discord/users.ts";
 import { errorFields, log } from "../log.ts";
+import { answeredAutomatically, type RoutingStore } from "../routing.ts";
 import type { Store } from "../store.ts";
 import { mentionedUserIds } from "./format.ts";
 import { FINISH_REQUESTS, PAGE_REQUESTS, requestsPerMessage } from "./limits.ts";
@@ -29,7 +30,12 @@ const AVATAR_CACHE_MS = 24 * 60 * 60 * 1000;
 const AVATAR_RETRY_MS = 60 * 60 * 1000;
 
 /** The relay as configured by `settings`. */
-export function relayFor(settings: Settings, forum: ForumClient, store: RelayStore): Relay {
+export function relayFor(
+  settings: Settings,
+  forum: ForumClient,
+  store: RelayStore & RoutingStore,
+  routingPending?: (accountId: number, conversationId: number) => boolean,
+): Relay {
   const triageUserId = settings.config.triage.userId;
   return new Relay({
     forum,
@@ -47,6 +53,9 @@ export function relayFor(settings: Settings, forum: ForumClient, store: RelaySto
     triage: triageUserId ? { ...settings.config.triage, userId: triageUserId } : undefined,
     card: ticketCard,
     linkedAgent: settings.linkedAgent,
+    routingPending,
+    answeredAutomatically: (accountId, conversationId, messageId) =>
+      answeredAutomatically(store, accountId, conversationId, messageId),
     // Normally every message is relayed within the sweep's window (by its webhook, or else by
     // the sweep), so an older one is history: a first sync, or a catch-up after downtime.
     liveSeconds: settings.config.reconcile.lookbackSeconds,

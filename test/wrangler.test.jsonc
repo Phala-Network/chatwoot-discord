@@ -27,7 +27,8 @@
       "triage": { "userId": "100000000000000777" },
       "routing": {
         "accounts": { "1": { "cloud": { "assignee": 6, "covers": "Cloud support." } } },
-        "topics": { "billing": "Payments." }
+        "topics": { "billing": "Payments." },
+        "kinds": { "1": { "startup-program": { "covers": "A Startup Program application.", "cannedResponse": "startup-program" } } }
       }
     }
   }

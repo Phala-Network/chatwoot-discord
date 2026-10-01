@@ -75,7 +75,8 @@ and a Discord server where you can add an application and a forum channel.
   `allowed_mentions` suppresses the notification, so the token pings no human.
 - **Cost and abuse are bounded.** At most `triage.perConversationPerHour` (5) customer messages
   per conversation and `triage.perHour` (30) in total call the agent each hour; beyond that a
-  visible note replaces the mention. Messages from blocked contacts are never relayed.
+  visible note replaces the mention, as it does on a customer message a routing kind's reply
+  already answered. Messages from blocked contacts are never relayed.
 - **The AI drafts, humans send.** Talking in a post never reaches the customer; only commands do.
   The agent writes its proposed reply as the last fenced code block of its answer. A human uses
   **Apps → Reply with this** to open the reply editor prefilled with it, edits if needed, and
@@ -478,7 +479,11 @@ Chatwoot agent bot (`CHATWOOT_BOT_TOKENS`): customers see the bot's name, such a
 bot's message assigns nobody and is no human first reply, and Chatwoot then counts the customer as
 answered (no longer waiting) until they write again. Create the bot in the account (Settings →
 Bots), without connecting it to an inbox. A reply goes out at most once per ticket: it is recorded
-before it is sent, so a failed send is not retried. Rules that need no judgement of the text (by inbox, sender, or
+before it is sent, so a failed send is not retried. Once sent, the customer messages it answers (those
+Jev was given) are relayed without calling the triage bot, with a note. In an account whose kinds
+reply, a ticket's new customer message is not posted while the ticket's routing is queued (and has
+not failed), up to 30 seconds after it was queued; a routing that fails or stays queued longer lets it
+through with the mention as usual. The customer's next message calls the bot as usual. Rules that need no judgement of the text (by inbox, sender, or
 subject) are Chatwoot's automation rules.
 
 ```jsonc

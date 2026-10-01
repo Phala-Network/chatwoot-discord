@@ -1176,6 +1176,7 @@ describe("worker", () => {
           answers: {
             owner: { type: "choice", choice: "cloud", probabilities: { cloud: 0.9, unclear: 0.1 } },
             topic: { type: "choice", choice: "billing", probabilities: { billing: 1 } },
+            kind: { type: "choice", choice: "none", probabilities: { none: 1 } },
           },
         }),
       ),
@@ -1194,6 +1195,61 @@ describe("worker", () => {
     expect(world.sent("POST", /\/accounts\/1\/conversations\/7\/labels$/).map((r) => JSON.parse(r.body))).toEqual([
       { labels: ["billing"] },
     ]);
+  });
+
+  it("relays a message a kind's reply answered after routing, without calling the triage bot", async () => {
+    const globex = "chatwoot.example.com/api/v1/accounts/1";
+    const conversation = {
+      id: 8,
+      status: "open",
+      inbox_id: 2,
+      custom_attributes: {},
+      meta: { sender: { name: "Jane Doe" }, assignee: null, channel: "Channel::Email" },
+      messages: [{ id: 80 }],
+      last_activity_at: Math.floor(Date.now() / 1000),
+    };
+    const customer = {
+      id: 80,
+      content: "I would like to apply",
+      message_type: 0,
+      created_at: Math.floor(Date.now() / 1000),
+    };
+    world = new World([
+      on("GET", `${globex}/conversations/8`, () => json(conversation)),
+      on("GET", `${globex}/conversations/8/messages`, () => json({ payload: [customer] })),
+      on("GET", `${globex}/inboxes/2`, () => json({ id: 2, name: "Globex — Email" })),
+      on("POST", `${globex}/conversations/8/assignments`, () => json({})),
+      on("POST", `${globex}/conversations/8/custom_attributes`, () => json({})),
+      on("POST", `${globex}/conversations/8/labels`, () => json({})),
+      on("GET", `${globex}/canned_responses`, () =>
+        json([{ id: 1, short_code: "startup-program", content: "Thanks!" }]),
+      ),
+      on("POST", `${globex}/conversations/8/messages`, () => json({})),
+      on("POST", "api.typesafe.ai/v1/systemone", () =>
+        json({
+          answers: {
+            owner: { type: "choice", choice: "cloud", probabilities: { cloud: 1 } },
+            topic: { type: "choice", choice: "billing", probabilities: { billing: 1 } },
+            kind: { type: "choice", choice: "startup-program", probabilities: { "startup-program": 0.95 } },
+          },
+        }),
+      ),
+    ]);
+
+    await chatwootWebhook(
+      { event: "message_created", id: 1, account: { id: 1, name: "Globex" }, conversation: { id: 8 } },
+      {
+        secret: "secret-globex",
+      },
+    );
+    await vi.waitFor(() => expect(world.webhookPosts().length).toBeGreaterThan(1), { timeout: 5000, interval: 50 });
+
+    const [reply] = world.sent("POST", /\/accounts\/1\/conversations\/8\/messages$/);
+    expect(reply?.headers.get("api_access_token")).toBe("bot-globex");
+    const relayed = world.webhookPosts().map((post) => String(post.body.content ?? ""));
+    const message = relayed.find((content) => content.startsWith("I would like to apply"));
+    expect(message).toMatch(/not called: answered automatically/);
+    expect(relayed.some((content) => content.includes("<@100000000000000777>"))).toBe(false);
   });
 
   it("closes the post when a command finds its conversation deleted", async () => {

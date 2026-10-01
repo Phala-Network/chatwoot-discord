@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { chatwootClient } from "../src/chatwoot/api.ts";
-import { type RoutingStore, routeConversation, sanitize } from "../src/routing.ts";
+import { answeredAutomatically, type RoutingStore, routeConversation, sanitize } from "../src/routing.ts";
 import { json, mockFetch, on, type Recorded, testSettings } from "./helpers.ts";
 
 const ROUTING = {
@@ -397,6 +397,9 @@ describe("routeConversation with kinds", () => {
 
     await routeConversation(context(store, KINDS), 1, 5);
     expect(replies(requests)).toEqual([{ content: "Thanks for applying!", message_type: "outgoing", private: false }]);
+    // The customer message it answers calls no triage bot; a later one does.
+    expect(answeredAutomatically(store, 1, 5, 1)).toBe(true);
+    expect(answeredAutomatically(store, 1, 5, 3)).toBe(false);
     // The topic and the kind are labels of their own families.
     expect(sent(requests, "POST", `${CW}/labels`).map((r) => JSON.parse(r.body))).toEqual([
       { labels: ["billing", "startup-program"] },
@@ -410,11 +413,13 @@ describe("routeConversation with kinds", () => {
   });
 
   it("sends no reply while the kind's canned response does not exist", async () => {
+    const store = new MapStore();
     const { requests } = world({}, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["security", 1] });
 
-    await routeConversation(context(new MapStore(), KINDS), 1, 5);
+    await routeConversation(context(store, KINDS), 1, 5);
 
     expect(replies(requests)).toEqual([]);
+    expect(answeredAutomatically(store, 1, 5, 1)).toBe(false);
     expect(sent(requests, "POST", `${CW}/labels`).map((r) => JSON.parse(r.body))).toEqual([
       { labels: ["billing", "security"] },
     ]);
@@ -439,6 +444,8 @@ describe("routeConversation with kinds", () => {
     await routeConversation(context(store, KINDS), 1, 5);
 
     expect(replies(requests)).toHaveLength(1);
+    // Not sent: the triage bot still answers the customer.
+    expect(answeredAutomatically(store, 1, 5, 1)).toBe(false);
   });
 
   it("replies as the account's agent bot, under its name, also before the ticket has an owner", async () => {

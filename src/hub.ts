@@ -28,10 +28,11 @@ import { DiscordHttpError, DiscordRest } from "./discord/rest.ts";
 import { errorFields, log } from "./log.ts";
 import { postQueue } from "./queue.ts";
 import { queueBudget } from "./queue-limits.ts";
+import { RoutingPendingError } from "./relay/notify.ts";
 import { latestMessageId, type ProcessorContext, processConversation, relayFor } from "./relay/processor.ts";
 import { isUnknownCard } from "./relay/relay.ts";
 import { processMessageUpdate } from "./relay/updates.ts";
-import { awaitsRouting, routeConversation, routesAccount } from "./routing.ts";
+import { awaitsRouting, repliesAutomatically, routeConversation, routesAccount } from "./routing.ts";
 import { loadSettings } from "./settings.ts";
 import { type Job, Store } from "./store.ts";
 
@@ -58,6 +59,9 @@ const PRIORITY = {
   "message-updated": 3,
   queue: 4,
 } as const;
+/** How long a customer message may wait for its conversation's routing, checked this often (see services). */
+const ROUTE_WAIT_MS = 30_000;
+const ROUTE_POLL_MS = 1000;
 /** Requests a job may need before it can start without being cut short. */
 const COMMAND_BUDGET = 20;
 const MIN_BUDGET = 2;
@@ -273,6 +277,10 @@ export class Hub extends DurableObject<Env> {
       }
     } catch (error) {
       if (error instanceof BudgetExhaustedError) return "yield";
+      if (error instanceof RoutingPendingError) {
+        this.store.deferJob(job, ROUTE_POLL_MS);
+        return "done";
+      }
       const backoff = Math.min(5000 * 2 ** job.attempts, MAX_BACKOFF_MS);
       if (error instanceof DiscordHttpError && error.retryAfterMs !== undefined) {
         // Rate limited: wait as long as Discord asks without counting an attempt, so no rate
@@ -432,7 +440,14 @@ export class Hub extends DurableObject<Env> {
       budget.fetch,
     );
     const forum = new DiscordForum(rest, this.store);
-    const relay = relayFor(settings, forum, this.store);
+    // A customer message waits for its conversation's routing, which may answer it with a kind's reply
+    // (then the triage bot is not called): while the route job is queued and has not failed, up to
+    // ROUTE_WAIT_MS after it was queued.
+    const relay = relayFor(settings, forum, this.store, (accountId, conversationId) => {
+      if (!repliesAutomatically(settings, accountId)) return false;
+      const age = this.store.pendingJobAge(jobKey({ type: "route", accountId, conversationId }));
+      return age !== undefined && age < ROUTE_WAIT_MS;
+    });
     return { settings, store: this.store, relay, forum, chatwoot, budget, rest };
   }
 

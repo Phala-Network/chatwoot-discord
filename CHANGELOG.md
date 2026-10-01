@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A customer message a routing kind's reply answered does not call the triage bot; a note says so,
+  and the customer's next message calls it as usual. In an account whose kinds reply, a ticket's new
+  customer message waits while the ticket's routing is queued (and has not failed), up to 30 seconds
+  after it was queued; otherwise it is relayed with the mention as before.
+
 ## [0.22.0] - 2026-09-30
 
 ### Added
