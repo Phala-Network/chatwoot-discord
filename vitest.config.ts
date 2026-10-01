@@ -14,14 +14,46 @@ export default defineConfig({
     silent: "passed-only",
     setupFiles: ["./test/setup.ts"],
     // discord-api-types ships CommonJS that re-exports through helpers the Workers pool cannot
-    // follow (its enums come through empty). Pre-bundle it to ESM, as wrangler does when deploying.
+    // follow (its enums come through empty). Pre-bundle it to ESM, as the build does.
     deps: { optimizer: { ssr: { enabled: true, include: ["discord-api-types/v10"] } } },
   },
   plugins: [
     cloudflareTest({
-      wrangler: { configPath: "./test/wrangler.test.jsonc" },
+      main: "./src/index.ts",
       miniflare: {
+        // Keep in step with cloudflare.config.ts.
+        compatibilityDate: "2026-08-15",
+        // Required by @cloudflare/vitest-pool-workers (the Worker itself does not need it).
+        compatibilityFlags: ["nodejs_compat"],
+        durableObjects: { HUB: { className: "Hub", useSQLite: true } },
+        kvNamespaces: ["CONFIG_STORE"],
         bindings: {
+          // Placeholder ids.
+          CONFIG: {
+            chatwoot: { baseUrl: "https://chatwoot.example.com" },
+            accounts: [
+              { id: 3, name: "Acme", forumChannelId: "100000000000000055" },
+              { id: 1, name: "Globex", forumChannelId: "100000000000000055" },
+            ],
+            agents: [
+              { discordUserId: "100000000000000011", chatwootUserId: 42 },
+              { discordUserId: "100000000000000012", chatwootUserId: 43 },
+              { discordUserId: "100000000000000013", chatwootUserId: 45 },
+            ],
+            forumTags: {
+              "100000000000000055": { "account:3": "100000000000000301", "status:open": "100000000000000302" },
+            },
+            triage: { userId: "100000000000000777" },
+            routing: {
+              accounts: { "1": { cloud: { assignee: 6, covers: "Cloud support." } } },
+              topics: { billing: "Payments." },
+              kinds: {
+                "1": {
+                  "startup-program": { covers: "A Startup Program application.", cannedResponse: "startup-program" },
+                },
+              },
+            },
+          },
           DISCORD_BOT_TOKEN: "test-bot-token",
           DISCORD_PUBLIC_KEY: publicHex,
           CHATWOOT_RELAY_TOKEN: "relay-token",

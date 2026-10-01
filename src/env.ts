@@ -5,7 +5,7 @@ import type { Hub } from "./hub.ts";
 
 export interface Env {
   HUB: DurableObjectNamespace<Hub>;
-  /** JSON object (wrangler vars accept objects) or a JSON string; see config.ts. */
+  /** JSON object (a JSON binding) or a JSON string; see config.ts. */
   CONFIG?: unknown;
   /** Instead of CONFIG: the key of the configuration in CONFIG_STORE (see scripts/store-config.ts). */
   CONFIG_KEY?: string;

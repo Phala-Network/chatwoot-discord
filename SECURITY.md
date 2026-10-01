@@ -28,5 +28,5 @@ attention to:
   assignee, and agents mentioned in a private note), and customer text is defused so it cannot
   mention or pass for relay lines (`src/relay/format.ts`, `src/relay/notify.ts`).
 
-Secrets must only be provided as Worker secrets (or `.dev.vars` locally), never in `wrangler.jsonc`
+Secrets must only be provided as Worker secrets (or `.dev.vars` locally), never in `cloudflare.config.ts`
 or the repository. Logs must not contain message bodies, tokens, or secrets.

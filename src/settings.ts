@@ -1,4 +1,4 @@
-// Reads the Worker's settings once per isolate: the configuration from the `CONFIG` var (wrangler.jsonc)
+// Reads the Worker's settings once per isolate: the configuration from the `CONFIG` var (cloudflare.config.ts)
 // or, past the 5 KB a var holds, from the CONFIG_STORE KV namespace under the key in the `CONFIG_KEY`
 // var (see scripts/store-config.ts); and the Worker secrets.
 

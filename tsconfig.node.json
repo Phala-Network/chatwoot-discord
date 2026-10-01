@@ -8,5 +8,5 @@
     "allowImportingTsExtensions": true,
     "erasableSyntaxOnly": true
   },
-  "include": ["vitest.config.ts", "scripts"]
+  "include": ["vitest.config.ts", "vite.config.ts", "scripts"]
 }

@@ -19,8 +19,6 @@ is enough).
 a minor release may change configuration or setup; the [changelog](CHANGELOG.md) says what to
 do when it does.
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Phala-Network/chatwoot-discord-relay)
-
 ![A Discord forum with one post per Chatwoot conversation, tagged by account, status, assignee, and topic](docs/assets/forum.png)
 
 *Each conversation is a forum post, tagged by account, status, assignee, topic, and priority.*
@@ -139,48 +137,34 @@ The account must have the API/webhooks feature enabled (it is by default on self
 
 ### 3. Cloudflare
 
+Deploy with the [Cloudflare CLI](https://developers.cloudflare.com/cf/) (`cf`, in beta), from a
+checkout of this repository or from a repository of your own. Requirements: Node 24 (24.15 or
+later) and npm (the version in `packageManager` in `package.json`); sign in once with
+`npx cf auth login`.
+
 The secrets are described in [`.dev.vars.example`](.dev.vars.example) and the
-[secrets table](#secrets). Use `{}` for `CHATWOOT_WEBHOOK_SECRETS` until step 4, and
-`{"<discord user id>":"<chatwoot token>"}` for `CHATWOOT_AGENT_TOKENS`. The Worker is named
-`chatwoot-discord` in `wrangler.jsonc`. Deploy in one of three ways.
+[secrets table](#secrets). Copy it to a file outside the repository and fill it in, with `{}` for
+`CHATWOOT_WEBHOOK_SECRETS` until step 4 and `{"<discord user id>":"<chatwoot token>"}` for
+`CHATWOOT_AGENT_TOKENS`, then pass it to the first deploy with `--secrets-file`. Later deploys keep
+the secrets; to change some, deploy again with a file that holds only those (the others are kept).
+Do not leave the file lying around: it holds every credential.
 
-**With the Deploy to Cloudflare button** ([how it works](https://developers.cloudflare.com/workers/platform/deploy-buttons/)):
-
-1. Select the button at the top. Cloudflare copies this repository to your GitHub or GitLab
-   account, asks for the Worker name and each secret, and deploys with
-   [Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/), which then deploys
-   every push to your copy. Keep the detected commands: `npm run build` (a wrangler dry run) and
-   `npm run deploy`.
-2. In your copy, replace the placeholder `CONFIG` in `wrangler.jsonc` (see the
-   [configuration reference](#configuration-reference)) and push; Workers Builds deploys it.
-3. Change a secret later in the Cloudflare dashboard (your Worker > **Settings** >
-   **Variables and Secrets**) or with `npx wrangler secret put <NAME>` from a checkout.
-
-**From a checkout.** Requirements: Node 24 (24.15 or later) and npm (the version in
-`packageManager` in `package.json`).
+**From a checkout.**
 
 ```sh
 npm ci
-# Replace the placeholder CONFIG in wrangler.jsonc (see the configuration reference).
-npx wrangler secret put DISCORD_BOT_TOKEN
-npx wrangler secret put DISCORD_PUBLIC_KEY
-npx wrangler secret put CHATWOOT_RELAY_TOKEN
-npx wrangler secret put CHATWOOT_WEBHOOK_SECRETS   # {} for now; filled in step 4
-npx wrangler secret put CHATWOOT_AGENT_TOKENS      # {"<discord user id>":"<chatwoot token>"}
-npx wrangler secret put TYPESAFE_API_KEY           # only with routing
-npx wrangler secret put CHATWOOT_BOT_TOKENS        # only with routing kinds that reply: {"<account id>":"<bot token>"}
-npx wrangler secret put TRIAGE_HOOK_SECRET         # only with a triage bot hook (see Triage bot hook)
-npm run deploy
+# Replace the placeholder CONFIG in cloudflare.config.ts (see the configuration reference).
+npx cf deploy --secrets-file <secrets file>
 ```
 
 **From a repository of your own**, to keep your configuration private: depend on the
 [`chatwoot-discord-relay`](https://www.npmjs.com/package/chatwoot-discord-relay) package,
 published from this repository's releases with npm provenance, at an exact version. Your project
-needs `cf` and `wrangler` as dev dependencies, `src/index.ts` with
-`export { default, Hub } from "chatwoot-discord-relay";`, the configuration as JSON with comments
-in a file of its own (`config.jsonc`), and a `cloudflare.config.ts` that binds a
-[KV namespace](https://developers.cloudflare.com/kv/) and the configuration's key instead of
-`CONFIG`:
+needs `cf`, `vite`, and `@cloudflare/vite-plugin` as dev dependencies, a `vite.config.ts` like this
+repository's, `src/index.ts` with `export { default, Hub } from "chatwoot-discord-relay";`, the
+configuration as JSON with comments in a file of its own (`config.jsonc`), and a
+`cloudflare.config.ts` that binds a [KV namespace](https://developers.cloudflare.com/kv/) and the
+configuration's key instead of `CONFIG`:
 
 ```ts
 import { bindings, defineConfig, exports, triggers } from "cf/config";
@@ -204,10 +188,9 @@ export default defineConfig({
 });
 ```
 
-Store the configuration, then deploy with the [Cloudflare CLI](https://developers.cloudflare.com/cf/)
-(`cf`, in beta). In CI, follow [Use cf in CI](https://developers.cloudflare.com/cf/ci/) without `--mode`
-(this configuration has no modes): `npx cf build`, then `npx cf deploy --prebuilt` after storing the
-configuration. By hand:
+Store the configuration, then deploy. In CI, follow [Use cf in CI](https://developers.cloudflare.com/cf/ci/)
+without `--mode` (this configuration has no modes): `npx cf build`, then `npx cf deploy --prebuilt` after storing
+the configuration. By hand:
 
 ```sh
 npx cf kv namespaces create --title chatwoot-discord-config   # once
@@ -304,7 +287,7 @@ conversation is resolved.
 
 ## Configuration reference
 
-Non-secret settings live in the `CONFIG` var in `wrangler.jsonc`, validated at startup; an
+Non-secret settings live in `CONFIG` in `cloudflare.config.ts`, validated at startup; an
 unknown key (for example a typo) makes it invalid. The committed values are placeholders to
 replace. A var holds at most 5 KB ([Workers limits](https://developers.cloudflare.com/workers/platform/limits/)):
 a larger configuration goes in a [KV namespace](https://developers.cloudflare.com/kv/) bound as
@@ -494,7 +477,7 @@ messages; tickets beyond that are counted at the end.
 - Attachments are fetched only from Discord's CDN (`cdn.discordapp.com`, `media.discordapp.net`)
   over HTTPS, without following redirects, with size caps.
 - Logs carry ids and outcomes only, never message bodies or tokens. Errors shown to users are
-  generic; details go to Workers Logs (`observability` in `wrangler.jsonc`).
+  generic; details go to Workers Logs (`observability` in `cloudflare.config.ts`).
 
 See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
@@ -522,9 +505,9 @@ Cloudflare's current pricing for the Free allowance.
 ```sh
 npm ci
 npm run lint && npm run typecheck && npm test   # tests run inside workerd (@cloudflare/vitest-pool-workers)
-npm run build                                   # wrangler dry run into dist/
-npm run dev                                     # local Worker; copy .dev.vars.example to .dev.vars first
-npm run types                                   # regenerate worker-configuration.d.ts (runtime types)
+npm run build                                   # cf build into .cloudflare/output (no deploy)
+npm run dev                                     # local Worker (cf dev); copy .dev.vars.example to .dev.vars first
+npm run types                                   # regenerate .cloudflare/types (typecheck runs it)
 npm run gen:chatwoot                            # regenerate src/chatwoot/schema.d.ts (Chatwoot v4.18.0 OpenAPI)
 sh docs/assets/render.sh                        # re-render the README illustrations (needs Docker)
 ```
