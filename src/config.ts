@@ -119,7 +119,10 @@ export const configSchema = z
         model: z.string().min(1).default("jev-1.13.0"),
         /** Jev's probability an answer needs before it is applied. */
         minConfidence: z.number().min(0.5).max(1).default(0.7),
-        /** Snooze a ticket Jev cannot assign yet until the customer's next message (see src/routing.ts). */
+        /**
+         * Snooze a ticket Jev cannot assign yet, and in which the customer asked for nothing yet, until
+         * their next message (see src/routing.ts).
+         */
         snoozeUnclear: z.boolean().default(false),
         /** Per Chatwoot account id: the owners Jev chooses from, by a short name. */
         accounts: z.record(

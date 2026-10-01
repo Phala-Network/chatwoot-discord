@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `routing.snoozeUnclear` snoozes only a ticket in which the customer asked for nothing yet (Jev is
+  also asked whether there is a request): a real question that no owner covers stays open for a
+  person instead of waiting, snoozed, for a message the customer will not send.
+
 ## [0.25.0] - 2026-10-01
 
 ### Changed

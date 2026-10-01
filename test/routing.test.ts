@@ -46,7 +46,8 @@ interface Ticket {
 /** Chatwoot conversation 5 of account 1 and Jev, faked at the fetch boundary. */
 function world(
   ticket: Ticket,
-  jev: { owner: [string, number]; topic: [string, number]; kind?: [string, number] },
+  // `request` (asked with snoozeUnclear) defaults to a ticket without one.
+  jev: { owner: [string, number]; topic: [string, number]; kind?: [string, number]; request?: [string, number] },
   failAssign = 0,
   whileJevAnswers?: () => void,
 ) {
@@ -116,6 +117,11 @@ function world(
           ...(jev.kind
             ? { kind: { type: "choice", choice: jev.kind[0], probabilities: { [jev.kind[0]]: jev.kind[1] } } }
             : {}),
+          request: {
+            type: "choice",
+            choice: (jev.request ?? ["none", 1])[0],
+            probabilities: { [(jev.request ?? ["none", 1])[0]]: (jev.request ?? ["none", 1])[1] },
+          },
         },
       });
     }),
@@ -239,6 +245,20 @@ describe("routeConversation", () => {
     ]);
     await routeConversation(context(new MapStore()), 1, 5);
     expect(sent(requests, "POST", `${CW}/toggle_status`)).toHaveLength(1);
+  });
+
+  it("with snoozeUnclear, leaves open a ticket it cannot assign whose customer asks for something", async () => {
+    const ticket: Ticket = {};
+    const snoozing = { ...ROUTING, snoozeUnclear: true };
+    const store = new MapStore();
+    const { requests } = world(ticket, { owner: ["unclear", 1], topic: ["billing", 0.5], request: ["request", 0.9] });
+
+    await routeConversation(context(store, snoozing), 1, 5);
+
+    const [ask] = sent(requests, "POST", "api.typesafe.ai/v1/systemone").map((r) => JSON.parse(r.body));
+    expect(Object.keys(ask.questions.request.criteria)).toEqual(["request", "none"]);
+    expect(sent(requests, "POST", `${CW}/toggle_status`)).toEqual([]);
+    expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("waiting");
   });
 
   it("does not snooze a ticket the customer wrote to while Jev was answering; that message's run asks again", async () => {
