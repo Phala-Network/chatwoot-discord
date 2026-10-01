@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-09-30
+
 ### Changed
 
 - A customer message a routing kind's reply answered does not call the triage bot; a note says so,
@@ -512,7 +514,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-invocation subrequest budget, and a cron reconciliation sweep for missed webhooks.
 - Verification of Chatwoot webhook HMAC signatures and Discord Ed25519 interaction signatures.
 
-[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.20.1...v0.21.0
 [0.20.1]: https://github.com/Phala-Network/chatwoot-discord/compare/v0.20.0...v0.20.1
