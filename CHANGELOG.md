@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `routing.kinds`: per account, kinds of ticket Jev recognizes along with the owner and topic,
+  added as labels of a second family beside the one topic label (the Manage card's label menu
+  sets the topic and keeps them), and what is done once when it is confident: `reply` sends a fixed text to the customer as the
+  account's Chatwoot agent bot, under its name (new secret `CHATWOOT_BOT_TOKENS`; at most once per
+  ticket), and `status` sets the ticket aside (resolved, or
+  snoozed until the customer's next message) instead of routing it, without blocking its contact.
+
 ## [0.20.1] - 2026-09-30
 
 ### Changed

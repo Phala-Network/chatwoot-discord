@@ -31,12 +31,16 @@ interface Ticket {
   messages?: Array<{ id: number; content: string; message_type: number; private?: boolean }>;
   /** Snooze requests that fail before Chatwoot answers. */
   failSnooze?: number;
+  /** Replies that fail before Chatwoot answers. */
+  failReply?: number;
+  /** Status changes Chatwoot makes but whose answer is lost. */
+  loseStatusAnswer?: number;
 }
 
 /** Chatwoot conversation 5 of account 1 and Jev, faked at the fetch boundary. */
 function world(
   ticket: Ticket,
-  jev: { owner: [string, number]; topic: [string, number] },
+  jev: { owner: [string, number]; topic: [string, number]; kind?: [string, number] },
   failAssign = 0,
   whileJevAnswers?: () => void,
 ) {
@@ -47,7 +51,7 @@ function world(
     inbox_id: 2,
     custom_attributes: {},
     labels: ticket.labels ?? [],
-    meta: { sender: { name: "Jane Doe", email: "jane@example.com" }, assignee: ticket.assignee ?? null },
+    meta: { sender: { id: 88, name: "Jane Doe", email: "jane@example.com" }, assignee: ticket.assignee ?? null },
     last_non_activity_message: (ticket.messages ?? []).filter((m) => m.message_type <= 1).at(-1) ?? null,
   });
   const mock = mockFetch(
@@ -70,12 +74,23 @@ function world(
       return json({});
     }),
     on("POST", `${CW}/labels`, () => json({})),
+    on("POST", `${CW}/messages`, () => {
+      if ((ticket.failReply ?? 0) > 0) {
+        ticket.failReply = (ticket.failReply ?? 0) - 1;
+        return json({ error: "unavailable" }, { status: 503 });
+      }
+      return json({});
+    }),
     on("POST", `${CW}/toggle_status`, (request) => {
       if ((ticket.failSnooze ?? 0) > 0) {
         ticket.failSnooze = (ticket.failSnooze ?? 0) - 1;
         return json({ error: "unavailable" }, { status: 503 });
       }
       ticket.status = JSON.parse(request.body).status;
+      if ((ticket.loseStatusAnswer ?? 0) > 0) {
+        ticket.loseStatusAnswer = (ticket.loseStatusAnswer ?? 0) - 1;
+        return json({ error: "unavailable" }, { status: 503 });
+      }
       return json({});
     }),
     on("POST", "api.typesafe.ai/v1/systemone", () => {
@@ -85,6 +100,9 @@ function world(
         answers: {
           owner: { type: "choice", choice: jev.owner[0], probabilities: { [jev.owner[0]]: jev.owner[1] } },
           topic: { type: "choice", choice: jev.topic[0], probabilities: { [jev.topic[0]]: jev.topic[1] } },
+          ...(jev.kind
+            ? { kind: { type: "choice", choice: jev.kind[0], probabilities: { [jev.kind[0]]: jev.kind[1] } } }
+            : {}),
         },
       });
     }),
@@ -93,7 +111,10 @@ function world(
 }
 
 function context(store = new MapStore(), routing: object = ROUTING) {
-  const settings = testSettings({ routing }, { TYPESAFE_API_KEY: "ts-key" });
+  const settings = testSettings(
+    { routing },
+    { TYPESAFE_API_KEY: "ts-key", CHATWOOT_BOT_TOKENS: JSON.stringify({ "1": "bot-token" }) },
+  );
   const fetch = (request: Request) => globalThis.fetch(request);
   return { settings, store, chatwoot: chatwootClient(settings.config.chatwoot.baseUrl, "relay-token", fetch), fetch };
 }
@@ -342,6 +363,114 @@ describe("routeConversation", () => {
       { assignee_id: 7 },
       { assignee_id: 7 },
     ]);
+  });
+});
+
+describe("routeConversation with kinds", () => {
+  const KINDS = {
+    ...ROUTING,
+    kinds: {
+      "1": {
+        "startup-program": { covers: "A Startup Program application.", reply: "Thanks for applying!" },
+        spam: { covers: "Spam.", status: "resolved" },
+      },
+    },
+  };
+  const replies = (requests: Recorded[]) =>
+    sent(requests, "POST", `${CW}/messages`).map((request) => JSON.parse(request.body));
+
+  it("replies once to a ticket of a kind Jev is sure of, after assigning it, and not when unsure", async () => {
+    const store = new MapStore();
+    const ticket: Ticket = {};
+    const { requests } = world(ticket, {
+      owner: ["cloud", 1],
+      topic: ["billing", 1],
+      kind: ["startup-program", 0.9],
+    });
+
+    await routeConversation(context(store, KINDS), 1, 5);
+    expect(replies(requests)).toEqual([{ content: "Thanks for applying!", message_type: "outgoing", private: false }]);
+    // The topic and the kind are labels of their own families.
+    expect(sent(requests, "POST", `${CW}/labels`).map((r) => JSON.parse(r.body))).toEqual([
+      { labels: ["billing", "startup-program"] },
+    ]);
+    await routeConversation(context(store, KINDS), 1, 5);
+    expect(replies(requests)).toHaveLength(1);
+
+    const unsure = world({}, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["startup-program", 0.5] });
+    await routeConversation(context(new MapStore(), KINDS), 1, 5);
+    expect(replies(unsure.requests)).toEqual([]);
+  });
+
+  it("adds the topic to a ticket whose only labels are kinds", async () => {
+    const { requests } = world({ labels: ["spam"] }, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["none", 1] });
+
+    await routeConversation(context(new MapStore(), KINDS), 1, 5);
+
+    expect(sent(requests, "POST", `${CW}/labels`).map((r) => JSON.parse(r.body))).toEqual([
+      { labels: ["spam", "billing"] },
+    ]);
+  });
+
+  it("never sends a reply twice, even when sending it failed", async () => {
+    const store = new MapStore();
+    const ticket: Ticket = { failReply: 1 };
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["startup-program", 1] });
+
+    await expect(routeConversation(context(store, KINDS), 1, 5)).rejects.toThrow();
+    await routeConversation(context(store, KINDS), 1, 5);
+
+    expect(replies(requests)).toHaveLength(1);
+  });
+
+  it("replies as the account's agent bot, under its name, also before the ticket has an owner", async () => {
+    const { requests } = world({}, { owner: ["unclear", 1], topic: ["billing", 1], kind: ["startup-program", 1] });
+
+    await routeConversation(context(new MapStore(), KINDS), 1, 5);
+
+    const [reply] = sent(requests, "POST", `${CW}/messages`);
+    expect(reply?.headers.get("api_access_token")).toBe("bot-token");
+    // A bot's reply assigns nobody.
+    expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
+  });
+
+  it("resolves a spam ticket instead of routing it, without blocking its contact", async () => {
+    const { requests } = world({}, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["spam", 0.95] });
+
+    await routeConversation(context(new MapStore(), KINDS), 1, 5);
+
+    expect(sent(requests, "POST", `${CW}/toggle_status`).map((r) => JSON.parse(r.body))).toEqual([
+      { status: "resolved" },
+    ]);
+    expect(sent(requests, "PUT", "chatwoot.example.com/api/v1/accounts/1/contacts/88")).toEqual([]);
+    expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
+    // Its kind is a label; it gets no topic.
+    expect(sent(requests, "POST", `${CW}/labels`).map((r) => JSON.parse(r.body))).toEqual([{ labels: ["spam"] }]);
+    expect(replies(requests)).toEqual([]);
+  });
+
+  it("completes a set-aside whose status Chatwoot made but whose answer was lost, without setting it again", async () => {
+    const store = new MapStore();
+    const ticket: Ticket = { loseStatusAnswer: 1 };
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["spam", 0.95] });
+
+    await expect(routeConversation(context(store, KINDS), 1, 5)).rejects.toThrow();
+    await routeConversation(context(store, KINDS), 1, 5);
+
+    expect(ticket.status).toBe("resolved");
+    expect(sent(requests, "POST", `${CW}/toggle_status`)).toHaveLength(1);
+    expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("done");
+  });
+
+  it("does not set aside a ticket someone took while Jev was answering", async () => {
+    const ticket: Ticket = {};
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["spam", 0.95] }, 0, () => {
+      ticket.assignee = { id: 9, name: "Doyle" };
+    });
+
+    await routeConversation(context(new MapStore(), KINDS), 1, 5);
+
+    expect(sent(requests, "POST", `${CW}/toggle_status`)).toEqual([]);
   });
 });
 

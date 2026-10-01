@@ -17,11 +17,21 @@
 // Jev was given makes the decision stale: the ticket is then not snoozed, and a decision not applied
 // yet is made again. (A message in the moment between that check and the snooze stays snoozed until
 // the customer's next message reopens the ticket; the support queue lists it meanwhile.)
+//
+// With `kinds`, Jev also tells which configured kind of ticket it is, if any. A kind Jev is confident
+// about is added as a label beside the ticket's one topic label (kinds are labels too, of another
+// family: a topic is a category, a kind may act), and acts with the decision: `status` sets the
+// ticket aside (resolved, or snoozed until the customer's next message, either of which that message
+// reopens) instead of routing it; `reply` sends a fixed reply as the account's Chatwoot agent bot,
+// under its own name, which assigns nobody and is no human first reply. A reply is sent at most once
+// per ticket: it is recorded before it is sent, so a failed send is not retried, and a reply is never
+// repeated.
 
 import { z } from "zod";
 import {
   type ChatwootClient,
   type ChatwootMessage,
+  chatwootClient,
   type Fetch,
   MESSAGE_PAGE_SIZE,
   messageContent,
@@ -35,6 +45,9 @@ export const UNCLEAR = "unclear";
 const UNCLEAR_CRITERION =
   "The message has no concrete request, mixes several of the other areas, concerns another product, or cannot be " +
   "assigned to exactly one of them.";
+/** Jev's answer when no kind fits; also a reserved kind name. */
+const NO_KIND = "none";
+const NO_KIND_CRITERION = "None of the other kinds.";
 const JEV_URL = "https://api.typesafe.ai/v1/systemone";
 const MAX_MESSAGES = 3;
 const MAX_TEXT = 1600;
@@ -72,6 +85,8 @@ const decisionSchema = z.object({
   ownerConfidence: z.number(),
   topic: z.string().nullable(),
   topicConfidence: z.number(),
+  kind: z.string().nullable().default(null),
+  kindConfidence: z.number().default(0),
   /** Customer messages the decision was made on. */
   messages: z.number().int(),
   /** The newest customer message Jev was given: a newer one makes the decision stale. */
@@ -101,6 +116,16 @@ class JevError extends Error {
 
 function routingKey(accountId: number, conversationId: number): string {
   return `route:${accountId}:${conversationId}`;
+}
+
+/** Recorded once a kind's reply is (about to be) sent to the ticket's customer. */
+function replyKey(accountId: number, conversationId: number): string {
+  return `kind-reply:${accountId}:${conversationId}`;
+}
+
+/** The account's kinds: labels Jev adds beside a ticket's one topic label (see `kinds`). */
+export function kindLabels(settings: Settings, accountId: number): ReadonlySet<string> {
+  return new Set(Object.keys(settings.config.routing?.kinds?.[String(accountId)] ?? {}));
 }
 
 /** Whether routing is configured for the account. */
@@ -154,7 +179,7 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     ]);
     // Nothing new since the last answer (or no customer message yet): a later message routes it.
     if (!stale && messages <= (recorded?.messages ?? 0)) return;
-    decision = await decide(ctx, owners, text, messages, lastMessageId);
+    decision = await decide(ctx, owners, routing.kinds?.[String(accountId)], text, messages, lastMessageId);
     store.set(key, JSON.stringify(decision));
     // Asking Jev takes a moment: apply the decision to the conversation as it is now.
     const now = await chatwoot.getConversation(accountId, conversationId);
@@ -162,6 +187,30 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     current = toRelayConversation(conversationId, now);
   }
 
+  const kinds = routing.kinds?.[String(accountId)] ?? {};
+  const kindName =
+    decision.kind !== null && decision.kindConfidence >= routing.minConfidence && Object.hasOwn(kinds, decision.kind)
+      ? decision.kind
+      : null;
+  const kind = kindName === null ? undefined : kinds[kindName];
+  const withKind = (labels: string[]) =>
+    kindName === null || labels.includes(kindName) ? labels : [...labels, kindName];
+  // Not a ticket someone took meanwhile. A retry finishes what an attempt began: labels and a status
+  // set twice change nothing, and a status already set (its answer lost) is not set again.
+  if (kind?.status && !current.assignee && (current.status === "open" || current.status === kind.status)) {
+    const labels = withKind(current.labels);
+    if (labels !== current.labels) await chatwoot.setLabels(accountId, conversationId, labels);
+    if (current.status !== kind.status) await chatwoot.setStatus(accountId, conversationId, { status: kind.status });
+    store.set(key, JSON.stringify({ ...decision, state: "done" }));
+    log.info("ticket set aside as its kind", {
+      accountId,
+      conversationId,
+      kind: decision.kind,
+      kindConfidence: decision.kindConfidence,
+      status: kind.status,
+    });
+    return;
+  }
   // Closed meanwhile (and nobody took it): keep the decision pending until it opens again.
   if (current.status !== "open" && !current.assignee) return;
   const owner =
@@ -169,16 +218,25 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
   const assign = owner !== undefined && !current.assignee;
   if (assign) await chatwoot.assign(accountId, conversationId, owner.assignee);
 
-  // The topic is a label, and a ticket has one label: added when Jev is confident and the ticket
-  // has no label yet (an automation rule's label, such as an inbox's, is kept alone).
+  // The topic is a label, and a ticket has one besides its kinds: added when Jev is confident and the
+  // ticket has no other label yet (an automation rule's label, such as an inbox's, is kept alone).
   const topic =
     decision.topic !== null &&
     Object.hasOwn(routing.topics ?? {}, decision.topic) &&
     decision.topicConfidence >= routing.minConfidence &&
-    current.labels.length === 0
+    current.labels.every((label) => Object.hasOwn(kinds, label))
       ? decision.topic
       : null;
-  if (topic !== null) await chatwoot.setLabels(accountId, conversationId, [...current.labels, topic]);
+  const labels = withKind(topic === null ? current.labels : [...current.labels, topic]);
+  if (labels !== current.labels) await chatwoot.setLabels(accountId, conversationId, labels);
+
+  const reply = store.get(replyKey(accountId, conversationId)) === undefined ? kind?.reply : undefined;
+  const botToken = settings.botToken(accountId);
+  if (reply !== undefined && botToken) {
+    store.set(replyKey(accountId, conversationId), decision.kind ?? "");
+    const bot = chatwootClient(settings.config.chatwoot.baseUrl, botToken, ctx.fetch);
+    await bot.createMessage(accountId, conversationId, { content: reply, private: false, files: [] });
+  }
 
   const final = owner !== undefined || current.assignee != null || decision.messages >= MAX_MESSAGES;
   const state: RoutingState = final ? "done" : "waiting";
@@ -200,6 +258,9 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     messages: decision.messages,
     assigned: assign,
     topicSet: topic !== null,
+    kind: decision.kind,
+    kindConfidence: decision.kindConfidence,
+    replied: reply !== undefined && botToken !== undefined,
     snoozed: snooze,
     state,
   });
@@ -272,9 +333,12 @@ export function sanitize(text: string, identities: Array<string | null | undefin
 
 type Owners = NonNullable<Settings["config"]["routing"]>["accounts"][string];
 
+type Kinds = NonNullable<NonNullable<Settings["config"]["routing"]>["kinds"]>[string];
+
 async function decide(
   ctx: RoutingContext,
   owners: Owners,
+  kinds: Kinds | undefined,
   text: string,
   messages: number,
   lastMessageId: number,
@@ -300,6 +364,16 @@ async function decide(
       criteria: routing.topics,
     };
   }
+  if (kinds) {
+    questions.kind = {
+      type: "choice",
+      instructions: "Select the kind of this support ticket, using only the ticket.",
+      criteria: {
+        ...Object.fromEntries(Object.entries(kinds).map(([name, kind]) => [name, kind.covers])),
+        [NO_KIND]: NO_KIND_CRITERION,
+      },
+    };
+  }
 
   // A redirect is an error, never followed: it could carry the key to another host.
   const response = await ctx.fetch(
@@ -323,11 +397,14 @@ async function decide(
   };
   const owner = answer("owner");
   const topic = answer("topic");
+  const kind = answer("kind");
   return {
     owner: owner.choice === UNCLEAR ? null : owner.choice,
     ownerConfidence: owner.confidence,
     topic: topic.choice,
     topicConfidence: topic.confidence,
+    kind: kind.choice === NO_KIND ? null : kind.choice,
+    kindConfidence: kind.confidence,
     messages,
     lastMessageId,
     state: "pending",
@@ -340,6 +417,8 @@ function unassignable(): Decision {
     ownerConfidence: 0,
     topic: null,
     topicConfidence: 0,
+    kind: null,
+    kindConfidence: 0,
     messages: 0,
     lastMessageId: 0,
     state: "done",

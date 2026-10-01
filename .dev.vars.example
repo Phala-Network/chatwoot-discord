@@ -18,6 +18,9 @@ CHATWOOT_AGENT_TOKENS={"100000000000000011":"replace-with-agent-token"}
 # TypeSafe API key, required only when CONFIG has `routing`.
 # TYPESAFE_API_KEY=replace-with-typesafe-key
 
+# Each account's Chatwoot agent bot, which sends routing kinds' replies, only when a kind replies.
+# CHATWOOT_BOT_TOKENS={"1":"replace-with-bot-token"}
+
 # Shared with a triage bot's hook (32+ characters), only for Use draft (see "Triage bot hook").
 # TRIAGE_HOOK_SECRET=replace-with-a-long-random-secret
 

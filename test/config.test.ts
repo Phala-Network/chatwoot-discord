@@ -79,6 +79,24 @@ describe("configuration", () => {
     expect(routing({ "1": { unclear: owners.cloud } }).success).toBe(false);
     expect(routing({ "1": {} }).success).toBe(false);
 
+    const kinds = (given: Record<string, unknown>) =>
+      configSchema.safeParse({ ...minimal, routing: { accounts: { "1": owners }, kinds: given } });
+    expect(kinds({ "1": { spam: { covers: "Spam.", status: "resolved" } } }).success).toBe(true);
+    expect(kinds({ "1": { spam: { covers: "Spam.", status: "resolved", reply: "Hi" } } }).success).toBe(false);
+    expect(kinds({ "1": { spam: { covers: "Spam.", status: "pending" } } }).success).toBe(false);
+    expect(kinds({ "1": { none: { covers: "Nothing." } } }).success).toBe(false);
+    // Kinds and topics are labels of two families: no name in both.
+    const clash = configSchema.safeParse({
+      ...minimal,
+      routing: { accounts: { "1": owners }, topics: { spam: "Spam." }, kinds: { "1": { spam: { covers: "Spam." } } } },
+    });
+    expect(clash.error?.issues.map((issue) => issue.path.join("."))).toEqual(["routing.kinds"]);
+    expect(
+      kinds({ "2": { spam: { covers: "Spam.", status: "resolved" } } }).error?.issues.map((issue) =>
+        issue.path.join("."),
+      ),
+    ).toEqual(["routing.kinds"]);
+
     const secrets = (extra: Record<string, string> = {}) =>
       secretsSchema.parse({
         DISCORD_BOT_TOKEN: "bot",
@@ -90,6 +108,15 @@ describe("configuration", () => {
     const config = configSchema.parse({ ...minimal, routing: { accounts: { "1": owners } } });
     expect(() => buildSettings(config, secrets())).toThrow(/TYPESAFE_API_KEY/);
     expect(buildSettings(config, secrets({ TYPESAFE_API_KEY: "key" })).config.routing?.accounts["1"]).toEqual(owners);
+
+    // A kind that replies needs its account's agent bot, which sends the reply.
+    const replying = configSchema.parse({
+      ...minimal,
+      routing: { accounts: { "1": owners }, kinds: { "1": { security: { covers: "Security.", reply: "Thanks." } } } },
+    });
+    expect(() => buildSettings(replying, secrets({ TYPESAFE_API_KEY: "key" }))).toThrow(/CHATWOOT_BOT_TOKENS/);
+    const withBot = secrets({ TYPESAFE_API_KEY: "key", CHATWOOT_BOT_TOKENS: JSON.stringify({ "1": "bot" }) });
+    expect(buildSettings(replying, withBot).botToken(1)).toBe("bot");
   });
 
   it("requires a subrequest budget that fits the support queue", () => {

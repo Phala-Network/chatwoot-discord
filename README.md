@@ -173,6 +173,7 @@ npx wrangler secret put CHATWOOT_RELAY_TOKEN
 npx wrangler secret put CHATWOOT_WEBHOOK_SECRETS   # {} for now; filled in step 4
 npx wrangler secret put CHATWOOT_AGENT_TOKENS      # {"<discord user id>":"<chatwoot token>"}
 npx wrangler secret put TYPESAFE_API_KEY           # only with routing
+npx wrangler secret put CHATWOOT_BOT_TOKENS        # only with routing kinds that reply: {"<account id>":"<bot token>"}
 npx wrangler secret put TRIAGE_HOOK_SECRET         # only with a triage bot hook (see Triage bot hook)
 npm run deploy
 ```
@@ -227,8 +228,8 @@ Used inside a ticket post, by Discord users linked in `agents[]` who have a toke
   **Block** asks you to confirm first (only you see the question), then blocks the contact as
   `/block` does.
 - **Manage** opens a card only you see, drawn with the ticket as it is and coloured by its status:
-  menus for its assignee and its label (the card sets one: choosing one replaces the ticket's
-  labels), and **Open**, **Resolve**, and **Snooze** (until the next reply) buttons with the
+  menus for its assignee and its label (the card sets the one topic label: choosing one replaces
+  the ticket's labels except its [kinds](#routing)), and **Open**, **Resolve**, and **Snooze** (until the next reply) buttons with the
   current status highlighted. A change is made at once, and the card is drawn again with the
   result; a change someone else makes shows the next time it is drawn. A menu lists at most 25
   choices (the current assignee and label among them; a label longer than a menu option can be
@@ -363,14 +364,18 @@ replace:
 | `queue.channelId` | Discord id (17–20 digits) | required | Channel or forum post the queue is posted in. The bot needs *Send Messages* there (*Send Messages in Threads* for a post). |
 | `queue.escalationRoleId` | Discord id (17–20 digits) | unset | Role pinged for tickets unassigned too long. To ping a role that is not mentionable, the bot needs *Mention @everyone, @here, and All Roles* in the channel. Unset: no escalation. |
 | `queue.escalationUserId` | Discord id (17–20 digits) | unset | A user pinged instead of a role (set one of the two). |
-| `routing` | object | unset | Assigns new tickets and adds their topic label with TypeSafe Jev ([routing](#routing)). Requires the `TYPESAFE_API_KEY` secret. Unset: off. |
+| `routing` | object | unset | Assigns new tickets, adds their topic label, and acts on their kind with TypeSafe Jev ([routing](#routing)). Requires the `TYPESAFE_API_KEY` secret. Unset: off. |
 | `routing.model` | non-empty string | `jev-1.13.0` | TypeSafe model. |
 | `routing.minConfidence` | number 0.5–1 | `0.7` | Probability an answer needs before it is applied. |
 | `routing.snoozeUnclear` | boolean | `false` | Snooze a ticket with no clear owner until the customer's next message. |
 | `routing.accounts` | object: account id → (owner name → owner) | required | Routed accounts (configured in `accounts[]`) and the owners Jev chooses from. Owner names are 1–40 lower-case letters, digits, or `_`; `unclear` is reserved. |
 | `routing.accounts.<id>.<name>.assignee` | integer > 0 | required | Chatwoot user id to assign. |
 | `routing.accounts.<id>.<name>.covers` | 1–1000 characters | required | What the owner handles: Jev's criterion for choosing them. |
-| `routing.topics` | object: label → what it covers | unset | Topic labels (Chatwoot label names, lower case) Jev chooses from; one is added when a ticket has none of them. Show them as forum tags with `label:<label>` keys in `forumTags`. Unset: no topic. |
+| `routing.topics` | object: label → what it covers | unset | Topic labels (Chatwoot label names, lower case) Jev chooses from; one is added when a ticket has no label other than its kinds (an automation rule's label is kept alone). Show them as forum tags with `label:<label>` keys in `forumTags`. Unset: no topic. |
+| `routing.kinds` | object: account id → (kind name → kind) | unset | Kinds of ticket Jev recognizes in routed accounts, added as labels beside the topic, and what is done once when it does ([routing](#routing)). Kind names are the account's label names (1–40 lower-case letters, digits, `_`, or `-`); `none` is reserved. Unset: none. |
+| `routing.kinds.<id>.<name>.covers` | 1–1000 characters | required | What the kind is: Jev's criterion for recognizing it. |
+| `routing.kinds.<id>.<name>.reply` | 1–4000 characters | unset | Sent to the customer once, by the account's agent bot (`CHATWOOT_BOT_TOKENS`). |
+| `routing.kinds.<id>.<name>.status` | `resolved` or `snoozed` | unset | Set instead of routing the ticket (`snoozed`: until the customer's next message); a new customer message reopens it. Not with `reply`. |
 | `reconcile.lookbackSeconds` | integer ≥ 60 | `3600` | Minimum sweep window (conversations with activity within it are checked). Messages older than this are relayed without notifications. |
 | `reconcile.maxCatchUpSeconds` | integer ≥ 60 | `604800` (7 days) | Maximum sweep window after downtime. |
 | `attachments.maxFiles` | integer 0–10 | `10` | Files per `/reply` or `/note` (0 hides the editor's upload field). |
@@ -387,6 +392,7 @@ Secrets (Worker secrets, never in config), also validated at startup:
 | `CHATWOOT_WEBHOOK_SECRETS` | JSON object, `{"<account id>":"<secret>"}` | Each account's webhook secret. |
 | `CHATWOOT_AGENT_TOKENS` | JSON object, `{"<Discord user id>":"<token>"}`; optional, default `{}` | Each linked agent's own Chatwoot access token; commands act with it. |
 | `TYPESAFE_API_KEY` | non-empty; required with `routing` | TypeSafe API key for routing. |
+| `CHATWOOT_BOT_TOKENS` | JSON object, `{"<account id>":"<token>"}`; optional, default `{}` | Each account's Chatwoot agent bot, which sends routing kinds' replies under its own name; required for an account whose kinds reply. |
 | `TRIAGE_HOOK_SECRET` | 32+ characters; optional | Signs the triage bot's hook ([triage bot hook](#triage-bot-hook)). Unset: the route is off. |
 
 ### Support queue
@@ -413,7 +419,7 @@ tokens, phone numbers, IP addresses, @handles, and the contact's name are replac
 `[REDACTED]`. This is best-effort redaction of common identifiers, not anonymization: other personal
 details in the text still reach TypeSafe, so check that its data policy suits you. An owner at
 `minConfidence` or above is assigned, and a topic at or above it is added as a label when the ticket
-has no label yet (a ticket has one label, so one an automation rule set stays alone). When no owner
+has no label other than its kinds (a ticket has one topic label, so one an automation rule set stays alone). When no owner
 is clear, Jev is asked again each time the customer adds a message, until one is or three customer
 messages were seen; the ticket then stays for a person. With `snoozeUnclear`, a ticket without a
 clear owner is snoozed until the customer's next message, which reopens it and asks Jev again, so it
@@ -430,6 +436,20 @@ with `CHATWOOT_RELAY_TOKEN`, whose user must be an agent in the routed inboxes; 
 assignment as made by that user. The sweep queues routing for open, unassigned tickets in its
 window, so a missed webhook only delays it.
 
+With `kinds`, Jev is also asked which of the account's kinds the ticket is (or `none`). Kinds are
+labels of a second family: a ticket has one topic label, the category, and a kind Jev is confident
+about is added beside it (create each kind as a label in its account; it needs no forum tag, and
+the card shows it). It also acts with the decision: a kind with a `status` (spam, for example) sets the
+ticket aside, resolved or snoozed until the customer's next message, instead of routing it; the
+contact is not blocked, so a new message reopens the ticket as usual. A kind with a `reply` sends that fixed text to the customer, for
+example to acknowledge an application or point a security report to its process, as the account's
+Chatwoot agent bot (`CHATWOOT_BOT_TOKENS`): customers see the bot's name, such as "Acme Support"; a
+bot's message assigns nobody and is no human first reply, and Chatwoot then counts the customer as
+answered (no longer waiting) until they write again. Create the bot in the account (Settings →
+Bots), without connecting it to an inbox. A reply goes out at most once per ticket: it is recorded
+before it is sent, so a failed send is not retried. Rules that need no judgement of the text (by inbox, sender, or
+subject) are Chatwoot's automation rules.
+
 ```jsonc
 "routing": {
   "accounts": {
@@ -438,7 +458,13 @@ window, so a missed webhook only delays it.
       "sales": { "assignee": 7, "covers": "Sales and partnerships: pricing, capacity, volume deals." }
     }
   },
-  "topics": { "technical-support": "Something does not work.", "billing": "Payments, invoices, refunds." }
+  "topics": { "technical-support": "Something does not work.", "billing": "Payments, invoices, refunds." },
+  "kinds": {
+    "1": {
+      "spam": { "covers": "Unsolicited promotion or scams.", "status": "resolved" },
+      "startup-program": { "covers": "A Startup Program application.", "reply": "Thanks for applying! …" }
+    }
+  }
 }
 ```
 

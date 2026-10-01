@@ -147,6 +147,34 @@ export const configSchema = z
             z.string().min(1).max(1000),
           )
           .optional(),
+        /**
+         * Per Chatwoot account id: kinds of ticket Jev recognizes, by a short name, and what is done,
+         * once, when it does (see src/routing.ts). Unset: none.
+         */
+        kinds: z
+          .record(
+            z.string().regex(/^\d+$/, "must be a Chatwoot account id"),
+            z.record(
+              z
+                .string()
+                .regex(/^[a-z0-9_-]{1,40}$/, "must be a short lower-case name")
+                .refine((name) => name !== "none", "none is reserved"),
+              z
+                .strictObject({
+                  /** What the kind is, as Jev's criterion for recognizing it. */
+                  covers: z.string().min(1).max(1000),
+                  /** Sent to the customer once, as the account's agent bot (CHATWOOT_BOT_TOKENS). */
+                  reply: z.string().trim().min(1).max(4000).optional(),
+                  /**
+                   * Set instead of routing the ticket: `resolved`, or `snoozed` until the customer's
+                   * next message. A new message from the customer reopens either.
+                   */
+                  status: z.enum(["resolved", "snoozed"]).optional(),
+                })
+                .refine((kind) => !(kind.status && kind.reply), "a ticket set aside gets no reply"),
+            ),
+          )
+          .optional(),
       })
       .optional(),
     /**
@@ -196,6 +224,17 @@ export const configSchema = z
         config.accounts.some((account) => account.id === Number(id)),
       ),
     { path: ["routing", "accounts"], message: "must only name configured accounts" },
+  )
+  .refine((config) => Object.keys(config.routing?.kinds ?? {}).every((id) => config.routing?.accounts[id]), {
+    path: ["routing", "kinds"],
+    message: "must only name routed accounts",
+  })
+  .refine(
+    (config) =>
+      Object.values(config.routing?.kinds ?? {}).every((kinds) =>
+        Object.keys(kinds).every((kind) => !Object.hasOwn(config.routing?.topics ?? {}, kind)),
+      ),
+    { path: ["routing", "kinds"], message: "a kind cannot be named as a topic: they are labels of two families" },
   );
 
 type Config = z.infer<typeof configSchema>;
@@ -228,6 +267,12 @@ export const secretsSchema = z.object({
   CHATWOOT_WEBHOOK_SECRETS: jsonRecord,
   /** JSON: {"<Discord user id>": "<that agent's Chatwoot access token>"} */
   CHATWOOT_AGENT_TOKENS: jsonRecord.default({}),
+  /**
+   * JSON: {"<account id>": "<access token of that account's Chatwoot agent bot>"}: the bot that sends
+   * routing kinds' replies, under its own name (e.g. "Acme Support"); required for an account whose
+   * kinds reply.
+   */
+  CHATWOOT_BOT_TOKENS: jsonRecord.default({}),
   /** TypeSafe API key; required when `routing` is configured. */
   TYPESAFE_API_KEY: z.string().min(1).optional(),
   /** Shared with the triage bot's hook, which signs POST /triage/answered. Unset: the route is off. */
@@ -247,6 +292,8 @@ export interface Settings {
   /** Chatwoot user id -> the linked agent. */
   linkedAgent(chatwootUserId: number | null | undefined): AgentConfig | undefined;
   agentToken(discordUserId: string): string | undefined;
+  /** The account's Chatwoot agent bot token (see CHATWOOT_BOT_TOKENS). */
+  botToken(accountId: number): string | undefined;
 }
 
 export class ConfigError extends Error {
@@ -272,6 +319,7 @@ export function loadSettings(env: Env): Settings {
     CHATWOOT_RELAY_TOKEN: env.CHATWOOT_RELAY_TOKEN,
     CHATWOOT_WEBHOOK_SECRETS: env.CHATWOOT_WEBHOOK_SECRETS,
     CHATWOOT_AGENT_TOKENS: env.CHATWOOT_AGENT_TOKENS,
+    CHATWOOT_BOT_TOKENS: env.CHATWOOT_BOT_TOKENS,
     TYPESAFE_API_KEY: env.TYPESAFE_API_KEY,
     TRIAGE_HOOK_SECRET: env.TRIAGE_HOOK_SECRET,
   });
@@ -285,6 +333,11 @@ export function loadSettings(env: Env): Settings {
 export function buildSettings(config: Config, secrets: Secrets): Settings {
   if (config.routing && !secrets.TYPESAFE_API_KEY) {
     throw new ConfigError("Invalid secrets: TYPESAFE_API_KEY: required when routing is configured");
+  }
+  for (const [accountId, kinds] of Object.entries(config.routing?.kinds ?? {})) {
+    if (Object.values(kinds).some((kind) => kind.reply) && !secrets.CHATWOOT_BOT_TOKENS[accountId]) {
+      throw new ConfigError(`Invalid secrets: CHATWOOT_BOT_TOKENS: account ${accountId} has kinds that reply`);
+    }
   }
   const accounts = new Map(config.accounts.map((account) => [account.id, account]));
   const chatwootUsers = new Map(config.agents.map((agent) => [agent.discordUserId, agent.chatwootUserId]));
@@ -303,6 +356,7 @@ export function buildSettings(config: Config, secrets: Secrets): Settings {
     chatwootUserFor: (discordUserId) => chatwootUsers.get(discordUserId),
     linkedAgent: (chatwootUserId) => (chatwootUserId == null ? undefined : linkedAgents.get(chatwootUserId)),
     agentToken: (discordUserId) => secrets.CHATWOOT_AGENT_TOKENS[discordUserId],
+    botToken: (accountId) => secrets.CHATWOOT_BOT_TOKENS[String(accountId)],
   };
 }
 

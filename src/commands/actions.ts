@@ -6,6 +6,7 @@ import { type ChatwootClient, ChatwootError, chatwootClient, type Fetch, type St
 import type { Settings } from "../config.ts";
 import { errorFields, log } from "../log.ts";
 import { clip, defused } from "../relay/format.ts";
+import { kindLabels } from "../routing.ts";
 import { downloadAttachment } from "./attachments.ts";
 import { FAILED, filesTooLarge, NOT_LINKED, UserError } from "./common.ts";
 import { assigneeMenu, panel } from "./components.ts";
@@ -64,7 +65,12 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
         const known = await chatwoot.listLabels(accountId);
         const unknown = action.labels.find((label) => !known.includes(label));
         if (unknown !== undefined) throw new UserError(`There is no label "${unknown}" in this Chatwoot account.`);
-        await chatwoot.setLabels(accountId, conversationId, action.labels);
+        // The panel sets the topic label; the ticket's kinds stay.
+        const kinds = kindLabels(settings, accountId);
+        const current =
+          kinds.size > 0 ? (await existing(chatwoot.getConversation(accountId, conversationId))).labels : [];
+        const kept = (current ?? []).filter((label) => kinds.has(label));
+        await chatwoot.setLabels(accountId, conversationId, [...action.labels, ...kept]);
         message = action.labels.length > 0 ? `Label set to ${action.labels.join(", ")}.` : "Labels removed.";
         break;
       }
@@ -170,7 +176,14 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
       const ticket = `${settings.account(accountId)?.name ?? "Ticket"} #${conversationId}`;
       return {
         content: message ? `✅ ${message}` : ticket,
-        components: await drawPanel(chatwoot, accountId, conversationId, ticket, message),
+        components: await drawPanel(
+          chatwoot,
+          accountId,
+          conversationId,
+          ticket,
+          message,
+          kindLabels(settings, accountId),
+        ),
         conversationGone: false,
       };
     }
@@ -213,10 +226,13 @@ async function drawPanel(
   conversationId: number,
   ticket: string,
   done: string,
+  kinds: ReadonlySet<string>,
 ): Promise<APIMessageTopLevelComponent[]> {
   const conversation = await existing(chatwoot.getConversation(accountId, conversationId));
   const agents = await chatwoot.listAgents(accountId);
-  const labels = await chatwoot.listLabels(accountId);
+  // Its label menu is for the topic: kinds are labels of their own (see routing.ts).
+  const topics = (labels: string[]) => labels.filter((label) => !kinds.has(label));
+  const labels = topics(await chatwoot.listLabels(accountId));
   // The customer's name is their own text: it must not mention anyone.
   const customer = defused(clip(conversation.meta?.sender?.name ?? "", CUSTOMER_NAME_LIMIT));
   const title = `### ${customer ? `${ticket} · ${customer}` : ticket}`;
@@ -224,7 +240,7 @@ async function drawPanel(
     done ? `${title}\n✅ ${done}` : title,
     {
       assigneeId: conversation.meta?.assignee?.id ?? null,
-      labels: conversation.labels ?? [],
+      labels: topics(conversation.labels ?? []),
       status: conversation.status ?? "open",
     },
     named(agents),
