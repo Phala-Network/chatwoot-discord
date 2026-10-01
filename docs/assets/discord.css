@@ -28,7 +28,9 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--body);
-  font: 16px/1.375 "Noto Sans", sans-serif;
+  font:
+    16px / 1.375 "Noto Sans",
+    sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 /* An emoji, drawn with Twemoji at Discord's inline size. */
@@ -201,7 +203,9 @@ pre {
   border-radius: 4px;
   background: var(--code-bg);
   color: #c9cace;
-  font: 14px/1.43 "Liberation Mono", monospace;
+  font:
+    14px / 1.43 "Liberation Mono",
+    monospace;
   white-space: pre-wrap;
 }
 .reactions {
