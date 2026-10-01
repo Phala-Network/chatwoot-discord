@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `routing.kinds`: per account, kinds of ticket Jev recognizes along with the owner and topic, and
+  what is done once when it is confident: `reply` sends a fixed text to the customer once the
+  ticket has an owner (at most once per ticket), and `block` resolves the ticket and blocks its
+  contact, as `/block` does, instead of routing it.
+
 ## [0.20.1] - 2026-09-30
 
 ### Changed

@@ -363,7 +363,7 @@ replace:
 | `queue.channelId` | Discord id (17–20 digits) | required | Channel or forum post the queue is posted in. The bot needs *Send Messages* there (*Send Messages in Threads* for a post). |
 | `queue.escalationRoleId` | Discord id (17–20 digits) | unset | Role pinged for tickets unassigned too long. To ping a role that is not mentionable, the bot needs *Mention @everyone, @here, and All Roles* in the channel. Unset: no escalation. |
 | `queue.escalationUserId` | Discord id (17–20 digits) | unset | A user pinged instead of a role (set one of the two). |
-| `routing` | object | unset | Assigns new tickets and adds their topic label with TypeSafe Jev ([routing](#routing)). Requires the `TYPESAFE_API_KEY` secret. Unset: off. |
+| `routing` | object | unset | Assigns new tickets, adds their topic label, and acts on their kind with TypeSafe Jev ([routing](#routing)). Requires the `TYPESAFE_API_KEY` secret. Unset: off. |
 | `routing.model` | non-empty string | `jev-1.13.0` | TypeSafe model. |
 | `routing.minConfidence` | number 0.5–1 | `0.7` | Probability an answer needs before it is applied. |
 | `routing.snoozeUnclear` | boolean | `false` | Snooze a ticket with no clear owner until the customer's next message. |
@@ -371,6 +371,10 @@ replace:
 | `routing.accounts.<id>.<name>.assignee` | integer > 0 | required | Chatwoot user id to assign. |
 | `routing.accounts.<id>.<name>.covers` | 1–1000 characters | required | What the owner handles: Jev's criterion for choosing them. |
 | `routing.topics` | object: label → what it covers | unset | Topic labels (Chatwoot label names, lower case) Jev chooses from; one is added when a ticket has none of them. Show them as forum tags with `label:<label>` keys in `forumTags`. Unset: no topic. |
+| `routing.kinds` | object: account id → (kind name → kind) | unset | Kinds of ticket Jev recognizes in routed accounts, and what is done once when it does ([routing](#routing)). Kind names are 1–40 lower-case letters, digits, `_`, or `-`; `none` is reserved. Unset: none. |
+| `routing.kinds.<id>.<name>.covers` | 1–1000 characters | required | What the kind is: Jev's criterion for recognizing it. |
+| `routing.kinds.<id>.<name>.reply` | 1–4000 characters | unset | Sent to the customer once, after the ticket has an owner. |
+| `routing.kinds.<id>.<name>.block` | boolean | `false` | Resolve the ticket and block its contact (as `/block`) instead of routing it; not with `reply`. |
 | `reconcile.lookbackSeconds` | integer ≥ 60 | `3600` | Minimum sweep window (conversations with activity within it are checked). Messages older than this are relayed without notifications. |
 | `reconcile.maxCatchUpSeconds` | integer ≥ 60 | `604800` (7 days) | Maximum sweep window after downtime. |
 | `attachments.maxFiles` | integer 0–10 | `10` | Files per `/reply` or `/note` (0 hides the editor's upload field). |
@@ -430,6 +434,15 @@ with `CHATWOOT_RELAY_TOKEN`, whose user must be an agent in the routed inboxes; 
 assignment as made by that user. The sweep queues routing for open, unassigned tickets in its
 window, so a missed webhook only delays it.
 
+With `kinds`, Jev is also asked which of the account's kinds the ticket is (or `none`), and a kind
+it is confident about acts with the decision: a `block` kind (spam) resolves the ticket and blocks
+its contact instead of routing it; a kind with a `reply` sends that fixed text to the customer once
+the ticket has an owner (an unassigned ticket would become the relay user's, Chatwoot assigning a
+ticket to whoever replies), for example to acknowledge an application or point a security report
+to its process. A reply goes out at most once per ticket: it is recorded before it is sent, so a
+failed send is not retried. Rules that need no judgement of the text (by inbox, sender, or
+subject) are Chatwoot's automation rules.
+
 ```jsonc
 "routing": {
   "accounts": {
@@ -438,7 +451,13 @@ window, so a missed webhook only delays it.
       "sales": { "assignee": 7, "covers": "Sales and partnerships: pricing, capacity, volume deals." }
     }
   },
-  "topics": { "technical-support": "Something does not work.", "billing": "Payments, invoices, refunds." }
+  "topics": { "technical-support": "Something does not work.", "billing": "Payments, invoices, refunds." },
+  "kinds": {
+    "1": {
+      "spam": { "covers": "Unsolicited promotion or scams.", "block": true },
+      "startup-program": { "covers": "A Startup Program application.", "reply": "Thanks for applying! …" }
+    }
+  }
 }
 ```
 

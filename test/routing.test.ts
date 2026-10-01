@@ -31,12 +31,14 @@ interface Ticket {
   messages?: Array<{ id: number; content: string; message_type: number; private?: boolean }>;
   /** Snooze requests that fail before Chatwoot answers. */
   failSnooze?: number;
+  /** Replies that fail before Chatwoot answers. */
+  failReply?: number;
 }
 
 /** Chatwoot conversation 5 of account 1 and Jev, faked at the fetch boundary. */
 function world(
   ticket: Ticket,
-  jev: { owner: [string, number]; topic: [string, number] },
+  jev: { owner: [string, number]; topic: [string, number]; kind?: [string, number] },
   failAssign = 0,
   whileJevAnswers?: () => void,
 ) {
@@ -47,7 +49,7 @@ function world(
     inbox_id: 2,
     custom_attributes: {},
     labels: ticket.labels ?? [],
-    meta: { sender: { name: "Jane Doe", email: "jane@example.com" }, assignee: ticket.assignee ?? null },
+    meta: { sender: { id: 88, name: "Jane Doe", email: "jane@example.com" }, assignee: ticket.assignee ?? null },
     last_non_activity_message: (ticket.messages ?? []).filter((m) => m.message_type <= 1).at(-1) ?? null,
   });
   const mock = mockFetch(
@@ -70,6 +72,14 @@ function world(
       return json({});
     }),
     on("POST", `${CW}/labels`, () => json({})),
+    on("POST", `${CW}/messages`, () => {
+      if ((ticket.failReply ?? 0) > 0) {
+        ticket.failReply = (ticket.failReply ?? 0) - 1;
+        return json({ error: "unavailable" }, { status: 503 });
+      }
+      return json({});
+    }),
+    on("PUT", "chatwoot.example.com/api/v1/accounts/1/contacts/88", () => json({})),
     on("POST", `${CW}/toggle_status`, (request) => {
       if ((ticket.failSnooze ?? 0) > 0) {
         ticket.failSnooze = (ticket.failSnooze ?? 0) - 1;
@@ -85,6 +95,9 @@ function world(
         answers: {
           owner: { type: "choice", choice: jev.owner[0], probabilities: { [jev.owner[0]]: jev.owner[1] } },
           topic: { type: "choice", choice: jev.topic[0], probabilities: { [jev.topic[0]]: jev.topic[1] } },
+          ...(jev.kind
+            ? { kind: { type: "choice", choice: jev.kind[0], probabilities: { [jev.kind[0]]: jev.kind[1] } } }
+            : {}),
         },
       });
     }),
@@ -342,6 +355,104 @@ describe("routeConversation", () => {
       { assignee_id: 7 },
       { assignee_id: 7 },
     ]);
+  });
+});
+
+describe("routeConversation with kinds", () => {
+  const KINDS = {
+    ...ROUTING,
+    kinds: {
+      "1": {
+        "startup-program": { covers: "A Startup Program application.", reply: "Thanks for applying!" },
+        spam: { covers: "Spam.", block: true },
+      },
+    },
+  };
+  const replies = (requests: Recorded[]) =>
+    sent(requests, "POST", `${CW}/messages`).map((request) => JSON.parse(request.body));
+
+  it("replies once to a ticket of a kind Jev is sure of, after assigning it, and not when unsure", async () => {
+    const store = new MapStore();
+    const ticket: Ticket = {};
+    const { requests } = world(ticket, {
+      owner: ["cloud", 1],
+      topic: ["billing", 1],
+      kind: ["startup-program", 0.9],
+    });
+
+    await routeConversation(context(store, KINDS), 1, 5);
+    expect(replies(requests)).toEqual([{ content: "Thanks for applying!", message_type: "outgoing", private: false }]);
+    // The reply is sent once the ticket has its owner.
+    const at = (method: string, path: string) =>
+      requests.findIndex((request) => request.method === method && request.url.pathname.endsWith(path));
+    expect(at("POST", "/assignments")).toBeLessThan(at("POST", "/messages"));
+    await routeConversation(context(store, KINDS), 1, 5);
+    expect(replies(requests)).toHaveLength(1);
+
+    const unsure = world({}, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["startup-program", 0.5] });
+    await routeConversation(context(new MapStore(), KINDS), 1, 5);
+    expect(replies(unsure.requests)).toEqual([]);
+  });
+
+  it("never sends a reply twice, even when sending it failed", async () => {
+    const store = new MapStore();
+    const ticket: Ticket = { failReply: 1 };
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["startup-program", 1] });
+
+    await expect(routeConversation(context(store, KINDS), 1, 5)).rejects.toThrow();
+    await routeConversation(context(store, KINDS), 1, 5);
+
+    expect(replies(requests)).toHaveLength(1);
+  });
+
+  it("replies only once the ticket has an owner", async () => {
+    const store = new MapStore();
+    const message = (id: number) => ({ id, content: `Message ${id}`, message_type: 0 });
+    const ticket: Ticket = { messages: [message(1)] };
+    const jev = {
+      owner: ["unclear", 1] as [string, number],
+      topic: ["billing", 1] as [string, number],
+      kind: ["startup-program", 1] as [string, number],
+    };
+    const { requests } = world(ticket, jev);
+
+    await routeConversation(context(store, KINDS), 1, 5);
+    expect(replies(requests)).toEqual([]);
+    ticket.messages = [message(1), message(2)];
+    jev.owner = ["cloud", 1];
+    await routeConversation(context(store, KINDS), 1, 5);
+
+    expect(replies(requests)).toHaveLength(1);
+  });
+
+  it("blocks a spam ticket instead of routing it", async () => {
+    const { requests } = world({}, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["spam", 0.95] });
+
+    await routeConversation(context(new MapStore(), KINDS), 1, 5);
+
+    expect(sent(requests, "POST", `${CW}/toggle_status`).map((r) => JSON.parse(r.body))).toEqual([
+      { status: "resolved" },
+    ]);
+    expect(
+      JSON.parse(sent(requests, "PUT", "chatwoot.example.com/api/v1/accounts/1/contacts/88")[0]?.body ?? ""),
+    ).toEqual({
+      blocked: true,
+    });
+    expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
+    expect(sent(requests, "POST", `${CW}/labels`)).toEqual([]);
+    expect(replies(requests)).toEqual([]);
+  });
+
+  it("does not block a ticket someone took while Jev was answering", async () => {
+    const ticket: Ticket = {};
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["spam", 0.95] }, 0, () => {
+      ticket.assignee = { id: 9, name: "Doyle" };
+    });
+
+    await routeConversation(context(new MapStore(), KINDS), 1, 5);
+
+    expect(sent(requests, "POST", `${CW}/toggle_status`)).toEqual([]);
+    expect(sent(requests, "PUT", "chatwoot.example.com/api/v1/accounts/1/contacts/88")).toEqual([]);
   });
 });
 

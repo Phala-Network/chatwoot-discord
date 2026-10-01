@@ -147,6 +147,31 @@ export const configSchema = z
             z.string().min(1).max(1000),
           )
           .optional(),
+        /**
+         * Per Chatwoot account id: kinds of ticket Jev recognizes, by a short name, and what is done,
+         * once, when it does (see src/routing.ts). Unset: none.
+         */
+        kinds: z
+          .record(
+            z.string().regex(/^\d+$/, "must be a Chatwoot account id"),
+            z.record(
+              z
+                .string()
+                .regex(/^[a-z0-9_-]{1,40}$/, "must be a short lower-case name")
+                .refine((name) => name !== "none", "none is reserved"),
+              z
+                .strictObject({
+                  /** What the kind is, as Jev's criterion for recognizing it. */
+                  covers: z.string().min(1).max(1000),
+                  /** Sent to the customer once the ticket has an owner. */
+                  reply: z.string().trim().min(1).max(4000).optional(),
+                  /** Resolve the ticket and block its contact, as /block does, instead of routing it. */
+                  block: z.boolean().default(false),
+                })
+                .refine((kind) => !(kind.block && kind.reply), "a blocked contact gets no reply"),
+            ),
+          )
+          .optional(),
       })
       .optional(),
     /**
@@ -196,7 +221,11 @@ export const configSchema = z
         config.accounts.some((account) => account.id === Number(id)),
       ),
     { path: ["routing", "accounts"], message: "must only name configured accounts" },
-  );
+  )
+  .refine((config) => Object.keys(config.routing?.kinds ?? {}).every((id) => config.routing?.accounts[id]), {
+    path: ["routing", "kinds"],
+    message: "must only name routed accounts",
+  });
 
 type Config = z.infer<typeof configSchema>;
 type AccountConfig = Config["accounts"][number];
