@@ -9,6 +9,20 @@ const minimal = {
 };
 
 describe("configuration", () => {
+  it("rejects configurable routing attributes and link names that collide with coordination", () => {
+    expect(
+      configSchema.safeParse({ ...minimal, router: { accounts: [1], attributes: { seen: "custom" } } }).success,
+    ).toBe(false);
+    for (const linkAttribute of ["routing_seen", "routing_handled", "routing_kind"]) {
+      expect(configSchema.safeParse({ ...minimal, relay: { linkAttribute } }).success).toBe(false);
+    }
+  });
+
+  it("requires webhook secrets for every relayed account", async () => {
+    await expect(loadSettings({ ...env, CHATWOOT_WEBHOOK_SECRETS: '{"1":"test-secret"}' })).rejects.toThrow(
+      /CHATWOOT_WEBHOOK_SECRETS.*3/,
+    );
+  });
   it("validates router keepLabels as lower-case labels and defaults to none", () => {
     const router = { accounts: [1] };
     expect(configSchema.parse({ ...minimal, router }).router).toMatchObject({ keepLabels: [] });

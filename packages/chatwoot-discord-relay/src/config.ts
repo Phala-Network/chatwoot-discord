@@ -2,7 +2,7 @@
 // Worker reads them).
 
 import { z } from "zod";
-import { attributesSchema } from "../../../shared/attributes.ts";
+import { ROUTING_ATTRIBUTES } from "../../../shared/attributes.ts";
 import { ConfigError, describe, jsonRecord, reconcileSchema } from "../../../shared/config.ts";
 
 export { ConfigError } from "../../../shared/config.ts";
@@ -86,7 +86,13 @@ export const configSchema = z
         /** Conversation custom attribute used as a topic tag. */
         topicAttribute: z.string().min(1).default("topic"),
         /** Conversation custom attribute that receives the post URL (a Link attribute). Empty disables it. */
-        linkAttribute: z.string().default("discord_thread"),
+        linkAttribute: z
+          .string()
+          .refine(
+            (name) => !Object.values(ROUTING_ATTRIBUTES).some((reserved) => name === reserved),
+            "must not be a routing attribute",
+          )
+          .default("discord_thread"),
         /** Messages with an id at or below this are never relayed (cutover watermark). */
         startAfterMessageId: z.number().int().min(0).default(0),
         /** A message that fails this many times is skipped with a notice in its post. */
@@ -111,7 +117,6 @@ export const configSchema = z
         keepLabels: z
           .array(z.string().regex(/^[a-z0-9_-]{1,255}$/, "must be a Chatwoot label name (lower case)"))
           .default([]),
-        attributes: attributesSchema.prefault({}),
       })
       .optional(),
     /**
@@ -210,6 +215,11 @@ export function parseSettings(rawConfig: unknown, rawSecrets: object): Settings 
 }
 
 export function buildSettings(config: Config, secrets: Secrets): Settings {
+  for (const account of config.accounts) {
+    if (!secrets.CHATWOOT_WEBHOOK_SECRETS[String(account.id)]) {
+      throw new ConfigError(`Invalid secrets: CHATWOOT_WEBHOOK_SECRETS: account ${account.id} needs a webhook secret`);
+    }
+  }
   const accounts = new Map(config.accounts.map((account) => [account.id, account]));
   const chatwootUsers = new Map(config.agents.map((agent) => [agent.discordUserId, agent.chatwootUserId]));
   const linkedAgents = new Map(config.agents.map((agent) => [agent.chatwootUserId, agent]));

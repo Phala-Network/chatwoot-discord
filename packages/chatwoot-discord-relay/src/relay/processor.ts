@@ -219,7 +219,7 @@ async function linkPost(
   if (!attribute) return;
   const url = await forum.postUrl(forumChannelId, threadId);
   if (conversation.customAttributes[attribute] === url) return;
-  await chatwoot.setCustomAttribute(accountId, conversation.id, attribute, url);
+  await chatwoot.setCustomAttributes(accountId, conversation.id, { [attribute]: url });
   conversation.customAttributes[attribute] = url;
 }
 

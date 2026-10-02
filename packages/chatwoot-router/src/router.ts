@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { z } from "zod";
 import { Budget, BudgetExhaustedError } from "../../../shared/budget.ts";
-import { chatwootClient } from "../../../shared/chatwoot/api.ts";
+import { ChatwootError, chatwootClient } from "../../../shared/chatwoot/api.ts";
 import { parseJson } from "../../../shared/json.ts";
 import { errorFields, log } from "../../../shared/log.ts";
 import { QueueStore, retryDelay } from "../../../shared/store.ts";
@@ -85,6 +85,11 @@ export class Router extends DurableObject<Env> {
         }
         this.store.completeJob(job);
       } catch (error) {
+        if (error instanceof ChatwootError && error.conversationMissing) {
+          log.info("conversation deleted; job dropped", { job: job.key });
+          this.store.deleteJob(job.key);
+          continue;
+        }
         if (error instanceof BudgetExhaustedError) {
           this.store.deferJob(job);
           yielded = true;
@@ -122,7 +127,7 @@ export class Router extends DurableObject<Env> {
       if (conversation.status === "open" && !conversation.meta?.assignee) {
         this.enqueue({ type: "route", accountId, conversationId });
       }
-      if (needsCompletionRepair({ settings, store: this.store }, accountId, conversation)) {
+      if (needsCompletionRepair({ store: this.store }, accountId, conversation)) {
         this.enqueue({ type: "repair", accountId, conversationId });
       }
     }

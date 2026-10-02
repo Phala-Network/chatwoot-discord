@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { attributesSchema } from "../../../shared/attributes.ts";
 import { ConfigError, describe, jsonRecord, reconcileSchema } from "../../../shared/config.ts";
 
 export { ConfigError } from "../../../shared/config.ts";
@@ -12,7 +11,6 @@ const accountId = z
 export const configSchema = z
   .strictObject({
     chatwoot: z.strictObject({ baseUrl: z.url({ protocol: /^https?$/ }) }),
-    attributes: attributesSchema.prefault({}),
     reconcile: reconcileSchema,
     startAfterConversationId: z.record(accountId, z.number().int().min(0)).default({}),
     subrequestBudget: z.number().int().min(20).max(1000).default(45),
@@ -122,6 +120,11 @@ export function parseSettings(rawConfig: unknown, rawSecrets: object): Settings 
 }
 
 export function buildSettings(config: Config, secrets: Secrets): Settings {
+  for (const accountId of Object.keys(config.routing.accounts)) {
+    if (!secrets.CHATWOOT_WEBHOOK_SECRETS[accountId]) {
+      throw new ConfigError(`Invalid secrets: CHATWOOT_WEBHOOK_SECRETS: account ${accountId} needs a webhook secret`);
+    }
+  }
   for (const [accountId, kinds] of Object.entries(config.routing.kinds ?? {})) {
     if (Object.values(kinds).some((kind) => kind.cannedResponse) && !secrets.CHATWOOT_BOT_TOKENS[accountId]) {
       throw new ConfigError(`Invalid secrets: CHATWOOT_BOT_TOKENS: account ${accountId} has kinds that reply`);

@@ -2,6 +2,7 @@
 // token, so Chatwoot applies its normal permissions and records who did it.
 
 import type { APIMessageTopLevelComponent } from "discord-api-types/v10";
+import { ROUTING_ATTRIBUTES } from "../../../../shared/attributes.ts";
 import {
   type ChatwootClient,
   ChatwootError,
@@ -289,7 +290,7 @@ async function existing<T>(conversation: Promise<T | undefined>): Promise<T> {
 }
 
 function kindLabels(attributes: Record<string, unknown> | undefined, settings: Settings): ReadonlySet<string> {
-  const kind = attributes?.[settings.config.router?.attributes.kind ?? "routing_kind"];
+  const kind = attributes?.[ROUTING_ATTRIBUTES.kind];
   return new Set([
     ...(settings.config.router?.keepLabels ?? []),
     ...(typeof kind === "string" && kind.length > 0 ? [kind] : []),

@@ -4,7 +4,7 @@ import { MemoryStore, message, TRIAGE } from "./helpers.ts";
 
 const NOW = new Date("2026-09-27T20:00:00Z");
 const SECONDS = NOW.getTime() / 1000;
-const router = { accounts: [3], waitSeconds: 30, attributes: { seen: "seen", handled: "handled", kind: "kind" } };
+const router = { accounts: [3], waitSeconds: 30 };
 const triage = { userId: TRIAGE, name: "Triage bot", perConversationPerHour: 5, perHour: 30 };
 
 function notifier(store = new MemoryStore()) {
@@ -15,11 +15,11 @@ describe("router conversation state", () => {
   it("defers unseen customer messages, including an older watermark, without consuming budgets", () => {
     const store = new MemoryStore();
     const notifications = notifier(store);
-    const customer = message({ createdAt: SECONDS, conversation: { customAttributes: { seen: 100 } } });
+    const customer = message({ createdAt: SECONDS, conversation: { customAttributes: { routing_seen: 100 } } });
     expect(() => notifications.notification(customer)).toThrow(RoutingPendingError);
     expect(store.decisions.size).toBe(0);
     expect(store.counters.size).toBe(0);
-    customer.conversation.customAttributes.seen = customer.id;
+    customer.conversation.customAttributes.routing_seen = customer.id;
     expect(notifications.notification(customer).lines).toEqual([`-# <@${TRIAGE}>`]);
   });
 
@@ -28,7 +28,7 @@ describe("router conversation state", () => {
       const notifications = notifier();
       const customer = message({ createdAt: SECONDS, conversation });
       expect(() => notifications.notification(customer)).toThrow(RoutingPendingError);
-      customer.conversation.customAttributes = { seen: customer.id, handled: customer.id };
+      customer.conversation.customAttributes = { routing_seen: customer.id, routing_handled: customer.id };
       expect(notifications.notification(customer).lines).toEqual([
         "-# Triage bot not called: handled automatically. Ask it here, if needed.",
       ]);
@@ -44,10 +44,28 @@ describe("router conversation state", () => {
     for (const customer of cases) expect(notifier().notification(customer).lines).toEqual([`-# <@${TRIAGE}>`]);
   });
 
-  it("accepts only numeric watermarks and does not wait for agents or notes", () => {
-    expect(() =>
-      notifier().notification(message({ createdAt: SECONDS, conversation: { customAttributes: { seen: "101" } } })),
-    ).toThrow(RoutingPendingError);
+  it.each([101, "101", " 101 "])("reads numeric or text watermarks: %j", (watermark) => {
+    const customer = message({
+      createdAt: SECONDS,
+      conversation: { customAttributes: { routing_seen: watermark, routing_handled: watermark } },
+    });
+    expect(notifier().notification(customer).lines).toEqual([
+      "-# Triage bot not called: handled automatically. Ask it here, if needed.",
+    ]);
+  });
+
+  it.each([true, null, {}, [], "invalid", "", "1e309", "1.5", "-1"])(
+    "treats invalid watermarks as absent: %j",
+    (seen) => {
+      expect(() =>
+        notifier().notification(
+          message({ createdAt: SECONDS, conversation: { customAttributes: { routing_seen: seen } } }),
+        ),
+      ).toThrow(RoutingPendingError);
+    },
+  );
+
+  it("does not wait for agents or notes", () => {
     for (const customer of [
       message({ createdAt: SECONDS, messageType: "outgoing" }),
       message({ createdAt: SECONDS, private: true }),
@@ -58,7 +76,10 @@ describe("router conversation state", () => {
 
   it("keeps both handled and mention decisions on retries when attributes change", () => {
     const notifications = notifier();
-    const customer = message({ createdAt: SECONDS, conversation: { customAttributes: { seen: 101, handled: 101 } } });
+    const customer = message({
+      createdAt: SECONDS,
+      conversation: { customAttributes: { routing_seen: 101, routing_handled: 101 } },
+    });
     const handled = notifications.notification(customer);
     expect(handled.lines).toEqual(["-# Triage bot not called: handled automatically. Ask it here, if needed."]);
     customer.conversation.customAttributes = {};
@@ -66,7 +87,7 @@ describe("router conversation state", () => {
     const later = message({ id: 102, createdAt: SECONDS - 30 });
     const mentioned = notifications.notification(later);
     expect(mentioned.lines).toEqual([`-# <@${TRIAGE}>`]);
-    later.conversation.customAttributes.handled = 102;
+    later.conversation.customAttributes.routing_handled = 102;
     expect(notifications.notification(later)).toEqual(mentioned);
   });
 });

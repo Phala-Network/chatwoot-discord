@@ -16,13 +16,20 @@ const secrets = {
 };
 
 describe("router configuration", () => {
-  it("defaults the coordination names, cutover, and reconcile window", () => {
+  it("rejects configurable coordination names", () => {
+    expect(configSchema.safeParse({ ...config, attributes: { seen: "custom" } }).success).toBe(false);
+  });
+
+  it("requires a webhook secret for every routed account", () => {
+    expect(() => parseSettings({ ...config, routing: { accounts: { "1": owners, "2": owners } } }, secrets)).toThrow(
+      /CHATWOOT_WEBHOOK_SECRETS.*2/,
+    );
+  });
+  it("defaults cutover and the reconcile window", () => {
     const parsed = configSchema.parse(config);
-    expect(parsed.attributes).toEqual({ seen: "routing_seen", handled: "routing_handled", kind: "routing_kind" });
     expect(parsed.startAfterConversationId).toEqual({});
     expect(parsed.routing.minConfidence).toBe(0.7);
     expect(parsed.reconcile.lookbackSeconds).toBe(3600);
-    expect(configSchema.safeParse({ ...config, attributes: { seen: "same", handled: "same" } }).success).toBe(false);
   });
 
   it("accepts per-account cutovers only for routed accounts", () => {

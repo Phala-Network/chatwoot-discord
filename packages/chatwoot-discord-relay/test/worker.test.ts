@@ -357,6 +357,13 @@ describe("worker", () => {
     const response = await call(new Request("https://relay.example.com/healthz"));
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ ok: true });
+    const incomplete = await worker.fetch(
+      new Request<unknown, IncomingRequestCfProperties>("https://relay.example.com/healthz"),
+      { ...env, CHATWOOT_WEBHOOK_SECRETS: '{"1":"test-secret"}' },
+      createExecutionContext(),
+    );
+    expect(incomplete.status).toBe(503);
+    expect(await incomplete.json()).toEqual({ ok: false });
   });
 
   it("rejects unsigned, stale, and cross-account Chatwoot webhooks", async () => {

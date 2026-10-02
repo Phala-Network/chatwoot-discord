@@ -316,7 +316,6 @@ describe("Relay", () => {
       router: {
         accounts: [3],
         waitSeconds: 30,
-        attributes: { seen: "routing_seen", handled: "routing_handled", kind: "routing_kind" },
       },
     }));
     const pending = message({ createdAt: NOW_SECONDS });

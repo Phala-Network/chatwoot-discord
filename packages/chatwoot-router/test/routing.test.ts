@@ -2,13 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Budget, BudgetExhaustedError } from "../../../shared/budget.ts";
 import { chatwootClient } from "../../../shared/chatwoot/api.ts";
 import { ROUTE_BUDGET } from "../src/router.ts";
-import {
-  actsAutomatically,
-  handledAutomatically,
-  type RoutingStore,
-  routeConversation,
-  sanitize,
-} from "../src/routing.ts";
+import { type RoutingStore, routeConversation, sanitize } from "../src/routing.ts";
 import { json, mockFetch, on, type Recorded, testSettings } from "./helpers.ts";
 
 const ROUTING = {
@@ -33,6 +27,7 @@ class MapStore implements RoutingStore {
 }
 
 interface Ticket {
+  blocked?: boolean;
   assignee?: { id: number; name: string } | null;
   status?: string;
   labels?: string[];
@@ -62,7 +57,10 @@ function world(
     inbox_id: 2,
     custom_attributes: ticket.attributes ?? {},
     labels: ticket.labels ?? [],
-    meta: { sender: { id: 88, name: "Jane Doe", email: "jane@example.com" }, assignee: ticket.assignee ?? null },
+    meta: {
+      sender: { id: 88, name: "Jane Doe", email: "jane@example.com", blocked: ticket.blocked ?? false },
+      assignee: ticket.assignee ?? null,
+    },
     last_non_activity_message: (ticket.messages ?? []).filter((m) => m.message_type <= 1).at(-1) ?? null,
   });
   const mock = mockFetch(
@@ -154,12 +152,70 @@ function context(store = new MapStore(), routing: object = ROUTING) {
 
 const sent = (requests: Recorded[], method: string, path: string) =>
   requests.filter((request) => request.method === method && `${request.url.hostname}${request.url.pathname}` === path);
+const attributes = (requests: Recorded[]) =>
+  JSON.parse(sent(requests, "POST", `${CW}/custom_attributes`).at(-1)?.body ?? "{}").custom_attributes ?? {};
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
 describe("routeConversation", () => {
+  it("retains the text window after attachment-only messages while waiting for an owner", async () => {
+    const ticket: Ticket = { messages: [1, 2, 3].map((id) => ({ id, content: "", message_type: 0 })) };
+    const { requests } = world(ticket, { owner: ["unclear", 1], topic: ["billing", 0] });
+    const store = new MapStore();
+    const ctx = context(store);
+    await routeConversation(ctx, 1, 5);
+    ticket.messages?.push({ id: 4, content: "Invoice missing", message_type: 0 });
+    await routeConversation(ctx, 1, 5);
+    ticket.messages?.push({ id: 5, content: "Payment failed", message_type: 0 });
+    await routeConversation(ctx, 1, 5);
+    expect(JSON.parse(store.get("route:1:5") ?? "{}").messages).toBe(2);
+    expect(
+      sent(requests, "POST", "api.typesafe.ai/v1/systemone").map((request) => JSON.parse(request.body).state.ticket),
+    ).toEqual(["Invoice missing", "Invoice missing Payment failed"]);
+    expect(ticket.attributes).toEqual({ routing_seen: 5 });
+  });
+  it.each([false, true])("acknowledges a blocked contact without routing: blocked during Jev=%s", async (during) => {
+    const ticket: Ticket = { blocked: !during };
+    const { requests } = world(
+      ticket,
+      { owner: ["cloud", 1], topic: ["billing", 1], kind: ["beg-bounty", 1] },
+      0,
+      () => {
+        ticket.blocked = true;
+      },
+    );
+    const ctx = context(new MapStore(), KINDS);
+    await routeConversation(ctx, 1, 5);
+    await routeConversation(ctx, 1, 5);
+    expect(ticket.attributes).toEqual({ routing_seen: 1 });
+    expect(
+      requests
+        .filter((request) => request.method === "POST" && request.url.hostname === "chatwoot.example.com")
+        .map((request) => request.url.pathname),
+    ).toEqual(["/api/v1/accounts/1/conversations/5/custom_attributes"]);
+    expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(during ? 1 : 0);
+  });
+
+  it.each(["", "jane@example.com", "Jane Doe"])(
+    "waits for text instead of classifying empty or redacted messages: %j",
+    async (content) => {
+      const ticket: Ticket = { messages: [1, 2, 3].map((id) => ({ id, content, message_type: 0 })) };
+      const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["beg-bounty", 1] });
+      const store = new MapStore();
+      const ctx = context(store, { ...KINDS, snoozeUnclear: true });
+      await routeConversation(ctx, 1, 5);
+      expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toEqual([]);
+      expect(ticket.attributes).toEqual({ routing_seen: 3 });
+      expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("waiting");
+      expect(ticket.status).toBeUndefined();
+      ticket.messages?.push({ id: 4, content: "Where is my invoice?", message_type: 0 });
+      await routeConversation(ctx, 1, 5);
+      expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
+      expect(ticket.attributes?.routing_seen).toBe(4);
+    },
+  );
   it.each([false, true])("fits the worst-case route at its request boundary: sufficient=%s", async (sufficient) => {
     const store = new MapStore();
     store.set(
@@ -419,7 +475,7 @@ describe("routeConversation", () => {
     expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
   });
 
-  it("keeps the decision for a ticket closed while Jev was answering, and applies it once the ticket opens again", async () => {
+  it("finalizes a ticket closed by a person during Jev without acting when it reopens", async () => {
     const store = new MapStore();
     const ticket: Ticket = {};
     const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1] }, 0, () => {
@@ -432,7 +488,9 @@ describe("routeConversation", () => {
     await routeConversation(context(store), 1, 5);
 
     expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
-    expect(sent(requests, "POST", `${CW}/assignments`).map((r) => JSON.parse(r.body))).toEqual([{ assignee_id: 6 }]);
+    expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
+    expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("done");
+    expect(ticket.attributes).toEqual({ routing_seen: 1 });
   });
 
   it("waits for a customer message before asking", async () => {
@@ -475,6 +533,87 @@ const replies = (requests: Recorded[]) =>
   sent(requests, "POST", `${CW}/messages`).map((request) => JSON.parse(request.body));
 
 describe("routeConversation with kinds", () => {
+  it.each(["resolved", "snoozed"])("finalizes already-%s tickets without an action intent", async (status) => {
+    const ticket: Ticket = { status };
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["beg-bounty", 1] });
+    const store = new MapStore();
+    await routeConversation(context(store, KINDS), 1, 5);
+    expect(ticket.attributes).toEqual({ routing_seen: 1 });
+    expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("done");
+    expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toEqual([]);
+    expect(replies(requests)).toEqual([]);
+  });
+  it.each([
+    { kind: "beg-bounty", count: 1 },
+    { kind: "startup-program", count: 1 },
+    { kind: "beg-bounty", count: 3 },
+  ])("redecides a stale $kind kind after $count messages before any action", async ({ kind, count }) => {
+    const ticket: Ticket = {
+      messages: Array.from({ length: count }, (_, index) => ({
+        id: index + 1,
+        content: "First request",
+        message_type: 0,
+      })),
+    };
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: [kind, 1] }, 0, () => {
+      if (ticket.messages?.length === count)
+        ticket.messages.push({ id: count + 1, content: "A different request", message_type: 0 });
+    });
+    const store = new MapStore();
+    const ctx = context(store, KINDS);
+    await routeConversation(ctx, 1, 5);
+    expect(
+      requests.filter((request) => request.method === "POST" && request.url.hostname === "chatwoot.example.com"),
+    ).toEqual([]);
+    expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("pending");
+    await routeConversation(ctx, 1, 5);
+    expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(2);
+    expect(
+      JSON.parse(sent(requests, "POST", "api.typesafe.ai/v1/systemone").at(-1)?.body ?? "{}").state.ticket,
+    ).toContain("A different request");
+    expect(ticket.attributes).toEqual({ routing_seen: count + 1, routing_handled: count + 1, routing_kind: kind });
+    expect(replies(requests)).toHaveLength(1);
+  });
+
+  it.each(["resolved", "snoozed"])("does not reply or change a ticket a person made %s during Jev", async (status) => {
+    const ticket: Ticket = {};
+    const { requests } = world(
+      ticket,
+      { owner: ["cloud", 1], topic: ["billing", 1], kind: ["beg-bounty", 1] },
+      0,
+      () => {
+        ticket.status = status;
+      },
+    );
+    const store = new MapStore();
+    await routeConversation(context(store, KINDS), 1, 5);
+    expect(ticket.attributes).toEqual({ routing_seen: 1 });
+    expect(
+      requests
+        .filter((request) => request.method === "POST" && request.url.hostname === "chatwoot.example.com")
+        .map((request) => request.url.pathname),
+    ).toEqual(["/api/v1/accounts/1/conversations/5/custom_attributes"]);
+    expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("done");
+  });
+
+  it("remembers human closure when completion fails and the ticket reopens before retry", async () => {
+    const ticket: Ticket = { failAttributes: 1 };
+    const { requests } = world(
+      ticket,
+      { owner: ["cloud", 1], topic: ["billing", 1], kind: ["beg-bounty", 1] },
+      0,
+      () => {
+        ticket.status = "resolved";
+      },
+    );
+    const ctx = context(new MapStore(), KINDS);
+    await expect(routeConversation(ctx, 1, 5)).rejects.toThrow();
+    ticket.status = "open";
+    await routeConversation(ctx, 1, 5);
+    expect(replies(requests)).toEqual([]);
+    expect(ticket.attributes).toEqual({ routing_seen: 1 });
+    expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
+  });
   it("replies once to a ticket of a kind Jev is sure of, after assigning it, and not when unsure", async () => {
     const store = new MapStore();
     const ticket: Ticket = {};
@@ -487,8 +626,7 @@ describe("routeConversation with kinds", () => {
     await routeConversation(context(store, KINDS), 1, 5);
     expect(replies(requests)).toEqual([{ content: "Thanks for applying!", message_type: "outgoing", private: false }]);
     // The customer message it answers calls no triage bot; a later one does.
-    expect(handledAutomatically(store, 1, 5, 1)).toBe(true);
-    expect(handledAutomatically(store, 1, 5, 3)).toBe(false);
+    expect(attributes(requests).routing_handled).toBe(1);
     // The topic and the kind are labels of their own families.
     expect(sent(requests, "POST", `${CW}/labels`).map((r) => JSON.parse(r.body))).toEqual([
       { labels: ["billing", "startup-program"] },
@@ -508,7 +646,7 @@ describe("routeConversation with kinds", () => {
     await routeConversation(context(store, KINDS), 1, 5);
 
     expect(replies(requests)).toEqual([]);
-    expect(handledAutomatically(store, 1, 5, 1)).toBe(false);
+    expect(attributes(requests).routing_handled).toBeUndefined();
     expect(sent(requests, "POST", `${CW}/labels`).map((r) => JSON.parse(r.body))).toEqual([
       { labels: ["billing", "security"] },
     ]);
@@ -534,7 +672,7 @@ describe("routeConversation with kinds", () => {
 
     expect(replies(requests)).toHaveLength(1);
     // Not sent: the triage bot still answers the customer.
-    expect(handledAutomatically(store, 1, 5, 1)).toBe(false);
+    expect(attributes(requests).routing_handled).toBeUndefined();
   });
 
   it("replies as the account's agent bot, under its name, also before the ticket has an owner", async () => {
@@ -563,7 +701,7 @@ describe("routeConversation with kinds", () => {
     expect(sent(requests, "POST", `${CW}/labels`).map((r) => JSON.parse(r.body))).toEqual([{ labels: ["spam"] }]);
     expect(replies(requests)).toEqual([]);
     // The customer message it handled calls no triage bot.
-    expect(handledAutomatically(store, 1, 5, 1)).toBe(true);
+    expect(attributes(requests).routing_handled).toBe(1);
   });
 
   it("replies to a ticket of a kind that sets it aside, then sets it aside, once", async () => {
@@ -584,21 +722,26 @@ describe("routeConversation with kinds", () => {
     expect(at("POST", "messages")).toBeLessThan(at("POST", "toggle_status"));
     expect(ticket.status).toBe("resolved");
     expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
-    expect(handledAutomatically(store, 1, 5, 1)).toBe(true);
+    expect(attributes(requests).routing_handled).toBe(1);
   });
 
-  it("completes a set-aside whose status Chatwoot made but whose answer was lost, without setting it again", async () => {
-    const store = new MapStore();
-    const ticket: Ticket = { loseStatusAnswer: 1 };
-    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["spam", 0.95] });
+  it.each(["spam", "beg-bounty"])(
+    "completes its own %s status retry without another reply or status change",
+    async (kind) => {
+      const store = new MapStore();
+      const ticket: Ticket = { loseStatusAnswer: 1 };
+      const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: [kind, 0.95] });
 
-    await expect(routeConversation(context(store, KINDS), 1, 5)).rejects.toThrow();
-    await routeConversation(context(store, KINDS), 1, 5);
+      await expect(routeConversation(context(store, KINDS), 1, 5)).rejects.toThrow();
+      await routeConversation(context(store, KINDS), 1, 5);
 
-    expect(ticket.status).toBe("resolved");
-    expect(sent(requests, "POST", `${CW}/toggle_status`)).toHaveLength(1);
-    expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("done");
-  });
+      expect(ticket.status).toBe("resolved");
+      expect(sent(requests, "POST", `${CW}/toggle_status`)).toHaveLength(1);
+      expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("done");
+      expect(replies(requests)).toHaveLength(kind === "spam" ? 0 : 1);
+      expect(ticket.attributes).toEqual({ routing_seen: 1, routing_handled: 1, routing_kind: kind });
+    },
+  );
 
   it("does not set aside a ticket someone took while Jev was answering", async () => {
     const ticket: Ticket = {};
@@ -713,6 +856,26 @@ describe("coordination attributes", () => {
     expect(ticket.attributes).toMatchObject({ routing_seen: 300, routing_handled: 250 });
   });
 
+  it("preserves numeric-string completion watermarks through a lost update", async () => {
+    const ticket: Ticket = { attributes: { routing_seen: "300", routing_handled: "250" } };
+    world(ticket, { owner: ["cloud", 1], topic: ["billing", 1] });
+    const ctx = context();
+    await routeConversation(ctx, 1, 5);
+    ticket.attributes = {};
+    await routeConversation(ctx, 1, 5);
+    expect(ticket.attributes).toMatchObject({ routing_seen: 300, routing_handled: 250 });
+  });
+
+  it("does not rewrite equivalent Text-definition watermarks", async () => {
+    const ticket: Ticket = { attributes: { routing_seen: "1", routing_handled: "1", routing_kind: "spam" } };
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["spam", 1] });
+    const ctx = context(new MapStore(), KINDS);
+    await routeConversation(ctx, 1, 5);
+    await routeConversation(ctx, 1, 5);
+    expect(sent(requests, "POST", `${CW}/custom_attributes`)).toEqual([]);
+    expect(ticket.attributes).toEqual({ routing_seen: "1", routing_handled: "1", routing_kind: "spam" });
+  });
+
   it("marks a no-owner decision seen and preserves unrelated attributes", async () => {
     const ticket: Ticket = { attributes: { discord_thread: "https://discord.com/channels/1/2" } };
     world(ticket, { owner: ["unclear", 1], topic: ["billing", 1] });
@@ -730,15 +893,6 @@ describe("coordination attributes", () => {
     expect(ticket.attributes).toEqual({ routing_seen: 1, routing_handled: 1, routing_kind: "startup-program" });
     expect(replies(requests)).toHaveLength(1);
     expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
-  });
-
-  it("writes custom names without lowering newer watermarks", async () => {
-    const ticket: Ticket = { attributes: { seen: 200, handled: 200 } };
-    world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["spam", 1] });
-    const ctx = context(new MapStore(), KINDS);
-    ctx.settings.config.attributes = { seen: "seen", handled: "handled", kind: "kind" };
-    await routeConversation(ctx, 1, 5);
-    expect(ticket.attributes).toEqual({ seen: 200, handled: 200, kind: "spam" });
   });
 
   it("never applies a recorded decision at or below the account's cutover id", async () => {
@@ -763,29 +917,16 @@ describe("per-account cutover", () => {
   ])("uses only the current account's cutoff %j", async ({ cutover, eligible }) => {
     const { requests } = world({}, { owner: ["cloud", 1], topic: ["billing", 1] });
     const store = new MapStore();
-    const settings = testSettings({
-      routing: { ...ROUTING, accounts: { "1": ROUTING.accounts["1"], "2": ROUTING.accounts["1"] } },
-      startAfterConversationId: cutover,
-    });
+    const settings = testSettings(
+      {
+        routing: { ...ROUTING, accounts: { "1": ROUTING.accounts["1"], "2": ROUTING.accounts["1"] } },
+        startAfterConversationId: cutover,
+      },
+      { CHATWOOT_WEBHOOK_SECRETS: '{"1":"secret-acme","2":"secret-globex"}' },
+    );
     await routeConversation({ ...context(store), settings }, 1, 5);
     expect(sent(requests, "POST", `${CW}/assignments`)).toHaveLength(eligible ? 1 : 0);
     expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(eligible ? 1 : 0);
-  });
-});
-
-describe("actsAutomatically", () => {
-  it("is true for an account whose kinds set tickets aside or reply with its agent bot", () => {
-    const settings = (kinds: object, bots: object) =>
-      testSettings(
-        { routing: { ...ROUTING, kinds: { "1": kinds } } },
-        { TYPESAFE_API_KEY: "ts-key", CHATWOOT_BOT_TOKENS: JSON.stringify(bots) },
-      );
-    expect(actsAutomatically(settings({ spam: { covers: "Spam.", status: "resolved" } }, {}), 1)).toBe(true);
-    expect(actsAutomatically(settings({ security: { covers: "S.", cannedResponse: "s" } }, { "1": "bot" }), 1)).toBe(
-      true,
-    );
-    expect(actsAutomatically(settings({ other: { covers: "Other." } }, {}), 1)).toBe(false);
-    expect(actsAutomatically(settings({ spam: { covers: "Spam.", status: "resolved" } }, {}), 2)).toBe(false);
   });
 });
 

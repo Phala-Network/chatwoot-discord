@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { messageWatermark } from "../../../shared/attributes.ts";
+import { messageWatermark, ROUTING_ATTRIBUTES } from "../../../shared/attributes.ts";
 import type { ChatwootConversation } from "../../../shared/chatwoot/api.ts";
 import { parseJson } from "../../../shared/json.ts";
 import type { RoutingContext } from "./routing.ts";
@@ -16,14 +16,14 @@ function readCompletion(ctx: Pick<RoutingContext, "store">, accountId: number, c
 }
 
 export function needsCompletionRepair(
-  ctx: Pick<RoutingContext, "store" | "settings">,
+  ctx: Pick<RoutingContext, "store">,
   accountId: number,
   conversation: ChatwootConversation,
 ): boolean {
   if (conversation.id === undefined) return false;
   const recorded = readCompletion(ctx, accountId, conversation.id);
   const current = conversation.custom_attributes ?? {};
-  const names = ctx.settings.config.attributes;
+  const names = ROUTING_ATTRIBUTES;
   return (
     recorded.seen > messageWatermark(current[names.seen]) ||
     recorded.handled > messageWatermark(current[names.handled]) ||
@@ -44,7 +44,7 @@ export async function writeCompletion(
   const conversation = await ctx.chatwoot.getConversation(accountId, conversationId);
   if (!conversation) return;
   const current = conversation.custom_attributes ?? {};
-  const names = ctx.settings.config.attributes;
+  const names = ROUTING_ATTRIBUTES;
   const completion = {
     seen: Math.max(previous.seen, seen, messageWatermark(current[names.seen])),
     handled: Math.max(previous.handled, handled, messageWatermark(current[names.handled])),
@@ -57,6 +57,11 @@ export async function writeCompletion(
     ...(completion.handled > 0 ? { [names.handled]: completion.handled } : {}),
     ...(completion.kind === null ? {} : { [names.kind]: completion.kind }),
   };
-  if (Object.entries(attributes).every(([name, value]) => current[name] === value)) return;
+  if (
+    Object.entries(attributes).every(
+      ([name, value]) => (name === names.kind ? current[name] : messageWatermark(current[name])) === value,
+    )
+  )
+    return;
   await ctx.chatwoot.setCustomAttributes(accountId, conversationId, attributes);
 }

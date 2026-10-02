@@ -1,5 +1,4 @@
-import type { z } from "zod";
-import { attributesSchema, messageWatermark } from "../../../../shared/attributes.ts";
+import { messageWatermark, ROUTING_ATTRIBUTES } from "../../../../shared/attributes.ts";
 
 // Who a relayed message notifies, as lines added to its last part: the triage bot mention
 // (within its hourly budgets, and not for a message a routing kind handled) and the
@@ -22,10 +21,7 @@ export interface TriageOptions {
 export interface RouterOptions {
   accounts: number[];
   waitSeconds: number;
-  attributes: z.infer<typeof attributesSchema>;
 }
-
-const DEFAULT_ATTRIBUTES = attributesSchema.parse({});
 
 interface NotifierOptions {
   store: RelayStore;
@@ -122,7 +118,7 @@ export class Notifier {
    * routing is still to run.
    */
   private triage(message: RelayMessage): { mention?: string; note?: string } {
-    const { triage, store, router } = this.options;
+    const { triage, store } = this.options;
     if (!fromCustomer(message)) return {};
     if (!triage) {
       if (this.awaitingRouter(message)) throw new RoutingPendingError();
@@ -133,11 +129,7 @@ export class Notifier {
     const decision = store.once(`triage:${account.id}:${message.id}`, () => {
       if (this.awaitingRouter(message)) throw new RoutingPendingError();
       // Recorded as "answered" since v0.23, when only replies counted.
-      if (
-        message.id <=
-        messageWatermark(conversation.customAttributes[(router?.attributes ?? DEFAULT_ATTRIBUTES).handled])
-      )
-        return "answered";
+      if (message.id <= messageWatermark(conversation.customAttributes[ROUTING_ATTRIBUTES.handled])) return "answered";
       const hour = this.options.now().toISOString().slice(0, 13);
       const key = `${message.account.id}:${message.conversation.id}`;
       if (store.increment(`triage:${key}:${hour}`) > triage.perConversationPerHour) return "conversation";
@@ -155,7 +147,7 @@ export class Notifier {
     const { conversation, createdAt } = message;
     return (
       router?.accounts.includes(message.account.id) === true &&
-      messageWatermark(conversation.customAttributes[router.attributes.seen]) < message.id &&
+      messageWatermark(conversation.customAttributes[ROUTING_ATTRIBUTES.seen]) < message.id &&
       createdAt !== undefined &&
       createdAt !== null &&
       now().getTime() - createdAt * 1000 < router.waitSeconds * 1000

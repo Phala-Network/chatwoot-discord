@@ -255,7 +255,7 @@ export function testSettings(
     DISCORD_BOT_TOKEN: "bot",
     DISCORD_PUBLIC_KEY: "0".repeat(64),
     CHATWOOT_RELAY_TOKEN: "relay-token",
-    CHATWOOT_WEBHOOK_SECRETS: JSON.stringify({ "3": "secret-acme" }),
+    CHATWOOT_WEBHOOK_SECRETS: JSON.stringify({ "3": "secret-acme", "1": "secret-globex" }),
     CHATWOOT_AGENT_TOKENS: JSON.stringify({ [ALICE]: "token-alice", [BOB]: "token-bob" }),
     ...secretOverrides,
   });

@@ -24,12 +24,5 @@ export async function verifyChatwootSignature(
   const signed = new Uint8Array(prefix.length + body.length);
   signed.set(prefix);
   signed.set(body, prefix.length);
-  return crypto.subtle.verify("HMAC", key, hexToBytes(hex), signed);
-}
-
-function hexToBytes(hex: string): Uint8Array {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let index = 0; index < bytes.length; index += 1)
-    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
-  return bytes;
+  return crypto.subtle.verify("HMAC", key, Uint8Array.fromHex(hex), signed);
 }

@@ -5,6 +5,7 @@
 
 import createClient from "openapi-fetch";
 import { z } from "zod";
+import { log } from "../log.ts";
 import type { MessageType, RelayAttachment, RelayConversation, RelayItem, RelayMessage } from "../types.ts";
 import type { components, operations, paths } from "./schema.ts";
 
@@ -13,11 +14,13 @@ export type Fetch = (input: Request) => Promise<Response>;
 /** A non-2xx answer from Chatwoot. Only the status is kept: bodies may echo user content. */
 export class ChatwootError extends Error {
   readonly status: number;
+  readonly conversationMissing: boolean;
 
-  constructor(status: number, operation: string) {
+  constructor(status: number, operation: string, conversationMissing = false) {
     super(`Chatwoot ${operation} failed with HTTP ${status}`);
     this.name = "ChatwootError";
     this.status = status;
+    this.conversationMissing = conversationMissing;
   }
 }
 
@@ -171,14 +174,21 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
     pending: Promise<{ data?: T; response: Response }>,
   ): Promise<T | undefined> {
     const { data, response } = await pending;
-    if (notFound(response)) return undefined;
+    if (notFound(response)) {
+      log.info("conversation deleted", { operation });
+      return undefined;
+    }
     if (!response.ok || data === undefined) throw new ChatwootError(response.status, operation);
     return data;
   }
 
-  async function ensureOk(operation: string, pending: Promise<{ response: Response }>): Promise<void> {
+  async function ensureOk(
+    operation: string,
+    pending: Promise<{ response: Response }>,
+    conversation = true,
+  ): Promise<void> {
     const { response } = await pending;
-    if (!response.ok) throw new ChatwootError(response.status, operation);
+    if (!response.ok) throw new ChatwootError(response.status, operation, conversation && notFound(response));
   }
 
   /** Messages oldest first, or undefined when the conversation does not exist. */
@@ -314,6 +324,7 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
           params: { path: { account_id: accountId, id: contactId } },
           body: { blocked },
         }),
+        false,
       );
     },
 
@@ -374,11 +385,6 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
     },
 
     setCustomAttributes,
-
-    /** Sets one conversation custom attribute, keeping the others (`merge`). */
-    setCustomAttribute(accountId: number, conversationId: number, key: string, value: string): Promise<void> {
-      return setCustomAttributes(accountId, conversationId, { [key]: value });
-    },
 
     /**
      * Sends an outgoing message (or private note). With files it is sent as the spec's

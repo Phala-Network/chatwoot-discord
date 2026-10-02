@@ -434,6 +434,40 @@ describe("router worker", () => {
     const invalid = await worker.fetch(request(), { ...env, CONFIG: {} }, createExecutionContext());
     expect(invalid.status).toBe(503);
     expect(await invalid.json()).toEqual({ ok: false });
+    const missing = await worker.fetch(
+      request(),
+      { ...env, CHATWOOT_WEBHOOK_SECRETS: '{"1":"test-secret"}' },
+      createExecutionContext(),
+    );
+    expect(missing.status).toBe(503);
+    expect(await missing.json()).toEqual({ ok: false });
+  });
+
+  it.each(["get", "write"])("drops and logs a conversation deleted during %s instead of retrying", async (stage) => {
+    const logged = vi.spyOn(console, "log");
+    const warned = vi.spyOn(console, "warn");
+    mockFetch(
+      on("GET", `${base}/11`, () =>
+        stage === "get" ? json({}, { status: 404 }) : json({ id: 11, status: "resolved" }),
+      ),
+      on("GET", `${base}/11/messages`, () => json({ payload: [] })),
+      on("POST", `${base}/11/custom_attributes`, () => json({}, { status: 404 })),
+    );
+    await webhook(incoming(11));
+    await drain();
+    await runInDurableObject(stub(), (_instance, state) => {
+      expect(state.storage.sql.exec("SELECT key FROM jobs").toArray()).toEqual([]);
+    });
+    expect([...logged.mock.calls, ...warned.mock.calls].some((call) => String(call[0]).includes("deleted"))).toBe(true);
+  });
+
+  it.each([404, 503])("keeps backoff for HTTP %s without a Chatwoot not-found response", async (status) => {
+    mockFetch(on("GET", `${base}/11`, () => new Response("upstream unavailable", { status })));
+    await webhook(incoming(11));
+    await drain();
+    await runInDurableObject(stub(), (_instance, state) => {
+      expect(state.storage.sql.exec<{ attempts: number }>("SELECT attempts FROM jobs").one().attempts).toBe(1);
+    });
   });
 
   it("authenticates per account, rejects stale signatures, and ignores non-customer messages", async () => {
