@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Routing redacts IPv6 addresses too before the text goes to TypeSafe.
 - The package's `bin` path has no leading `./`: `npm publish` rewrote it with a warning that it was
   "invalid and removed", though the command was published. CI now fails when `npm pkg fix` would change
   `package.json`, and runs the installed command.
