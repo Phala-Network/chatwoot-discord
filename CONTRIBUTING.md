@@ -1,80 +1,89 @@
 # Contributing
 
-Thanks for helping! Bug reports and pull requests are welcome. Everyone taking part is expected
-to follow the [Code of Conduct](CODE_OF_CONDUCT.md). Report security issues privately as described
-in [SECURITY.md](SECURITY.md), not in a public issue.
+Thanks for helping! Follow the [Code of Conduct](CODE_OF_CONDUCT.md), and report security issues privately as
+explained in [SECURITY.md](SECURITY.md). Keep changes scoped, with behavior tests and a package changelog entry.
 
-## Development
+## Workspace development
 
-Requirements: Node 24 (24.15 or later) and the npm version pinned in `packageManager` in
-`package.json` (`npm install --global npm@<version>`; CI does the same). npm 12 runs dependency
-install scripts only for the packages listed in `allowScripts`; review a new entry before adding
-it with `npm install-scripts approve <package>`.
+This private npm workspace root contains two independently published packages:
+
+- `packages/chatwoot-discord-relay`: the Discord relay and Hub Durable Object.
+- `packages/chatwoot-router`: TypeSafe Jev routing and the Router Durable Object.
+- `shared`: Chatwoot API/schema types, webhook authentication, the SQLite queue/cache, subrequest budget,
+  immutable config/KV loading, and logging. It is source code, not an npm package.
+
+There is one root `package-lock.json`. Use Node 24 (24.15 or newer) and npm 12.1.0 as pinned in `packageManager`.
+Run npm, tests, and builds inside Docker, not on the host:
 
 ```sh
-npm ci
-npm run lint        # Biome (formatting + lint); `npm run format` applies fixes
-npm run typecheck   # generates the Workers types (cf workers types), then TypeScript strict (Worker and scripts)
-npm test            # Vitest inside workerd via @cloudflare/vitest-pool-workers
-npm run build       # cf build into .cloudflare/output (no deploy)
+docker run --rm --cpus=2 --memory=4g -v "$PWD:/workspace" -w /workspace \
+  -e CF_SEND_TELEMETRY=false node:24 bash -lc '
+    npm install -g npm@12.1.0
+    npm ci
+    npm run lint
+    npm run typecheck
+    npm test
+    npm run build
+    for package in chatwoot-discord-relay chatwoot-router; do
+      (cd "packages/$package" && npx cf deploy --prebuilt --dry-run)
+    done
+    npm run check:package
+  '
 ```
 
-`scripts/` run with Node's [type stripping](https://nodejs.org/api/typescript.html#type-stripping),
-so they and the files they import use `.ts` import specifiers and erasable syntax only
-(`erasableSyntaxOnly` in `tsconfig.node.json`).
+Use `npm test -w chatwoot-router` or `npm run typecheck -w chatwoot-discord-relay` for focused checks inside
+that container. `npm run format` applies the shared Biome configuration. `allowScripts` at the root allows
+only esbuild and workerd install scripts; review additions. Do not introduce another package lock.
 
-The Worker is configured in `cloudflare.config.ts` and built with Vite (`vite.config.ts`). `npm run types`
-generates the Workers runtime types for its compatibility date and flags into `.cloudflare/types` (git-ignored);
-the Worker's bindings are declared in `src/env.ts`. Keep the tests' Worker (`vitest.config.ts`) on the same
-compatibility date. The README illustrations are rendered from `docs/assets/*.html` with
-`sh docs/assets/render.sh` (Docker); they must show fictional data only.
+Each package has its own `cloudflare.config.ts`, Vite config, Vitest Workers-pool config, README, changelog,
+secret examples, and consumer fixture. Keep compatibility dates consistent between deployment and tests.
+Each package declares the same pinned `@cloudflare/vite-plugin`. The pinned `cf` beta detects its implementation
+only in the local manifest and local `node_modules`, not hoisted dependencies. The root `.npmrc` therefore uses
+npm's supported `install-strategy=linked`; npm manages the local links without dependency patches. Shared source
+dependencies are also declared as root dev dependencies so source imports resolve without accidental hoisting.
+`cf workers types` generates local `.cloudflare/types`; runtime bindings are declared in each `src/env.ts`.
+Tests mock HTTP at the fetch boundary and must not reach live services. All example and screenshot data must
+be fictional. Relay illustrations stay in `packages/chatwoot-discord-relay/docs/assets`; render them with its
+Docker-based `render.sh` only when changing the illustrations.
 
-## Guidelines
+Scripts run with Node's type stripping and `.ts` imports, using erasable syntax. Shared TypeScript options
+live in `tsconfig.base.json`. A package build bundles shared source into its JavaScript with esbuild; emitted
+`.d.ts` files and the generated Chatwoot schema are contained under that tarball's `lib` directory.
+The consumer check installs each tarball separately, type-checks Worker and Node imports without `skipLibCheck`,
+and executes its configuration bin's usage path. Do not introduce public type references to unpublished
+workspaces or paths outside the tarball.
 
-- Keep the Worker request path fast (the Free plan allows 10 ms CPU); do slow work in the Hub
-  Durable Object and keep each alarm run under the subrequest budget. When a conversation run
-  makes more requests in the worst case, update `src/relay/limits.ts`.
-- Treat Chatwoot's REST API as the source of truth; webhooks only trigger work.
-- Use the generated Chatwoot types (`npm run gen:chatwoot`) and `discord-api-types`. If Chatwoot's
-  published spec lacks a route, verify it in Chatwoot's source for the pinned version and add a
-  small documented wrapper in `src/chatwoot/api.ts`.
-- No `any`, `as unknown as`, non-null assertions, or `@ts-ignore`.
-- Tests describe behaviour and mock HTTP at the `fetch` boundary; they must never reach the
-  network. Use placeholder ids and `example.com` domains.
-- Never log message bodies, tokens, or secrets.
-- Keep user-visible text in English and consistent with the existing formats.
+## Engineering guidelines
 
-## Pull requests
-
-Describe the change and how you verified it. CI must pass (lint, typecheck, tests, dry-run build).
-Add user-visible changes to the "Unreleased" section of [CHANGELOG.md](CHANGELOG.md), following
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+- Keep webhooks fast: authenticate, durably enqueue, and acknowledge. Alarms own slow work and retry it.
+- Preserve the relay's SQLite migration history and Worker identity during upgrades.
+- Treat Chatwoot as the only coordination surface between packages. Do not add service bindings or shared state.
+- Bound every alarm's outbound requests; adjust the budget when adding a request to the worst-case path.
+- Use generated Chatwoot schema types (`npm run gen:chatwoot -w chatwoot-router`), and verify contracts against
+  official documentation or source before changing them. Keep the pinned API version in sync.
+- No `as any`, `as unknown as`, non-null assertions, or `@ts-ignore`; no message bodies or credentials in logs.
+- Keep code and user-visible text in English. Add behavior tests rather than implementation mirrors.
 
 ## Releases
 
-Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The public interface
-is what an operator depends on: the `CONFIG` keys, the Worker secrets, the HTTP endpoints, the
-Discord commands, and the required Chatwoot and Discord setup. A change that makes an existing
-deployment need operator action is a major version (a minor version while the major is `0`).
+Versions are independent. The relay continues its existing version line; the router starts at `0.1.0`.
+A maintainer changes only the intended package's version and changelog, updates the root lockfile, and has the
+pull request reviewed. Configuration breaks are minor releases while major version is zero. Required checks
+remain `check`, `Analyze (actions)`, and `Analyze (javascript-typescript)`.
 
-To release, a maintainer:
+After the authorized PR merge, publish a non-prerelease GitHub release whose tag is exactly the package name
+and its committed version, for example `chatwoot-discord-relay@0.29.0` or `chatwoot-router@0.1.0`.
+`.github/workflows/release.yml` validates the name and version, tests that workspace, and runs
+`npm publish -w <package>` (which builds through `prepack`). An unknown package, mismatched version, old `vX.Y.Z`
+tag, or prerelease cannot publish through this workflow. Never publish the private root.
 
-1. Opens a pull request that moves the "Unreleased" entries in `CHANGELOG.md` under a new
-   `## [x.y.z] - YYYY-MM-DD` heading, updates the comparison links at the bottom, and sets
-   `version` in `package.json` to `x.y.z`.
-2. Merges it once CI passes.
-3. Tags the merge commit and publishes a GitHub release with that changelog section as notes:
-   ```sh
-   git tag -a vx.y.z -m "vx.y.z" && git push origin vx.y.z
-   gh release create vx.y.z --title "vx.y.z" --notes "<changelog section>"
-   ```
+Both packages use npm trusted publishing, configured separately for `Phala-Network/chatwoot-workers` and
+workflow filename `release.yml`, on GitHub-hosted runners with `id-token: write`. No stored npm token is used.
+After renaming the repository, update the relay package's existing npm trust. The new unscoped public router
+package first needs a maintainer-authorized manual publish of `0.1.0`, then its trusted publisher configured;
+that same version cannot be published again. See npm's [trusted publishing documentation](https://docs.npmjs.com/trusted-publishers/).
 
-Publishing the release runs [`release.yml`](.github/workflows/release.yml), which publishes the version to npm as
-[`chatwoot-discord-relay`](https://www.npmjs.com/package/chatwoot-discord-relay) with
-[trusted publishing](https://docs.npmjs.com/trusted-publishers): GitHub Actions proves its identity with OIDC, so no npm
-token is stored, and npm attaches provenance. The trusted publisher (this repository, `release.yml`) is configured on
-the package, which therefore had to exist first: its first version was published by a maintainer by hand
-(`npm publish` from the release commit), then `npm trust github chatwoot-discord-relay --file release.yml --repo
-Phala-Network/chatwoot-discord-relay --allow-publish`, then token publishing was disallowed in the package settings. A version npm has
-published cannot be published again. Prereleases are not published. Operators deploy a release from this repository
-with `npx cf deploy`, or from a repository of their own that depends on the package (see the README).
+Publishing does not deploy either Worker. Infrastructure owners separately provision secrets and custom
+attributes, configure Chatwoot webhooks, and deploy from their private configuration. Follow the relay changelog's
+cutover order: relay without embedded routing first, then router above the newest conversation id, never both
+routers at once. Keep an existing relay Worker's name so its Hub state survives.

@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!**/node_modules", "!src/chatwoot/schema.d.ts", "!**/.cloudflare", "!**/*.jsonc"]
+    "includes": ["**", "!**/node_modules", "!shared/chatwoot/schema.d.ts", "!**/.cloudflare", "!**/*.jsonc"]
   },
   "formatter": {
     "enabled": true,

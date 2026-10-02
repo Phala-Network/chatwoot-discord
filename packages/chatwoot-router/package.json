@@ -1,0 +1,73 @@
+{
+  "name": "chatwoot-router",
+  "version": "0.1.0",
+  "description": "Route Chatwoot conversations with TypeSafe Jev on Cloudflare Workers.",
+  "keywords": [
+    "chatwoot",
+    "cloudflare-workers",
+    "durable-objects",
+    "triage"
+  ],
+  "homepage": "https://github.com/Phala-Network/chatwoot-workers/tree/main/packages/chatwoot-router#readme",
+  "bugs": {
+    "url": "https://github.com/Phala-Network/chatwoot-workers/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Phala-Network/chatwoot-workers.git",
+    "directory": "packages/chatwoot-router"
+  },
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./lib/packages/chatwoot-router/src/index.d.ts",
+      "default": "./lib/packages/chatwoot-router/src/index.js"
+    },
+    "./stored-config": {
+      "types": "./lib/packages/chatwoot-router/scripts/stored-config.d.ts",
+      "default": "./lib/packages/chatwoot-router/scripts/stored-config.js"
+    }
+  },
+  "bin": {
+    "chatwoot-router-store-config": "lib/packages/chatwoot-router/scripts/store-config.js"
+  },
+  "files": [
+    "lib/packages/chatwoot-router/src",
+    "lib/packages/chatwoot-router/scripts",
+    "lib/shared",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "packageManager": "npm@12.1.0",
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "scripts": {
+    "dev": "cf dev",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "types": "cf workers types",
+    "typecheck": "cf workers types && tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
+    "test": "vitest run",
+    "build": "cf build",
+    "deploy": "cf deploy",
+    "gen:chatwoot": "npx --yes --package=openapi-typescript@7.13.0 --package=typescript@5.9.3 -- openapi-typescript https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/swagger/swagger.json --empty-objects-unknown -o ../../shared/chatwoot/schema.d.ts",
+    "store-config": "node scripts/store-config.ts",
+    "build:package": "node ../../scripts/build-package.ts",
+    "prepack": "npm run build:package"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "2.0.0-beta.sha-805ec1ff3"
+  },
+  "dependencies": {
+    "hono": "^4.13.10",
+    "ip-regex": "^5.0.0",
+    "jsonc-parser": "^3.3.1",
+    "openapi-fetch": "^0.17.0",
+    "zod": "^4.6.5"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

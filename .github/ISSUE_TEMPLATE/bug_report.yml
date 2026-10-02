@@ -27,7 +27,7 @@ body:
     id: version
     attributes:
       label: Version or commit
-      description: The release or commit of chatwoot-discord you run.
+      description: The release or commit of chatwoot-discord-relay you run.
     validations:
       required: true
   - type: input
