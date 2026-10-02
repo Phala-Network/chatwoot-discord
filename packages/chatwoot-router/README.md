@@ -77,7 +77,9 @@ and `routing_kind` are included in the same update as `routing_seen`, after its 
 Attributes are updated through Chatwoot's `custom_attributes` API with `merge: true`. Chatwoot v4.18 implements
 this as read-merge-save, not an atomic merge: concurrent relay/router writes can still lose keys. The router
 durably records completion watermarks and kind before writing, and repairs missing or older attributes on
-subsequent webhooks or sweeps without repeating Jev or replies. It retains the greatest watermarks observed;
+subsequent webhooks or sweeps, including resolved and snoozed tickets in the sweep's activity window.
+A sweep repair only writes the recorded completion again: no Jev, message scan, or replay of routing actions.
+It retains the greatest watermarks observed;
 unchanged attributes are not written again. The relay similarly repairs its missing or different post URL on sync.
 Recovery is eventual, not a cross-Worker transaction. Failed writes retry rather than prematurely finishing the job.
 With the relay, set `router.accounts` there; its default wait is 30 seconds from each customer's message time.
@@ -216,13 +218,16 @@ subject) are Chatwoot's automation rules.
 ## Reliability and cutover
 
 The Worker acknowledges after a SQLite job is queued. Alarms serialize decisions, preserve work across failures,
-and retry with exponential backoff capped at 30 minutes. The subrequest budget yields to a fresh invocation.
-A sweep every five minutes pages open conversations newest activity first, queues completion checks inside its
-lookback window (including assigned and pre-cutover tickets), and persists its page cursor. Sweep jobs block
-route jobs until all pages finish, including across budget yields and failed-page backoff, so the router cannot
-close page-one tickets and shift the remaining pages. A failed pass resumes rather than skipping its remaining
-pages. This can delay webhook work too; the relay's wait remains bounded. Other Chatwoot actors can still change
-the list during a pass; subsequent overlapping sweeps reconcile that external churn.
+and retry with exponential backoff capped at 30 minutes. The subrequest budget reserves 19 requests for the
+worst-case route and yields to a fresh invocation before starting work it cannot finish.
+A sweep every five minutes pages **all statuses**, newest activity first, using the same shared Chatwoot client
+and pass-window/cursor logic as the relay. It queues routing for open, unassigned tickets and attribute-only
+repair wherever the conversation's attributes are behind its recorded completion, regardless of status.
+Closing a ticket does not remove it from this list. Activity can move it to the front, so it may be seen again;
+the next window starts from the previous pass's **start**, with a 60-second overlap, bounded by
+`reconcile.lookbackSeconds` and `reconcile.maxCatchUpSeconds`.
+The persisted page cursor survives budget yields and failed-page backoff. Route and repair jobs run between
+pages; a failed sweep does not hold due jobs in its own account or any other account.
 Old completed decisions and reply-once markers remain in the Router's own Durable Object.
 
 When splitting an existing relay deployment, **deploy the new relay first**, removing its old `routing` setting and
