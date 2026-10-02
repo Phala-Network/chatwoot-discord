@@ -3,7 +3,7 @@
 [![CI](https://github.com/Phala-Network/chatwoot-workers/actions/workflows/ci.yml/badge.svg)](https://github.com/Phala-Network/chatwoot-workers/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/Phala-Network/chatwoot-workers/actions/workflows/codeql.yml/badge.svg)](https://github.com/Phala-Network/chatwoot-workers/actions/workflows/codeql.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Phala-Network/chatwoot-workers/badge)](https://scorecard.dev/viewer/?uri=github.com/Phala-Network/chatwoot-workers)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/LICENSE)
 
 Mirror every [Chatwoot](https://www.chatwoot.com/) conversation into a Discord forum post, and
 answer customers from Discord with slash commands and buttons. It is for support teams that
@@ -37,7 +37,7 @@ is enough).
 > supported by Chatwoot or Discord.
 
 **Status:** in production use. Versions are `0.x`: per [SemVer](https://semver.org/#spec-item-4),
-a minor release may change configuration or setup; the [changelog](CHANGELOG.md) says what to
+a minor release may change configuration or setup; the [changelog](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/CHANGELOG.md) says what to
 do when it does.
 
 ![A Discord forum with one post per Chatwoot conversation, tagged by account, status, assignee, and topic](https://raw.githubusercontent.com/Phala-Network/chatwoot-workers/main/packages/chatwoot-discord-relay/docs/assets/forum.png)
@@ -162,7 +162,7 @@ checkout of this repository or from a repository of your own. Requirements: Node
 later) and npm (the version in `packageManager` in `package.json`); sign in once with
 `npx cf auth login`.
 
-The secrets are described in [`.dev.vars.example`](.dev.vars.example) and the
+The secrets are described in [`.dev.vars.example`](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/.dev.vars.example) and the
 [secrets table](#secrets). Copy it to a file outside the repository and fill it in, with `{}` for
 `CHATWOOT_WEBHOOK_SECRETS` until step 4 and `{"<discord user id>":"<chatwoot token>"}` for
 `CHATWOOT_AGENT_TOKENS`, then pass it to the first deploy with `--secrets-file`. Later deploys keep
@@ -396,7 +396,7 @@ with `routing_handled` and `routing_kind` in the same update when applicable. Ch
 atomic: a concurrent save can overwrite another Worker's keys. Later syncs repair a missing or incorrect
 `discord_thread` URL, and the router restores recorded completion attributes when it next sees the conversation.
 
-For an existing routed deployment, follow the [upgrade order](CHANGELOG.md#unreleased): deploy the relay without
+For an existing routed deployment, follow the [upgrade order](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/CHANGELOG.md#0290---2026-10-02): deploy the relay without
 embedded routing first, then start the separate router with each account's cutover conversation display id in its
 `startAfterConversationId` map. Configure `router.keepLabels`, for example `["spam", "security", "beg-bounty"]`,
 to preserve existing kind labels on pre-cutover tickets that have no `routing_kind` attribute. The router still
@@ -492,7 +492,7 @@ sh docs/assets/render.sh                        # re-render the README illustrat
 ```
 
 See [CONTRIBUTING.md](https://github.com/Phala-Network/chatwoot-workers/blob/main/CONTRIBUTING.md) for guidelines and releases, [Internals](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/docs/internals.md)
-for how the service is built, and [CHANGELOG.md](CHANGELOG.md) for the release history. This
+for how the service is built, and [CHANGELOG.md](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/CHANGELOG.md) for the release history. This
 project follows the [Contributor Covenant](https://github.com/Phala-Network/chatwoot-workers/blob/main/CODE_OF_CONDUCT.md).
 
 ## Getting help
@@ -505,7 +505,7 @@ project follows the [Contributor Covenant](https://github.com/Phala-Network/chat
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/LICENSE).
 
 Chatwoot and Discord are trademarks of their respective owners, used here only to describe what
 this project works with.
