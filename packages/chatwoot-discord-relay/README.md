@@ -347,9 +347,10 @@ a larger configuration goes in a [KV namespace](https://developers.cloudflare.co
 | `queue.escalationRoleId` | Discord id (17–20 digits) | unset | Role pinged for tickets unassigned too long. To ping a role that is not mentionable, the bot needs *Mention @everyone, @here, and All Roles* in the channel. Unset: no escalation. |
 | `queue.escalationUserId` | Discord id (17–20 digits) | unset | A user pinged instead of a role (set one of the two). |
 | `router` | object | unset | Coordinate with a separate chatwoot-router Worker. Unset: no waiting. |
-| `router.accounts` | array of account ids | required | Relayed accounts whose open, unassigned customer messages wait for routing. |
+| `router.accounts` | array of account ids | required | Relayed accounts whose live customer messages wait for routing completion, regardless of assignee or status. |
 | `router.waitSeconds` | integer ≥ 0 | `30` | Maximum wait measured from the customer's message timestamp, not queue arrival. |
-| `router.attributes.seen` | non-empty string | `routing_seen` | Numeric latest customer message id decided on. |
+| `router.keepLabels` | array of lower-case label names | `[]` | Labels Manage always keeps when replacing or clearing a topic, alongside `routing_kind`; use for pre-cutover kinds. |
+| `router.attributes.seen` | non-empty string | `routing_seen` | Numeric latest customer message id processed or skipped, after all routing actions finish. |
 | `router.attributes.handled` | non-empty string | `routing_handled` | Numeric latest customer message id handled automatically. |
 | `router.attributes.kind` | non-empty string | `routing_kind` | Kind label kept when Manage replaces the topic label. |
 | `reconcile.lookbackSeconds` | integer ≥ 60 | `3600` | Minimum sweep window (conversations with activity within it are checked). Messages older than this are relayed without notifications. |
@@ -382,17 +383,25 @@ custom attribute definitions for `routing_seen` (**Number**), `routing_handled` 
 (**Text**) in each routed account. If you rename them, set the router's `attributes` and the relay's
 `router.attributes` to the same names (`seen`, `handled`, `kind`). Keep them distinct from existing attributes.
 
-A customer message of an open, unassigned conversation waits while `routing_seen` is absent or below its id.
-It proceeds once that watermark reaches its id, the conversation becomes assigned or stops being open, or the
-message reaches `router.waitSeconds` old. A message without a timestamp proceeds immediately rather than waiting
+A customer message waits while `routing_seen` is absent or below its id, even when assigned, resolved, or snoozed.
+It proceeds only once that watermark reaches its id or the message reaches `router.waitSeconds` old: assignment
+and status changes are not completion signals. A message without a timestamp proceeds immediately rather than waiting
 indefinitely. Historical messages and automatic email replies retain their existing no-notification behavior.
 Messages at or below `routing_handled` keep the **handled automatically** note instead of calling the triage bot.
 Each notification decision is recorded once, including across failed Discord posts. Manage keeps the label named
-by `routing_kind` when replacing the topic label.
+by `routing_kind` and existing labels in `router.keepLabels` when replacing or clearing the topic label.
+
+The router acknowledges every customer message it processes, including when routing is skipped for an assigned,
+closed, pre-cutover, or already-routed ticket. It writes `routing_seen` only after the decision's other actions,
+with `routing_handled` and `routing_kind` in the same update when applicable. Chatwoot's attribute merge is not
+atomic: a concurrent save can overwrite another Worker's keys. Later syncs repair a missing or incorrect
+`discord_thread` URL, and the router restores recorded completion attributes when it next sees the conversation.
 
 For an existing routed deployment, follow the [upgrade order](CHANGELOG.md#unreleased): deploy the relay without
 embedded routing first, then start the separate router with each account's cutover conversation display id in its
-`startAfterConversationId` map. Never run both routers.
+`startAfterConversationId` map. Configure `router.keepLabels`, for example `["spam", "security", "beg-bounty"]`,
+to preserve existing kind labels on pre-cutover tickets that have no `routing_kind` attribute. The router still
+acknowledges their new customer messages without asking Jev. Never run both routers.
 
 ## Triage bot hook
 

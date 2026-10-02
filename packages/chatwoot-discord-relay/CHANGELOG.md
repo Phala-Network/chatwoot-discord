@@ -20,10 +20,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Add its signed Chatwoot webhook and create conversation attributes
   `routing_seen` and `routing_handled` (Number), and `routing_kind` (Text). Pre-cutover conversations are
   intentionally not routed by the new Worker; its Durable Object does not import the relay's decisions.
+  Set `router.keepLabels` (default `[]`), for example `["spam", "security", "beg-bounty"]`, to preserve legacy
+  kind labels in Manage even without `routing_kind`. Only lower-case Chatwoot label names are accepted.
 - New relay deployments default to Worker name `chatwoot-discord-relay`. **Existing deployments must keep
   their current Worker `name` and `Hub` export**: renaming a Worker creates another Worker without its
   Durable Object state. Source deployments now live in `packages/chatwoot-discord-relay`; run `npm ci`
   at the workspace root. Both npm packages keep self-contained exports and type declarations.
+
+### Fixed
+
+- Only `routing_seen` completes the relay's wait for a live customer message; assignment or status changes no
+  longer let a partly applied routing decision call the triage bot. The timestamp deadline and missing-timestamp
+  guard remain. The router also acknowledges skipped messages, including pre-cutover tickets, without Jev.
+- Sync repairs a missing or different post URL after a concurrent Chatwoot custom-attribute save, including a
+  wrong guild with the correct thread id. The router separately restores its durable completion attributes.
 
 ## [0.28.0] - 2026-10-02
 

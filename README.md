@@ -9,7 +9,8 @@ Two independently deployed Cloudflare Workers for Chatwoot support teams:
 
 Each package is published separately to npm and owns its own Durable Object. They coordinate **only through
 Chatwoot conversation state**: assignments, status, labels, and the `routing_seen`, `routing_handled`, and
-`routing_kind` custom attributes. Neither Worker calls the other or shares its storage.
+`routing_kind` custom attributes. Only `routing_seen` signals routing completion; assignment and status changes
+do not. Neither Worker calls the other or shares its storage.
 
 See each package's README for deployment and configuration, [CONTRIBUTING.md](CONTRIBUTING.md) for the npm
 workspace development and release workflow, and [SECURITY.md](SECURITY.md) for private vulnerability reporting.

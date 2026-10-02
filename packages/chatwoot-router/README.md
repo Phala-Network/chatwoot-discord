@@ -47,7 +47,7 @@ npx chatwoot-router-store-config config.jsonc --namespace-id <namespace-id>
 import { storedConfig } from "chatwoot-router/stored-config";
 ```
 
-Set `CONFIG_STORE: bindings.kvNamespace({ id: "<namespace-id>" })` and
+Set `CONFIG_STORE: bindings.kv({ id: "<namespace-id>" })` and
 `CONFIG_KEY: bindings.text(storedConfig("config.jsonc").key)` in the Worker's `env`, removing `CONFIG`.
 The CLI validates JSONC, uploads through the deployment project's `cf`, and prints the content-addressed key.
 Keep older keys for rollbacks. The JavaScript and type declarations in each npm tarball are self-contained;
@@ -65,13 +65,23 @@ no unpublished shared package needs installing.
 
 | Default name | Type | Meaning |
 | --- | --- | --- |
-| `routing_seen` | Number | Latest customer message id decided on, after applying the decision, including no owner. |
+| `routing_seen` | Number | Latest customer message id processed or skipped, written only after the decision's other actions finish. The sole routing-completion signal. |
 | `routing_handled` | Number | Latest customer message id handled by a kind's successful reply or set-aside action. |
 | `routing_kind` | Text | Kind label added by the router, preserved by the relay's Manage card. |
 
-Attributes are updated through Chatwoot's `custom_attributes` API with `merge: true`, preserving unrelated keys.
-Watermarks never regress. Failed writes retry the durable decision rather than prematurely marking it complete.
+Every public incoming contact `message_created` in a routed account queues a completion check, even for an
+assigned, closed, pre-cutover, or already-routed ticket. Skipped messages and no-owner decisions also advance
+`routing_seen`; only eligible open, unassigned tickets ask Jev. When a kind handles messages, `routing_handled`
+and `routing_kind` are included in the same update as `routing_seen`, after its reply/status/label actions.
+
+Attributes are updated through Chatwoot's `custom_attributes` API with `merge: true`. Chatwoot v4.18 implements
+this as read-merge-save, not an atomic merge: concurrent relay/router writes can still lose keys. The router
+durably records completion watermarks and kind before writing, and repairs missing or older attributes on
+subsequent webhooks or sweeps without repeating Jev or replies. It retains the greatest watermarks observed;
+unchanged attributes are not written again. The relay similarly repairs its missing or different post URL on sync.
+Recovery is eventual, not a cross-Worker transaction. Failed writes retry rather than prematurely finishing the job.
 With the relay, set `router.accounts` there; its default wait is 30 seconds from each customer's message time.
+Assignment and status changes never release that wait; only `routing_seen` or the timeout does.
 Its `router.attributes` must match this package's `attributes` when using custom names.
 
 ## Configuration reference
@@ -100,8 +110,8 @@ Its `router.attributes` must match this package's `attributes` when using custom
 | Setting | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `chatwoot.baseUrl` | HTTP(S) URL | required | Final Chatwoot API URL; redirects are refused. |
-| `startAfterConversationId` | object: routed account id → integer ≥ 0 | `{}` | Each account's conversation display id at cutover; omitted accounts default to `0`. Conversations at or below their account's cutoff are never routed, including by the sweep. |
-| `attributes.seen` | non-empty string | `routing_seen` | Decision watermark attribute. |
+| `startAfterConversationId` | object: routed account id → integer ≥ 0 | `{}` | Each account's conversation display id at cutover; omitted accounts default to `0`. At or below it, routing actions and Jev are skipped, but customer messages still advance `routing_seen`. |
+| `attributes.seen` | non-empty string | `routing_seen` | Completion watermark for processed or skipped customer messages. |
 | `attributes.handled` | non-empty string | `routing_handled` | Handled watermark attribute. |
 | `attributes.kind` | non-empty string | `routing_kind` | Kind label attribute. The three names must be distinct. |
 | `reconcile.lookbackSeconds` | integer ≥ 60 | `3600` | Minimum activity window for the five-minute sweep. |
@@ -207,8 +217,12 @@ subject) are Chatwoot's automation rules.
 
 The Worker acknowledges after a SQLite job is queued. Alarms serialize decisions, preserve work across failures,
 and retry with exponential backoff capped at 30 minutes. The subrequest budget yields to a fresh invocation.
-A sweep every five minutes pages open conversations newest activity first, queues unassigned ones inside its
-lookback window, and persists its page cursor. A failed pass resumes rather than skipping its remaining pages.
+A sweep every five minutes pages open conversations newest activity first, queues completion checks inside its
+lookback window (including assigned and pre-cutover tickets), and persists its page cursor. Sweep jobs block
+route jobs until all pages finish, including across budget yields and failed-page backoff, so the router cannot
+close page-one tickets and shift the remaining pages. A failed pass resumes rather than skipping its remaining
+pages. This can delay webhook work too; the relay's wait remains bounded. Other Chatwoot actors can still change
+the list during a pass; subsequent overlapping sweeps reconcile that external churn.
 Old completed decisions and reply-once markers remain in the Router's own Durable Object.
 
 When splitting an existing relay deployment, **deploy the new relay first**, removing its old `routing` setting and
@@ -216,7 +230,9 @@ routing secrets and adding `router.accounts`. Keep its existing Worker `name` an
 Then find the newest Chatwoot conversation display id **in each routed account** at cutover and record the map in
 `startAfterConversationId`, for example `{ "1": 1200, "2": 85 }`. Deploy the router with the old routing configuration and its secrets, then add its
 Chatwoot webhook. Do not start the router while the old embedded routing is active. The cutover watermark
-intentionally leaves pre-cutover conversations to humans; old relay routing decisions are not imported.
+intentionally leaves pre-cutover conversations to humans; old relay routing decisions are not imported. New
+customer messages on those tickets are still acknowledged with `routing_seen`. Set the relay's `router.keepLabels`
+(for example `["spam", "security", "beg-bounty"]`) to keep legacy kind labels even without `routing_kind`.
 
 Chatwoot conversation display ids are account-local: never use one account's id as another account's cutoff.
 The map accepts only accounts in `routing.accounts`, with non-negative integer ids. An omitted account defaults
