@@ -66,15 +66,15 @@
     "@cloudflare/vitest-pool-workers": "0.22.0",
     "@types/node": "^24.19.0",
     "cf": "1.0.0-beta.9",
-    "esbuild": "0.28.1",
+    "esbuild": "0.28.2",
     "typescript": "~7.0.2",
     "vite": "^8.3.2",
     "vitest": "^4.1.11"
   },
   "dependencies": {
-    "discord-api-types": "^0.38.55",
+    "discord-api-types": "^0.38.56",
     "discord-interactions": "^4.4.0",
-    "hono": "^4.13.9",
+    "hono": "^4.13.10",
     "ip-regex": "^5.0.0",
     "jsonc-parser": "^3.3.1",
     "openapi-fetch": "^0.17.0",
