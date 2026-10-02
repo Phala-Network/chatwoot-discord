@@ -155,8 +155,6 @@ export class Notifier {
     const { conversation, createdAt } = message;
     return (
       router?.accounts.includes(message.account.id) === true &&
-      conversation.status === "open" &&
-      !conversation.assignee &&
       messageWatermark(conversation.customAttributes[router.attributes.seen]) < message.id &&
       createdAt !== undefined &&
       createdAt !== null &&

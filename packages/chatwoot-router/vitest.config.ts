@@ -15,6 +15,7 @@ export default defineConfig({
           CONFIG: {
             chatwoot: { baseUrl: "https://chatwoot.example.com" },
             routing: {
+              kinds: { "1": { spam: { covers: "Unsolicited advertising.", status: "resolved" } } },
               accounts: {
                 "1": { cloud: { assignee: 6, covers: "Cloud support." } },
                 "2": { cloud: { assignee: 7, covers: "Cloud support." } },

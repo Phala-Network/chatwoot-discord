@@ -35,7 +35,6 @@
 
 import ipRegex from "ip-regex";
 import { z } from "zod";
-import { messageWatermark } from "../../../shared/attributes.ts";
 import {
   type ChatwootClient,
   type ChatwootMessage,
@@ -46,6 +45,7 @@ import {
   toRelayConversation,
 } from "../../../shared/chatwoot/api.ts";
 import { log } from "../../../shared/log.ts";
+import { writeCompletion } from "./completion.ts";
 import type { Settings } from "./config.ts";
 
 /** Jev's answer when no owner fits; also the reserved route name. */
@@ -205,40 +205,57 @@ export function routesAccount(settings: Settings, accountId: number): boolean {
   return settings.config.routing?.accounts[String(accountId)] !== undefined;
 }
 
-/** Whether a listed conversation may still need routing (open, unassigned, not routed yet). */
+/** Whether a listed conversation needs routing or a completion check. */
 export function awaitsRouting(
   settings: Settings,
-  store: RoutingStore,
   accountId: number,
   conversation: { id?: number; status?: string; meta?: { assignee?: unknown } | null },
 ): boolean {
-  return (
-    routesAccount(settings, accountId) &&
-    conversation.id !== undefined &&
-    conversation.id > (settings.config.startAfterConversationId[String(accountId)] ?? 0) &&
-    conversation.status === "open" &&
-    !conversation.meta?.assignee &&
-    readDecision(store.get(routingKey(accountId, conversation.id)))?.state !== "done"
-  );
+  return routesAccount(settings, accountId) && conversation.id !== undefined && conversation.status === "open";
 }
 
-export async function routeConversation(ctx: RoutingContext, accountId: number, conversationId: number): Promise<void> {
+export async function routeConversation(
+  ctx: RoutingContext,
+  accountId: number,
+  conversationId: number,
+  messageId = 0,
+): Promise<void> {
   const { settings, store, chatwoot } = ctx;
   const routing = settings.config.routing;
   const owners = routing?.accounts[String(accountId)];
-  if (!routing || !owners || conversationId <= (settings.config.startAfterConversationId[String(accountId)] ?? 0)) {
-    return;
-  }
+  if (!routing || !owners) return;
   const key = routingKey(accountId, conversationId);
   const recorded = readDecision(store.get(key));
-  if (recorded?.state === "done") return;
-
   const raw = await chatwoot.getConversation(accountId, conversationId);
   if (!raw) return;
   const conversation = toRelayConversation(conversationId, raw);
+  const latest = await chatwoot.listMessages(accountId, conversationId);
+  const seen = Math.max(
+    messageId,
+    ...latest.filter((message) => message.message_type === 0 && !message.private).map((message) => message.id),
+  );
+  const complete = async (decision?: Decision, kind: string | null = null) => {
+    await writeCompletion(
+      ctx,
+      accountId,
+      conversationId,
+      Math.max(seen, decision?.lastMessageId ?? 0),
+      Number(store.get(handledKey(accountId, conversationId)) ?? 0),
+      kind,
+    );
+  };
+  if (conversationId <= (settings.config.startAfterConversationId[String(accountId)] ?? 0)) {
+    await complete();
+    return;
+  }
+  if (recorded?.state === "done") {
+    await complete(recorded, recorded.kindConfidence >= routing.minConfidence ? recorded.kind : null);
+    return;
+  }
   if (conversation.assignee && recorded?.state !== "pending") {
     // Assigned by a person or an automation rule: nothing to decide, ever.
     store.set(key, JSON.stringify({ ...(recorded ?? unassignable()), state: "done" }));
+    await complete(recorded);
     return;
   }
   // The customer wrote after the messages Jev was given: a decision not applied yet is made again.
@@ -247,13 +264,19 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
   let decision = recorded?.state === "pending" && !stale ? recorded : undefined;
   let current = conversation;
   if (!decision) {
-    if (conversation.status !== "open") return; // Routed if it opens again unassigned.
+    if (conversation.status !== "open") {
+      await complete(recorded?.state === "waiting" ? recorded : undefined);
+      return;
+    }
     const { text, messages, lastMessageId } = await customerText(chatwoot, accountId, conversationId, [
       conversation.contact?.name,
       conversation.contact?.email,
     ]);
     // Nothing new since the last answer (or no customer message yet): a later message routes it.
-    if (!stale && messages <= (recorded?.messages ?? 0)) return;
+    if (!stale && messages <= (recorded?.messages ?? 0)) {
+      await complete(recorded, recorded && recorded.kindConfidence >= routing.minConfidence ? recorded.kind : null);
+      return;
+    }
     decision = await decide(ctx, owners, routing.kinds?.[String(accountId)], text, messages, lastMessageId);
     store.set(key, JSON.stringify(decision));
     // Asking Jev takes a moment: apply the decision to the conversation as it is now.
@@ -278,7 +301,7 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     const replied = await replyOnce(ctx, accountId, conversationId, decision, kind);
     if (current.status !== kind.status) await chatwoot.setStatus(accountId, conversationId, { status: kind.status });
     store.set(handledKey(accountId, conversationId), String(decision.lastMessageId));
-    await writeAttributes(ctx, accountId, conversationId, decision, kindName);
+    await complete(decision, kindName);
     store.set(key, JSON.stringify({ ...decision, state: "done" }));
     log.info("ticket set aside as its kind", {
       accountId,
@@ -291,7 +314,10 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     return;
   }
   // Closed meanwhile (and nobody took it): keep the decision pending until it opens again.
-  if (current.status !== "open" && !current.assignee) return;
+  if (current.status !== "open" && !current.assignee) {
+    await complete();
+    return;
+  }
   const owner =
     decision.owner !== null && decision.ownerConfidence >= routing.minConfidence ? owners[decision.owner] : undefined;
   const assign = owner !== undefined && !current.assignee;
@@ -321,7 +347,7 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
     decision.noRequest &&
     !(await wroteSince(chatwoot, accountId, conversationId, decision.lastMessageId));
   if (snooze) await chatwoot.setStatus(accountId, conversationId, { status: "snoozed" });
-  await writeAttributes(ctx, accountId, conversationId, decision, kindName);
+  await complete(decision, kindName);
   store.set(key, JSON.stringify({ ...decision, state }));
   log.info("ticket routed", {
     accountId,
@@ -520,23 +546,4 @@ function readDecision(stored: string | undefined): Decision | undefined {
   } catch {
     return undefined;
   }
-}
-
-async function writeAttributes(
-  ctx: RoutingContext,
-  accountId: number,
-  conversationId: number,
-  decision: Decision,
-  kind: string | null,
-): Promise<void> {
-  const names = ctx.settings.config.attributes;
-  const conversation = await ctx.chatwoot.getConversation(accountId, conversationId);
-  if (!conversation) return;
-  const current = conversation.custom_attributes ?? {};
-  const handled = Number(ctx.store.get(handledKey(accountId, conversationId)) ?? 0);
-  await ctx.chatwoot.setCustomAttributes(accountId, conversationId, {
-    [names.seen]: Math.max(messageWatermark(current[names.seen]), decision.lastMessageId),
-    ...(handled > 0 ? { [names.handled]: Math.max(messageWatermark(current[names.handled]), handled) } : {}),
-    ...(kind === null ? {} : { [names.kind]: kind }),
-  });
 }

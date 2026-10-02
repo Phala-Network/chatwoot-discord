@@ -48,7 +48,11 @@ app.post("/chatwoot/webhook", bodyLimit({ maxSize: 2 * 1024 * 1024 }), async (co
   if (target.accountId !== signedBy || !routesAccount(settings, target.accountId)) {
     return context.text("account does not match the webhook secret", 403);
   }
-  await context.env.ROUTER.getByName(ROUTER_NAME).enqueueConversation(target.accountId, target.conversationId);
+  await context.env.ROUTER.getByName(ROUTER_NAME).enqueueConversation(
+    target.accountId,
+    target.conversationId,
+    target.messageId,
+  );
   return context.json({ ok: true });
 });
 

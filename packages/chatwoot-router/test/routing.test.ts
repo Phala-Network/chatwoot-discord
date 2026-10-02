@@ -565,6 +565,106 @@ describe("routeConversation with kinds", () => {
 });
 
 describe("coordination attributes", () => {
+  it("acknowledges messages beyond Jev's first three without marking them handled", async () => {
+    const ticket: Ticket = {
+      messages: [1, 2, 3, 4, 5].map((id) => ({ id, message_type: 0, content: "Customer question." })),
+    };
+    world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["startup-program", 1] });
+    await routeConversation(context(new MapStore(), KINDS), 1, 5);
+    expect(ticket.attributes).toEqual({ routing_seen: 5, routing_handled: 3, routing_kind: "startup-program" });
+  });
+
+  it.each(["assigned", "resolved", "snoozed", "cutover"])(
+    "acknowledges customer messages skipped because of %s without calling Jev",
+    async (reason) => {
+      const ticket: Ticket = {
+        ...(reason === "assigned" ? { assignee: { id: 9, name: "Doyle" } } : {}),
+        ...(reason === "resolved" || reason === "snoozed" ? { status: reason } : {}),
+      };
+      const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1] });
+      const ctx = context();
+      if (reason === "cutover") ctx.settings.config.startAfterConversationId = { "1": 5 };
+      await routeConversation(ctx, 1, 5, 101);
+      expect(ticket.attributes).toMatchObject({ routing_seen: 101 });
+      expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toEqual([]);
+      expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
+    },
+  );
+
+  it("acknowledges later messages after a final decision without handling or classifying them again", async () => {
+    const ticket: Ticket = {};
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["startup-program", 1] });
+    const ctx = context(new MapStore(), KINDS);
+    await routeConversation(ctx, 1, 5);
+    await routeConversation(ctx, 1, 5, 200);
+    expect(ticket.attributes).toMatchObject({ routing_seen: 200, routing_handled: 1, routing_kind: "startup-program" });
+    expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
+    expect(replies(requests)).toHaveLength(1);
+  });
+
+  it("does not publish seen before a failed canned reply settles", async () => {
+    const ticket: Ticket = { failReply: 1 };
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["startup-program", 1] });
+    const ctx = context(new MapStore(), KINDS);
+    await expect(routeConversation(ctx, 1, 5)).rejects.toThrow();
+    expect(sent(requests, "POST", `${CW}/assignments`)).toHaveLength(1);
+    expect(ticket.attributes).toBeUndefined();
+    await routeConversation(ctx, 1, 5);
+    expect(ticket.attributes).toMatchObject({ routing_seen: 1, routing_kind: "startup-program" });
+    expect(ticket.attributes).not.toHaveProperty("routing_handled");
+  });
+
+  it("writes seen, handled, and kind together after all routing actions", async () => {
+    const ticket: Ticket = {};
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["startup-program", 1] });
+    await routeConversation(context(new MapStore(), KINDS), 1, 5);
+    const writes = requests.filter((request) => request.method === "POST");
+    expect(JSON.parse(writes.at(-1)?.body ?? "{}")).toEqual({
+      merge: true,
+      custom_attributes: { routing_seen: 1, routing_handled: 1, routing_kind: "startup-program" },
+    });
+    expect(writes.at(-2)?.url.pathname).toBe("/api/v1/accounts/1/conversations/5/messages");
+  });
+
+  it.each(["done", "waiting", "skipped"])(
+    "repairs lost %s watermarks after a relay read-merge-save without replaying actions",
+    async (state) => {
+      const ticket: Ticket = state === "skipped" ? { assignee: { id: 9, name: "Doyle" } } : {};
+      const { requests } = world(ticket, {
+        owner: [state === "waiting" ? "unclear" : "cloud", 1],
+        topic: ["billing", 1],
+        kind: ["startup-program", 1],
+      });
+      const ctx = context(new MapStore(), KINDS);
+      await routeConversation(ctx, 1, 5, 101);
+      const expected = { ...ticket.attributes };
+      expect(expected.routing_seen).toBe(101);
+      const decisions = sent(requests, "POST", "api.typesafe.ai/v1/systemone").length;
+      const repliesBefore = replies(requests).length;
+      ticket.attributes = { discord_thread: "https://discord.com/channels/100000000000000001/100000000000000002" };
+      await routeConversation(ctx, 1, 5);
+      expect(ticket.attributes).toEqual({
+        discord_thread: "https://discord.com/channels/100000000000000001/100000000000000002",
+        ...expected,
+      });
+      expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(decisions);
+      expect(replies(requests)).toHaveLength(repliesBefore);
+      const writes = sent(requests, "POST", `${CW}/custom_attributes`).length;
+      await routeConversation(ctx, 1, 5);
+      expect(sent(requests, "POST", `${CW}/custom_attributes`)).toHaveLength(writes);
+    },
+  );
+
+  it("preserves newer observed watermarks through a subsequent lost update", async () => {
+    const ticket: Ticket = { attributes: { routing_seen: 300, routing_handled: 250 } };
+    world(ticket, { owner: ["cloud", 1], topic: ["billing", 1] });
+    const ctx = context();
+    await routeConversation(ctx, 1, 5);
+    ticket.attributes = { routing_seen: 1, routing_handled: 1 };
+    await routeConversation(ctx, 1, 5, 200);
+    expect(ticket.attributes).toMatchObject({ routing_seen: 300, routing_handled: 250 });
+  });
+
   it("marks a no-owner decision seen and preserves unrelated attributes", async () => {
     const ticket: Ticket = { attributes: { discord_thread: "https://discord.com/channels/1/2" } };
     world(ticket, { owner: ["unclear", 1], topic: ["billing", 1] });
@@ -597,10 +697,11 @@ describe("coordination attributes", () => {
     const { requests } = world({}, { owner: ["cloud", 1], topic: ["billing", 1] }, 1);
     const ctx = context();
     await expect(routeConversation(ctx, 1, 5)).rejects.toThrow();
-    const before = requests.length;
+    const before = sent(requests, "POST", `${CW}/assignments`).length;
     ctx.settings.config.startAfterConversationId = { "1": 5 };
     await routeConversation(ctx, 1, 5);
-    expect(requests).toHaveLength(before);
+    expect(sent(requests, "POST", `${CW}/assignments`)).toHaveLength(before);
+    expect(sent(requests, "POST", `${CW}/custom_attributes`)).toHaveLength(1);
   });
 });
 
@@ -618,10 +719,10 @@ describe("per-account cutover", () => {
       routing: { ...ROUTING, accounts: { "1": ROUTING.accounts["1"], "2": ROUTING.accounts["1"] } },
       startAfterConversationId: cutover,
     });
-    expect(awaitsRouting(settings, store, 1, { id: 5, status: "open" })).toBe(eligible);
+    expect(awaitsRouting(settings, 1, { id: 5, status: "open" })).toBe(true);
     await routeConversation({ ...context(store), settings }, 1, 5);
     expect(sent(requests, "POST", `${CW}/assignments`)).toHaveLength(eligible ? 1 : 0);
-    if (!eligible) expect(requests).toEqual([]);
+    expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(eligible ? 1 : 0);
   });
 });
 

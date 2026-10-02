@@ -361,6 +361,37 @@ describe("processConversation", () => {
     });
   });
 
+  it.each(["missing", "different thread", "different guild"])(
+    "repairs a %s link after a concurrent router attribute save",
+    async (lost) => {
+      const world = new World();
+      world.messages = [{ id: 1, content: "hello", message_type: 0 }];
+      await withStore(async (store) => {
+        const settings = testSettings();
+        await sync(store, settings);
+        const thread = store.conversation(3, 12)?.threadId;
+        const link = `https://discord.com/channels/${GUILD}/${thread}`;
+        world.conversation.custom_attributes = {
+          routing_seen: 1,
+          ...(lost === "missing"
+            ? {}
+            : {
+                discord_thread:
+                  lost === "different thread"
+                    ? `https://discord.com/channels/${GUILD}/100000000000000099`
+                    : `https://discord.com/channels/100000000000000099/${thread}`,
+              }),
+        };
+        await sync(store, settings);
+        expect(world.conversation.custom_attributes).toEqual({ routing_seen: 1, discord_thread: link });
+        expect(world.sent("POST", "/custom_attributes")).toHaveLength(2);
+        await sync(store, settings);
+        expect(world.sent("POST", "/custom_attributes")).toHaveLength(2);
+        expect(world.replies()).toEqual([`hello\n-# <@${TRIAGE}>`]);
+      });
+    },
+  );
+
   it("relays only the account's allowed inboxes", async () => {
     const world = new World();
     world.messages = [{ id: 1, content: "hello", message_type: 0 }];

@@ -69,11 +69,16 @@ export class QueueStore {
     );
   }
 
-  nextDueJob(): Job | undefined {
+  nextDueJob(blockingPriority?: number): Job | undefined {
     const row = this.sql
       .exec<{ key: string; payload: string; version: number; attempts: number; created_at: number }>(
-        "SELECT key, payload, version, attempts, created_at FROM jobs WHERE not_before <= ? ORDER BY priority, not_before, created_at LIMIT 1",
+        `SELECT key, payload, version, attempts, created_at FROM jobs WHERE not_before <= ?
+         AND (? IS NULL OR priority = ? OR NOT EXISTS (SELECT 1 FROM jobs WHERE priority = ?))
+         ORDER BY priority, not_before, created_at LIMIT 1`,
         this.now(),
+        blockingPriority ?? null,
+        blockingPriority ?? null,
+        blockingPriority ?? null,
       )
       .toArray()[0];
     if (!row) return undefined;
@@ -81,9 +86,17 @@ export class QueueStore {
     return { ...job, createdAt };
   }
 
-  /** Earliest time any job is due, if there are jobs. */
-  nextWakeup(): number | undefined {
-    const row = this.sql.exec<{ at: number | null }>("SELECT MIN(not_before) AS at FROM jobs").toArray()[0];
+  /** Earliest due time, respecting a blocking priority even during its backoff. */
+  nextWakeup(blockingPriority?: number): number | undefined {
+    const row = this.sql
+      .exec<{ at: number | null }>(
+        `SELECT MIN(not_before) AS at FROM jobs
+       WHERE ? IS NULL OR priority = ? OR NOT EXISTS (SELECT 1 FROM jobs WHERE priority = ?)`,
+        blockingPriority ?? null,
+        blockingPriority ?? null,
+        blockingPriority ?? null,
+      )
+      .toArray()[0];
     return row?.at ?? undefined;
   }
 

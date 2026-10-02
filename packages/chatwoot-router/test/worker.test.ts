@@ -42,7 +42,7 @@ async function webhook(payload: unknown, secret = "secret-acme", age = 0): Promi
   );
 }
 
-async function drain(): Promise<void> {
+async function drain(timeout = 5000): Promise<void> {
   await vi.waitFor(
     async () => {
       const due = await runInDurableObject(
@@ -54,7 +54,7 @@ async function drain(): Promise<void> {
       );
       expect(due).toBe(0);
     },
-    { timeout: 5000, interval: 20 },
+    { timeout, interval: 20 },
   );
 }
 
@@ -67,28 +67,51 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-function world(failAttributes = 0) {
+function world(failAttributes = 0, state: { status?: string; assignee?: { id: number } } = {}) {
   const attributes: Record<string, unknown> = { unrelated: "kept" };
+  const messages = [{ id: 501, message_type: 0, content: "Where is my invoice?" }];
   return {
     attributes,
+    messages,
+    state,
     ...mockFetch(
+      on("GET", base, (request) =>
+        json({
+          data: {
+            payload:
+              Number(request.url.searchParams.get("page")) === 1
+                ? [
+                    {
+                      id: 11,
+                      status: state.status ?? "open",
+                      meta: { assignee: state.assignee ?? null },
+                      last_activity_at: Date.now() / 1000,
+                      custom_attributes: attributes,
+                    },
+                  ]
+                : [],
+          },
+        }),
+      ),
+      on("GET", "chatwoot.example.com/api/v1/accounts/2/conversations", () => json({ data: { payload: [] } })),
       on("GET", new RegExp(`${base}/\\d+$`), (request) =>
         json({
           id: Number(request.url.pathname.split("/").at(-1)),
-          status: "open",
-          meta: { assignee: null },
+          status: state.status ?? "open",
+          meta: { assignee: state.assignee ?? null },
           custom_attributes: attributes,
           labels: [],
         }),
       ),
       on("GET", new RegExp(`${base}/\\d+/messages$`), (request) =>
         json({
-          payload: [{ id: 501, message_type: 0, content: "Where is my invoice?" }].filter(
-            (message) => message.id > Number(request.url.searchParams.get("after") ?? 0),
-          ),
+          payload: messages.filter((message) => message.id > Number(request.url.searchParams.get("after") ?? 0)),
         }),
       ),
-      on("POST", new RegExp(`${base}/\\d+/assignments$`), () => json({})),
+      on("POST", new RegExp(`${base}/\\d+/assignments$`), () => {
+        state.assignee = { id: 6 };
+        return json({});
+      }),
       on("POST", new RegExp(`${base}/\\d+/custom_attributes$`), (request) => {
         if (failAttributes > 0) {
           failAttributes -= 1;
@@ -100,13 +123,148 @@ function world(failAttributes = 0) {
         return json({});
       }),
       on("POST", "api.typesafe.ai/v1/systemone", () =>
-        json({ answers: { owner: { choice: "cloud", confidence: 1 } } }),
+        json({ answers: { owner: { choice: "cloud", confidence: 1 }, kind: { choice: "none", confidence: 1 } } }),
       ),
     ),
   };
 }
 
+function sweepingWorld(failSecondPage = false) {
+  const open = new Set(Array.from({ length: 50 }, (_, index) => index + 11));
+  const pages: number[] = [];
+  const attributes = new Map<number, object>();
+  let failed = false;
+  mockFetch(
+    on("GET", base, (request) => {
+      const page = Number(request.url.searchParams.get("page"));
+      if (page === 2 && failSecondPage && !failed) {
+        failed = true;
+        return json({}, { status: 503 });
+      }
+      const ids = [...open].slice((page - 1) * 25, page * 25);
+      pages.push(ids.length);
+      return json({
+        data: { payload: ids.map((id) => ({ id, status: "open", last_activity_at: Date.now() / 1000 })) },
+      });
+    }),
+    on("GET", "chatwoot.example.com/api/v1/accounts/2/conversations", () => json({ data: { payload: [] } })),
+    on("GET", new RegExp(`${base}/\\d+$`), (request) => {
+      const id = Number(request.url.pathname.split("/").at(-1));
+      return json({
+        id,
+        status: open.has(id) ? "open" : "resolved",
+        labels: [],
+        meta: { assignee: null },
+        custom_attributes: attributes.get(id) ?? {},
+      });
+    }),
+    on("GET", new RegExp(`${base}/\\d+/messages$`), (request) =>
+      json({
+        payload:
+          Number(request.url.searchParams.get("after") ?? 0) < 1
+            ? [{ id: 1, message_type: 0, content: "Unsolicited advertising." }]
+            : [],
+      }),
+    ),
+    on("POST", new RegExp(`${base}/\\d+/labels$`), () => json({})),
+    on("POST", new RegExp(`${base}/\\d+/toggle_status$`), (request) => {
+      open.delete(Number(request.url.pathname.split("/").at(-2)));
+      return json({});
+    }),
+    on("POST", new RegExp(`${base}/\\d+/custom_attributes$`), (request) => {
+      attributes.set(Number(request.url.pathname.split("/").at(-2)), JSON.parse(request.body).custom_attributes);
+      return json({});
+    }),
+    on("POST", "api.typesafe.ai/v1/systemone", () =>
+      json({ answers: { owner: { choice: "unclear", confidence: 1 }, kind: { choice: "spam", confidence: 1 } } }),
+    ),
+  );
+  return { open, pages };
+}
+
 describe("router worker", () => {
+  it.each(["assigned", "resolved", "snoozed"])(
+    "queues and acknowledges contact messages on %s tickets",
+    async (reason) => {
+      const mock = world(0, reason === "assigned" ? { assignee: { id: 6 } } : { status: reason });
+      await webhook(incoming(11));
+      await drain();
+      expect(mock.attributes).toMatchObject({ routing_seen: 501 });
+      await webhook({ ...incoming(11), id: 601 });
+      await drain();
+      await webhook(incoming(11));
+      await drain();
+      expect(mock.attributes).toMatchObject({ routing_seen: 601 });
+      expect(mock.requests.filter((request) => request.url.hostname === "api.typesafe.ai")).toEqual([]);
+    },
+  );
+
+  it("repairs an assigned done decision and acknowledges a missed customer webhook during a sweep", async () => {
+    const mock = world();
+    await webhook(incoming(11));
+    await drain();
+    expect(mock.attributes).toMatchObject({ routing_seen: 501 });
+    expect(mock.state.assignee).toEqual({ id: 6 });
+    delete mock.attributes.routing_seen;
+    mock.attributes.discord_thread = "https://discord.com/channels/100000000000000001/100000000000000002";
+    mock.messages.push({ id: 601, message_type: 0, content: "Another question." });
+    await stub().requestSweep();
+    await drain();
+    expect(mock.attributes).toMatchObject({
+      routing_seen: 601,
+      discord_thread: "https://discord.com/channels/100000000000000001/100000000000000002",
+    });
+    expect(mock.requests.filter((request) => request.url.hostname === "api.typesafe.ai")).toHaveLength(1);
+  });
+
+  it("finishes paging all 50 open tickets before routing closes the first 25", async () => {
+    const sweep = sweepingWorld();
+    await stub().requestSweep();
+    await drain(15000);
+    expect(sweep.pages).toEqual([25, 25, 0]);
+    expect(sweep.open.size).toBe(0);
+  }, 20000);
+
+  it("keeps sweep route jobs blocked across a failed page and its retry", async () => {
+    const sweep = sweepingWorld(true);
+    await stub().requestSweep();
+    await vi.waitFor(async () => {
+      const alarm = await runInDurableObject(stub(), (_instance, state) => state.storage.getAlarm());
+      expect(alarm).toBeGreaterThan(Date.now());
+    });
+    expect(sweep.open.size).toBe(50);
+    await runInDurableObject(stub(), async (_instance, state) => {
+      state.storage.sql.exec("UPDATE jobs SET not_before = 0 WHERE key = ?", "sweep:1");
+      await state.storage.setAlarm(Date.now());
+    });
+    await drain(15000);
+    expect(sweep.pages).toEqual([25, 25, 0]);
+    expect(sweep.open.size).toBe(0);
+  }, 20000);
+
+  it("acknowledges pre-cutover contact webhooks using the webhook message id", async () => {
+    const mock = world();
+    expect((await webhook(incoming(10))).status).toBe(200);
+    await drain();
+    expect(mock.attributes).toMatchObject({ routing_seen: 501 });
+    expect(mock.requests.filter((request) => request.url.hostname === "api.typesafe.ai")).toEqual([]);
+  });
+
+  it("repairs a completed decision's lost attributes on a conversation webhook", async () => {
+    const mock = world();
+    await webhook(incoming(11));
+    await drain();
+    delete mock.attributes.routing_seen;
+    mock.attributes.discord_thread = "https://discord.com/channels/100000000000000001/100000000000000002";
+    await webhook({ event: "conversation_updated", id: 11, account: { id: 1 } });
+    await drain();
+    expect(mock.attributes).toMatchObject({
+      routing_seen: 501,
+      discord_thread: "https://discord.com/channels/100000000000000001/100000000000000002",
+    });
+    expect(mock.requests.filter((request) => request.url.hostname === "api.typesafe.ai")).toHaveLength(1);
+  });
+
   it("reports configuration readiness without exposing errors", async () => {
     const request = () => new Request("https://router.example.com/healthz");
     expect((await worker.fetch(request(), env, createExecutionContext())).status).toBe(200);
@@ -115,7 +273,7 @@ describe("router worker", () => {
     expect(await invalid.json()).toEqual({ ok: false });
   });
 
-  it("authenticates per account, rejects stale signatures, and ignores non-customer messages and cutover history", async () => {
+  it("authenticates per account, rejects stale signatures, and ignores non-customer messages", async () => {
     const mock = mockFetch();
     expect((await webhook(incoming(11), "wrong")).status).toBe(401);
     expect((await webhook(incoming(11), "secret-acme", 301)).status).toBe(401);
@@ -123,7 +281,6 @@ describe("router worker", () => {
     expect((await webhook({ ...incoming(11), message_type: "outgoing" })).status).toBe(200);
     expect((await webhook({ ...incoming(11), private: true })).status).toBe(200);
     expect((await webhook({ ...incoming(11), sender: { type: "user" } })).status).toBe(200);
-    expect((await webhook(incoming(10))).status).toBe(200);
     await drain();
     expect(mock.requests).toEqual([]);
   });
@@ -144,23 +301,35 @@ describe("router worker", () => {
     expect(mock.requests.filter((request) => request.url.hostname === "api.typesafe.ai")).toHaveLength(1);
   });
 
-  it("queues the same display id only for the account past its cutover", async () => {
-    const path = "chatwoot.example.com/api/v1/accounts/2/conversations/10";
+  it("acknowledges the same display id independently for both accounts at cutover", async () => {
+    const attributes = new Map<string, object>();
     const mock = mockFetch(
-      on("GET", path, () => json({ id: 10, status: "open", meta: { assignee: null } })),
-      on("GET", `${path}/messages`, () => json({ payload: [] })),
+      on("GET", /^chatwoot\.example\.com\/api\/v1\/accounts\/[12]\/conversations\/10$/, () =>
+        json({ id: 10, status: "open", meta: { assignee: null } }),
+      ),
+      on("GET", /^chatwoot\.example\.com\/api\/v1\/accounts\/[12]\/conversations\/10\/messages$/, () =>
+        json({ payload: [] }),
+      ),
+      on(
+        "POST",
+        /^chatwoot\.example\.com\/api\/v1\/accounts\/[12]\/conversations\/10\/custom_attributes$/,
+        (request) => {
+          attributes.set(request.url.pathname, JSON.parse(request.body).custom_attributes);
+          return json({});
+        },
+      ),
     );
     expect((await webhook(incoming(10))).status).toBe(200);
-    expect((await webhook(incoming(2, 2), "secret-globex")).status).toBe(200);
     expect((await webhook(incoming(10, 2), "secret-globex")).status).toBe(200);
     await drain();
-    expect(mock.requests.map((request) => request.url.pathname)).toEqual([
-      "/api/v1/accounts/2/conversations/10",
-      "/api/v1/accounts/2/conversations/10/messages",
+    expect([...attributes]).toEqual([
+      ["/api/v1/accounts/1/conversations/10/custom_attributes", { routing_seen: 501 }],
+      ["/api/v1/accounts/2/conversations/10/custom_attributes", { routing_seen: 501 }],
     ]);
+    expect(mock.requests.filter((request) => request.url.hostname === "api.typesafe.ai")).toEqual([]);
   });
 
-  it("routes relevant conversation events and sweeps open, unassigned tickets in its activity window", async () => {
+  it("routes relevant events and checks every open ticket in the sweep's activity window", async () => {
     const mock = world();
     await webhook({ event: "conversation_status_changed", id: 12, account: { id: 1 } });
     await drain();
@@ -179,8 +348,14 @@ describe("router worker", () => {
           },
         });
       }),
-      on("GET", `${base}/14`, () => json({ id: 14, status: "open", meta: { assignee: null } })),
-      on("GET", `${base}/14/messages`, () => json({ payload: [] })),
+      on("GET", new RegExp(`${base}/(9|13|14)$`), (request) =>
+        json({
+          id: Number(request.url.pathname.split("/").at(-1)),
+          status: "open",
+          meta: { assignee: request.url.pathname.endsWith("/13") ? { id: 6 } : null },
+        }),
+      ),
+      on("GET", new RegExp(`${base}/(9|13|14)/messages$`), () => json({ payload: [] })),
       on("GET", "chatwoot.example.com/api/v1/accounts/2/conversations", (request) => {
         expect(request.url.searchParams.get("status")).toBe("open");
         return json({
@@ -193,20 +368,31 @@ describe("router worker", () => {
           },
         });
       }),
-      on("GET", "chatwoot.example.com/api/v1/accounts/2/conversations/9", () =>
+      on("GET", /^chatwoot\.example\.com\/api\/v1\/accounts\/2\/conversations\/(2|9)$/, () =>
         json({ id: 9, status: "open", meta: { assignee: null } }),
       ),
-      on("GET", "chatwoot.example.com/api/v1/accounts/2/conversations/9/messages", () => json({ payload: [] })),
+      on("GET", /^chatwoot\.example\.com\/api\/v1\/accounts\/2\/conversations\/(2|9)\/messages$/, () =>
+        json({ payload: [] }),
+      ),
     );
     const context = createExecutionContext();
     await worker.scheduled(createScheduledController(), env, context);
     await waitOnExecutionContext(context);
     await drain();
     expect(
-      requests.requests
-        .filter((request) => /\/conversations\/\d+$/.test(request.url.pathname))
-        .map((request) => request.url.pathname)
-        .sort(),
-    ).toEqual(["/api/v1/accounts/1/conversations/14", "/api/v1/accounts/2/conversations/9"]);
+      [
+        ...new Set(
+          requests.requests
+            .filter((request) => /\/conversations\/\d+$/.test(request.url.pathname))
+            .map((request) => request.url.pathname),
+        ),
+      ].sort(),
+    ).toEqual([
+      "/api/v1/accounts/1/conversations/13",
+      "/api/v1/accounts/1/conversations/14",
+      "/api/v1/accounts/1/conversations/9",
+      "/api/v1/accounts/2/conversations/2",
+      "/api/v1/accounts/2/conversations/9",
+    ]);
   });
 });

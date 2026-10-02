@@ -216,8 +216,9 @@ async function linkPost(
   threadId: string,
 ): Promise<void> {
   const attribute = settings.config.relay.linkAttribute;
-  if (!attribute || threadIdFromUrl(conversation.customAttributes[attribute]) === threadId) return;
+  if (!attribute) return;
   const url = await forum.postUrl(forumChannelId, threadId);
+  if (conversation.customAttributes[attribute] === url) return;
   await chatwoot.setCustomAttribute(accountId, conversation.id, attribute, url);
   conversation.customAttributes[attribute] = url;
 }

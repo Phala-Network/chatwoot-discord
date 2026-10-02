@@ -13,6 +13,7 @@ export const ROUTER_NAME = "global";
 const ROUTE_BUDGET = 18;
 const RUN_WALL_MS = 5 * 60 * 1000;
 const SWEEP_PASS_TTL_MS = 24 * 60 * 60 * 1000;
+const SWEEP_PRIORITY = 1;
 const id = z.number().int().positive();
 const jobSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("route"), accountId: id, conversationId: id }),
@@ -30,13 +31,12 @@ export class Router extends DurableObject<Env> {
     context.blockConcurrencyWhile(async () => this.store.migrate());
   }
 
-  async enqueueConversation(accountId: number, conversationId: number): Promise<void> {
+  async enqueueConversation(accountId: number, conversationId: number, messageId?: number): Promise<void> {
     const settings = await loadSettings(this.env);
-    if (
-      !routesAccount(settings, accountId) ||
-      conversationId <= (settings.config.startAfterConversationId[String(accountId)] ?? 0)
-    ) {
-      return;
+    if (!routesAccount(settings, accountId)) return;
+    if (messageId !== undefined) {
+      const key = customerKey(accountId, conversationId);
+      this.store.set(key, String(Math.max(Number(this.store.get(key) ?? 0), messageId)));
     }
     this.enqueue({ type: "route", accountId, conversationId });
     await this.schedule();
@@ -56,7 +56,7 @@ export class Router extends DurableObject<Env> {
     const started = Date.now();
     let yielded = false;
     this.store.prune();
-    for (let job = this.store.nextDueJob(); job; job = this.store.nextDueJob()) {
+    for (let job = this.store.nextDueJob(SWEEP_PRIORITY); job; job = this.store.nextDueJob(SWEEP_PRIORITY)) {
       const payload = parse(jobSchema, job.payload);
       if (!payload) {
         log.warn("unreadable job dropped", { job: job.key });
@@ -73,6 +73,7 @@ export class Router extends DurableObject<Env> {
             { settings, chatwoot, store: this.store, fetch: budget.fetch },
             payload.accountId,
             payload.conversationId,
+            Number(this.store.get(customerKey(payload.accountId, payload.conversationId)) ?? 0),
           );
         } else if (routesAccount(settings, payload.accountId)) {
           await this.sweep(settings, chatwoot, payload.accountId);
@@ -118,7 +119,7 @@ export class Router extends DurableObject<Env> {
         finished = true;
         break;
       }
-      if (conversation.id !== undefined && awaitsRouting(settings, this.store, accountId, conversation)) {
+      if (conversation.id !== undefined && awaitsRouting(settings, accountId, conversation)) {
         this.enqueue({ type: "route", accountId, conversationId: conversation.id });
       }
     }
@@ -134,15 +135,19 @@ export class Router extends DurableObject<Env> {
   private enqueue(payload: Payload): void {
     const key =
       payload.type === "route" ? `route:${payload.accountId}:${payload.conversationId}` : `sweep:${payload.accountId}`;
-    this.store.enqueue(key, payload.type === "route" ? 0 : 1, JSON.stringify(payload));
+    this.store.enqueue(key, payload.type === "route" ? 0 : SWEEP_PRIORITY, JSON.stringify(payload));
   }
 
   private async schedule(at?: number): Promise<void> {
-    const next = at ?? this.store.nextWakeup();
+    const next = at ?? this.store.nextWakeup(SWEEP_PRIORITY);
     if (next === undefined) return;
     const current = await this.ctx.storage.getAlarm();
     if (current === null || current > next) await this.ctx.storage.setAlarm(next);
   }
+}
+
+function customerKey(accountId: number, conversationId: number): string {
+  return `customer:${accountId}:${conversationId}`;
 }
 
 function parse<Schema extends z.ZodType>(schema: Schema, raw: string | undefined): z.infer<Schema> | undefined {

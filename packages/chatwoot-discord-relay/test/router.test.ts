@@ -23,11 +23,20 @@ describe("router conversation state", () => {
     expect(notifications.notification(customer).lines).toEqual([`-# <@${TRIAGE}>`]);
   });
 
-  it("stops waiting when assigned, not open, outside the routed accounts, or at the deadline", () => {
+  it("waits through assignment and status changes until seen includes the handled message", () => {
+    for (const conversation of [{ assignee: { id: 42 } }, { status: "resolved" }, { status: "snoozed" }]) {
+      const notifications = notifier();
+      const customer = message({ createdAt: SECONDS, conversation });
+      expect(() => notifications.notification(customer)).toThrow(RoutingPendingError);
+      customer.conversation.customAttributes = { seen: customer.id, handled: customer.id };
+      expect(notifications.notification(customer).lines).toEqual([
+        "-# Triage bot not called: handled automatically. Ask it here, if needed.",
+      ]);
+    }
+  });
+
+  it("stops waiting outside the routed accounts, at the deadline, or without a timestamp", () => {
     const cases = [
-      message({ createdAt: SECONDS, conversation: { assignee: { id: 42 } } }),
-      message({ createdAt: SECONDS, conversation: { status: "resolved" } }),
-      message({ createdAt: SECONDS, conversation: { status: "snoozed" } }),
       message({ createdAt: SECONDS, account: { id: 1, name: "Globex" } }),
       message({ createdAt: SECONDS - 30 }),
       message(),
