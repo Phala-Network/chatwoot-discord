@@ -230,7 +230,7 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
     /** Messages with an id above `after`, oldest first; without `after`, the latest page. */
     async listMessages(accountId: number, conversationId: number, after?: number): Promise<ChatwootMessage[]> {
       const messages = await listMessages(accountId, conversationId, after === undefined ? {} : { after });
-      if (!messages) throw new ChatwootError(404, "list messages");
+      if (!messages) throw new ChatwootError(404, "list messages", true);
       return messages;
     },
 

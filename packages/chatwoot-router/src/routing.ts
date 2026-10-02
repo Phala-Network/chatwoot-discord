@@ -1,4 +1,4 @@
-// Record decisions and action intent before applying them; publish completion only afterward.
+// Record decisions before applying them; publish completion only afterward.
 // Recheck customer activity and human changes before acting. Replies are attempted at most once.
 
 import ipRegex from "ip-regex";
@@ -85,7 +85,6 @@ const decisionSchema = z.object({
   /** The newest customer message Jev was given: a newer one makes the decision stale. */
   lastMessageId: z.number().int().default(0),
   state: z.enum(["pending", "waiting", "done"]),
-  statusIntent: z.enum(["resolved", "snoozed"]).optional(),
   textAfter: z.number().int().min(0).optional(),
 });
 type Decision = z.infer<typeof decisionSchema>;
@@ -199,23 +198,18 @@ export async function routeConversation(
     await complete(recorded, recorded.kindConfidence >= routing.minConfidence ? recorded.kind : null);
     return;
   }
-  if (conversation.assignee && recorded?.state !== "pending") {
-    // Assigned by a person or an automation rule: nothing to decide, ever.
-    store.set(key, JSON.stringify({ ...(recorded ?? unassignable()), state: "done" }));
+  if (conversation.status !== "open" || conversation.assignee) {
     await complete(recorded);
     return;
   }
   // The customer wrote after the messages Jev was given: a decision not applied yet is made again.
-  const stale =
-    recorded?.state === "pending" && (await wroteSince(chatwoot, accountId, conversationId, recorded.lastMessageId));
+  let activity =
+    recorded?.state === "pending"
+      ? await customerMessages(chatwoot, accountId, conversationId, recorded.lastMessageId, 1)
+      : undefined;
+  const stale = recorded?.state === "pending" && (activity?.messages.length ?? 0) > 0;
   let decision = recorded?.state === "pending" && !stale ? recorded : undefined;
-  let current = conversation;
   if (!decision) {
-    if (conversation.status !== "open") {
-      store.set(key, JSON.stringify(unassignable()));
-      await complete(recorded?.state === "waiting" ? recorded : undefined);
-      return;
-    }
     const after = stale && recorded.messages >= MAX_MESSAGES ? recorded.lastMessageId : (recorded?.textAfter ?? 0);
     const { text, messages, lastMessageId } = await customerText(
       chatwoot,
@@ -230,7 +224,19 @@ export async function routeConversation(
       return;
     }
     if (!text.replaceAll("[REDACTED]", "").trim()) {
-      decision = { ...unassignable(), lastMessageId, textAfter: lastMessageId, state: "waiting" };
+      decision = {
+        owner: null,
+        ownerConfidence: 0,
+        topic: null,
+        topicConfidence: 0,
+        kind: null,
+        kindConfidence: 0,
+        noRequest: false,
+        messages: 0,
+        lastMessageId,
+        textAfter: lastMessageId,
+        state: "waiting",
+      };
       store.set(key, JSON.stringify(decision));
       await complete(decision);
       return;
@@ -240,20 +246,7 @@ export async function routeConversation(
       textAfter: after,
     };
     store.set(key, JSON.stringify(decision));
-    // Asking Jev takes a moment: apply the decision to the conversation as it is now.
-    const now = await chatwoot.getConversation(accountId, conversationId);
-    if (!now) return;
-    current = toRelayConversation(conversationId, now);
-  }
-
-  if (current.contact?.blocked) {
-    await complete();
-    return;
-  }
-  if (current.status !== "open" && current.status !== decision.statusIntent) {
-    store.set(key, JSON.stringify(unassignable()));
-    await complete();
-    return;
+    activity = undefined;
   }
 
   const kinds = routing.kinds?.[String(accountId)] ?? {};
@@ -264,43 +257,30 @@ export async function routeConversation(
   const kind = kindName === null ? undefined : kinds[kindName];
   const owner =
     decision.owner !== null && decision.ownerConfidence >= routing.minConfidence ? owners[decision.owner] : undefined;
-  const final = owner !== undefined || current.assignee != null || decision.messages >= MAX_MESSAGES;
-  const state: RoutingState = final ? "done" : "waiting";
-  const snooze = state === "waiting" && routing.snoozeUnclear && decision.noRequest;
-  const newer =
-    (kind !== undefined || snooze) &&
-    (await wroteSince(chatwoot, accountId, conversationId, Math.max(seen, decision.lastMessageId)));
-  if (kind && newer) return;
-  const withKind = (labels: string[]) =>
-    kindName === null || labels.includes(kindName) ? labels : [...labels, kindName];
-  // Not a ticket someone took meanwhile. A retry finishes what an attempt began: labels and a status
-  // set twice change nothing, and a status already set (its answer lost) is not set again.
-  if (kind?.status && !current.assignee && (current.status === "open" || current.status === kind.status)) {
-    decision = { ...decision, statusIntent: kind.status };
-    store.set(key, JSON.stringify(decision));
-    const labels = withKind(current.labels);
-    if (labels !== current.labels) await chatwoot.setLabels(accountId, conversationId, labels);
-    const replied = await replyOnce(ctx, accountId, conversationId, decision, kind);
-    if (current.status !== kind.status) await chatwoot.setStatus(accountId, conversationId, { status: kind.status });
-    store.set(handledKey(accountId, conversationId), String(decision.lastMessageId));
-    await complete(decision, kindName);
-    store.set(key, JSON.stringify({ ...decision, state: "done" }));
-    log.info("ticket set aside as its kind", {
-      accountId,
-      conversationId,
-      kind: decision.kind,
-      kindConfidence: decision.kindConfidence,
-      replied,
-      status: kind.status,
-    });
+  const final = kind?.status !== undefined || owner !== undefined || decision.messages >= MAX_MESSAGES;
+  const snooze = !final && routing.snoozeUnclear && decision.noRequest;
+  if ((kind !== undefined || snooze) && !activity) {
+    activity = await customerMessages(chatwoot, accountId, conversationId, Math.max(seen, decision.lastMessageId), 1);
+  }
+  const now = await chatwoot.getConversation(accountId, conversationId);
+  if (!now) return;
+  const current = toRelayConversation(conversationId, now);
+  if (current.status !== "open" || current.assignee || current.contact?.blocked) {
+    await complete();
     return;
   }
-  const assign = owner !== undefined && !current.assignee;
+  if (activity?.messages.length) return;
+  const state: RoutingState = final || activity?.complete === false ? "done" : "waiting";
+  const status = activity?.complete === false ? undefined : (kind?.status ?? (snooze ? "snoozed" : undefined));
+  const withKind = (labels: string[]) =>
+    kindName === null || labels.includes(kindName) ? labels : [...labels, kindName];
+  const assign = owner !== undefined && !kind?.status;
   if (assign) await chatwoot.assign(accountId, conversationId, owner.assignee);
 
   // The topic is a label, and a ticket has one besides its kinds: added when Jev is confident and the
   // ticket has no other label yet (an automation rule's label, such as an inbox's, is kept alone).
   const topic =
+    !kind?.status &&
     decision.topic !== null &&
     Object.hasOwn(routing.topics ?? {}, decision.topic) &&
     decision.topicConfidence >= routing.minConfidence &&
@@ -312,12 +292,9 @@ export async function routeConversation(
 
   const replied = kind ? await replyOnce(ctx, accountId, conversationId, decision, kind) : false;
 
-  // Snoozed before the state is recorded, so a retry snoozes it again (a no-op when it is). Not
-  // when the customer has written since the messages Jev was given: that message's run asks again.
-  if (snooze && !newer && current.status !== "snoozed") {
-    decision = { ...decision, statusIntent: "snoozed" };
-    store.set(key, JSON.stringify(decision));
-    await chatwoot.setStatus(accountId, conversationId, { status: "snoozed" });
+  if (status) {
+    await chatwoot.setStatus(accountId, conversationId, { status });
+    if (kind?.status) store.set(handledKey(accountId, conversationId), String(decision.lastMessageId));
   }
   await complete(decision, kindName);
   store.set(key, JSON.stringify({ ...decision, state }));
@@ -335,7 +312,7 @@ export async function routeConversation(
     kindConfidence: decision.kindConfidence,
     replied,
     noRequest: decision.noRequest,
-    snoozed: snooze && !newer,
+    status,
     state,
   });
 }
@@ -367,17 +344,6 @@ async function customerMessages(
   return { messages: found.slice(0, limit), complete: found.length >= limit };
 }
 
-/** Whether the customer wrote after message `messageId`; beyond the pages read, taken as yes. */
-async function wroteSince(
-  chatwoot: ChatwootClient,
-  accountId: number,
-  conversationId: number,
-  messageId: number,
-): Promise<boolean> {
-  const { messages, complete } = await customerMessages(chatwoot, accountId, conversationId, messageId, 1);
-  return messages.length > 0 || !complete;
-}
-
 /**
  * The ticket's subject and first customer messages, with identifiers removed, how many messages
  * that is, and the newest of them.
@@ -397,12 +363,12 @@ async function customerText(
 
 export function sanitize(text: string, identities: Array<string | null | undefined>): string {
   let value = text.normalize("NFKC");
+  for (const pattern of REDACTIONS) value = value.replace(pattern, "[REDACTED]");
   const names = identities.flatMap((identity) => (identity ? [identity, ...identity.split(/\s+/)] : []));
   for (const name of [...new Set(names)].filter((item) => item.length >= 2).sort((a, b) => b.length - a.length)) {
     const escaped = RegExp.escape(name);
     value = value.replace(new RegExp(`(?<!\\w)${escaped}(?!\\w)`, "giu"), "[REDACTED]");
   }
-  for (const pattern of REDACTIONS) value = value.replace(pattern, "[REDACTED]");
   return value.replace(/\s+/g, " ").trim().slice(0, MAX_TEXT);
 }
 
@@ -493,21 +459,6 @@ async function decide(
     messages,
     lastMessageId,
     state: "pending",
-  };
-}
-
-function unassignable(): Decision {
-  return {
-    owner: null,
-    ownerConfidence: 0,
-    topic: null,
-    topicConfidence: 0,
-    kind: null,
-    kindConfidence: 0,
-    noRequest: false,
-    messages: 0,
-    lastMessageId: 0,
-    state: "done",
   };
 }
 

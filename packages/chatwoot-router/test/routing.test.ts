@@ -27,12 +27,14 @@ class MapStore implements RoutingStore {
 }
 
 interface Ticket {
+  name?: string;
   blocked?: boolean;
   assignee?: { id: number; name: string } | null;
   status?: string;
   labels?: string[];
   attributes?: Record<string, unknown>;
   failAttributes?: number;
+  failLabels?: number;
   messages?: Array<{ id: number; content: string; message_type: number; private?: boolean }>;
   /** Snooze requests that fail before Chatwoot answers. */
   failSnooze?: number;
@@ -58,7 +60,7 @@ function world(
     custom_attributes: ticket.attributes ?? {},
     labels: ticket.labels ?? [],
     meta: {
-      sender: { id: 88, name: "Jane Doe", email: "jane@example.com", blocked: ticket.blocked ?? false },
+      sender: { id: 88, name: ticket.name ?? "Jane Doe", email: "jane@example.com", blocked: ticket.blocked ?? false },
       assignee: ticket.assignee ?? null,
     },
     last_non_activity_message: (ticket.messages ?? []).filter((m) => m.message_type <= 1).at(-1) ?? null,
@@ -82,7 +84,14 @@ function world(
       }
       return json({});
     }),
-    on("POST", `${CW}/labels`, () => json({})),
+    on("POST", `${CW}/labels`, (request) => {
+      if ((ticket.failLabels ?? 0) > 0) {
+        ticket.failLabels = (ticket.failLabels ?? 0) - 1;
+        return json({}, { status: 503 });
+      }
+      ticket.labels = JSON.parse(request.body).labels;
+      return json({});
+    }),
     on("POST", `${CW}/custom_attributes`, (request) => {
       if ((ticket.failAttributes ?? 0) > 0) {
         ticket.failAttributes = (ticket.failAttributes ?? 0) - 1;
@@ -160,6 +169,52 @@ afterEach(() => {
 });
 
 describe("routeConversation", () => {
+  it("does not classify an identifier containing the contact's name", async () => {
+    const ticket: Ticket = {
+      name: "Example Customer",
+      messages: [{ id: 1, content: "example@example.com", message_type: 0 }],
+    };
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1] });
+    const store = new MapStore();
+    await routeConversation(context(store), 1, 5);
+    expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toEqual([]);
+    expect(ticket.attributes).toEqual({ routing_seen: 1 });
+    expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("waiting");
+  });
+
+  it.each([false, true])(
+    "resumes after its own snooze, a webhook, and a customer reopening: lost response=%s",
+    async (lost) => {
+      const ticket: Ticket = {
+        messages: [{ id: 1, content: "Hello", message_type: 0 }],
+        loseStatusAnswer: lost ? 1 : 0,
+      };
+      const jev: { owner: [string, number]; topic: [string, number] } = {
+        owner: ["unclear", 1],
+        topic: ["billing", 0],
+      };
+      const { requests } = world(ticket, jev);
+      const store = new MapStore();
+      const ctx = context(store, { ...ROUTING, snoozeUnclear: true });
+      if (lost) await expect(routeConversation(ctx, 1, 5)).rejects.toThrow();
+      else await routeConversation(ctx, 1, 5);
+      const recorded = store.get("route:1:5");
+      expect(JSON.parse(recorded ?? "{}").state).toBe(lost ? "pending" : "waiting");
+      expect(ticket.status).toBe("snoozed");
+      await routeConversation(ctx, 1, 5);
+      expect(store.get("route:1:5")).toBe(recorded);
+      expect(ticket.attributes).toEqual({ routing_seen: 1 });
+      ticket.status = "open";
+      ticket.messages?.push({ id: 2, content: "Where is my invoice?", message_type: 0 });
+      jev.owner = ["cloud", 1];
+      await routeConversation(ctx, 1, 5);
+      expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(2);
+      expect(sent(requests, "POST", `${CW}/assignments`)).toHaveLength(1);
+      expect(sent(requests, "POST", `${CW}/toggle_status`)).toHaveLength(1);
+      expect(ticket.attributes).toEqual({ routing_seen: 2 });
+      expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("done");
+    },
+  );
   it("retains the text window after attachment-only messages while waiting for an owner", async () => {
     const ticket: Ticket = { messages: [1, 2, 3].map((id) => ({ id, content: "", message_type: 0 })) };
     const { requests } = world(ticket, { owner: ["unclear", 1], topic: ["billing", 0] });
@@ -458,7 +513,7 @@ describe("routeConversation", () => {
     expect(JSON.parse(jev?.body ?? "{}").state.ticket).toBe("My invoice is wrong Any news? Any news?");
   });
 
-  it("keeps an assignee or topic label someone set while Jev was answering, and routes no more", async () => {
+  it("leaves a pending decision unchanged while assigned and applies it after unassignment", async () => {
     const store = new MapStore();
     const ticket: Ticket = {};
     const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1] }, 0, () => {
@@ -467,15 +522,20 @@ describe("routeConversation", () => {
     });
 
     await routeConversation(context(store), 1, 5);
+    const recorded = store.get("route:1:5");
+    expect(JSON.parse(recorded ?? "{}").state).toBe("pending");
+    await routeConversation(context(store), 1, 5);
+    expect(store.get("route:1:5")).toBe(recorded);
+    expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
     ticket.assignee = null;
     await routeConversation(context(store), 1, 5);
 
-    expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
+    expect(sent(requests, "POST", `${CW}/assignments`)).toHaveLength(1);
     expect(sent(requests, "POST", `${CW}/labels`)).toEqual([]);
     expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
   });
 
-  it("finalizes a ticket closed by a person during Jev without acting when it reopens", async () => {
+  it("preserves a decision closed by a person during Jev and applies it when reopened", async () => {
     const store = new MapStore();
     const ticket: Ticket = {};
     const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1] }, 0, () => {
@@ -484,11 +544,12 @@ describe("routeConversation", () => {
 
     await routeConversation(context(store), 1, 5);
     expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
+    expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("pending");
     ticket.status = "open";
     await routeConversation(context(store), 1, 5);
 
     expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
-    expect(sent(requests, "POST", `${CW}/assignments`)).toEqual([]);
+    expect(sent(requests, "POST", `${CW}/assignments`)).toHaveLength(1);
     expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("done");
     expect(ticket.attributes).toEqual({ routing_seen: 1 });
   });
@@ -533,16 +594,19 @@ const replies = (requests: Recorded[]) =>
   sent(requests, "POST", `${CW}/messages`).map((request) => JSON.parse(request.body));
 
 describe("routeConversation with kinds", () => {
-  it.each(["resolved", "snoozed"])("finalizes already-%s tickets without an action intent", async (status) => {
-    const ticket: Ticket = { status };
-    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["beg-bounty", 1] });
-    const store = new MapStore();
-    await routeConversation(context(store, KINDS), 1, 5);
-    expect(ticket.attributes).toEqual({ routing_seen: 1 });
-    expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("done");
-    expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toEqual([]);
-    expect(replies(requests)).toEqual([]);
-  });
+  it.each(["resolved", "snoozed", "pending"])(
+    "acknowledges already-%s tickets without recording a decision",
+    async (status) => {
+      const ticket: Ticket = { status };
+      const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["beg-bounty", 1] });
+      const store = new MapStore();
+      await routeConversation(context(store, KINDS), 1, 5);
+      expect(ticket.attributes).toEqual({ routing_seen: 1 });
+      expect(store.get("route:1:5")).toBeUndefined();
+      expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toEqual([]);
+      expect(replies(requests)).toEqual([]);
+    },
+  );
   it.each([
     { kind: "beg-bounty", count: 1 },
     { kind: "startup-program", count: 1 },
@@ -575,44 +639,97 @@ describe("routeConversation with kinds", () => {
     expect(replies(requests)).toHaveLength(1);
   });
 
-  it.each(["resolved", "snoozed"])("does not reply or change a ticket a person made %s during Jev", async (status) => {
-    const ticket: Ticket = {};
-    const { requests } = world(
-      ticket,
-      { owner: ["cloud", 1], topic: ["billing", 1], kind: ["beg-bounty", 1] },
-      0,
-      () => {
-        ticket.status = status;
-      },
-    );
-    const store = new MapStore();
-    await routeConversation(context(store, KINDS), 1, 5);
-    expect(ticket.attributes).toEqual({ routing_seen: 1 });
-    expect(
-      requests
-        .filter((request) => request.method === "POST" && request.url.hostname === "chatwoot.example.com")
-        .map((request) => request.url.pathname),
-    ).toEqual(["/api/v1/accounts/1/conversations/5/custom_attributes"]);
-    expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("done");
-  });
+  it.each(["resolved", "snoozed", "pending"])(
+    "does not reply or change a ticket a person made %s during Jev",
+    async (status) => {
+      const ticket: Ticket = {};
+      const { requests } = world(
+        ticket,
+        { owner: ["cloud", 1], topic: ["billing", 1], kind: ["beg-bounty", 1] },
+        0,
+        () => {
+          ticket.status = status;
+        },
+      );
+      const store = new MapStore();
+      await routeConversation(context(store, KINDS), 1, 5);
+      expect(ticket.attributes).toEqual({ routing_seen: 1 });
+      expect(
+        requests
+          .filter((request) => request.method === "POST" && request.url.hostname === "chatwoot.example.com")
+          .map((request) => request.url.pathname),
+      ).toEqual(["/api/v1/accounts/1/conversations/5/custom_attributes"]);
+      expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("pending");
+    },
+  );
 
-  it("remembers human closure when completion fails and the ticket reopens before retry", async () => {
-    const ticket: Ticket = { failAttributes: 1 };
-    const { requests } = world(
-      ticket,
-      { owner: ["cloud", 1], topic: ["billing", 1], kind: ["beg-bounty", 1] },
-      0,
-      () => {
-        ticket.status = "resolved";
-      },
-    );
-    const ctx = context(new MapStore(), KINDS);
-    await expect(routeConversation(ctx, 1, 5)).rejects.toThrow();
-    ticket.status = "open";
+  it.each(["resolved", "snoozed", "pending", "assigned"])(
+    "does not reply after label 503 then a person makes the ticket %s",
+    async (status) => {
+      const ticket: Ticket = { failLabels: 1 };
+      const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["beg-bounty", 1] });
+      const store = new MapStore();
+      const ctx = context(store, KINDS);
+      await expect(routeConversation(ctx, 1, 5)).rejects.toThrow();
+      const recorded = store.get("route:1:5");
+      if (status === "assigned") ticket.assignee = { id: 9, name: "Doyle" };
+      else ticket.status = status;
+      const before = requests.length;
+      await routeConversation(ctx, 1, 5);
+      expect(store.get("route:1:5")).toBe(recorded);
+      expect(JSON.parse(recorded ?? "{}").state).toBe("pending");
+      expect(replies(requests)).toEqual([]);
+      expect(ticket.attributes).toEqual({ routing_seen: 1 });
+      expect(
+        requests
+          .slice(before)
+          .filter((request) => request.method === "POST")
+          .map((request) => request.url.pathname),
+      ).toEqual(["/api/v1/accounts/1/conversations/5/custom_attributes"]);
+      expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    { kind: "none", retry: false },
+    { kind: "spam", retry: false },
+    { kind: "beg-bounty", retry: false },
+    { kind: "startup-program", retry: false },
+    { kind: "none", retry: true },
+    { kind: "spam", retry: true },
+    { kind: "beg-bounty", retry: true },
+    { kind: "startup-program", retry: true },
+  ])("finalizes $kind without a status action beyond 400 activity messages: retry=$retry", async ({ kind, retry }) => {
+    const ticket: Ticket = {
+      messages: [{ id: 1, content: "Hello", message_type: 0 }],
+      failLabels: retry ? 1 : 0,
+    };
+    const activity = Array.from({ length: 400 }, (_, index) => ({
+      id: index + 2,
+      content: "Activity",
+      message_type: 2,
+    }));
+    const { requests } = world(ticket, { owner: ["unclear", 1], topic: ["billing", 1], kind: [kind, 1] }, 0, () => {
+      if (!retry) ticket.messages?.push(...activity);
+    });
+    const store = new MapStore();
+    const ctx = context(store, { ...KINDS, snoozeUnclear: true });
+    if (retry) {
+      await expect(routeConversation(ctx, 1, 5)).rejects.toThrow();
+      ticket.messages?.push(...activity);
+    }
     await routeConversation(ctx, 1, 5);
-    expect(replies(requests)).toEqual([]);
-    expect(ticket.attributes).toEqual({ routing_seen: 1 });
+    expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("done");
+    expect(ticket.attributes?.routing_seen).toBe(1);
+    expect(ticket.attributes?.routing_kind).toBe(kind === "none" ? undefined : kind);
+    expect(ticket.attributes?.routing_handled).toBe(
+      kind === "beg-bounty" || kind === "startup-program" ? 1 : undefined,
+    );
+    expect(sent(requests, "POST", `${CW}/toggle_status`)).toEqual([]);
+    expect(sent(requests, "POST", `${CW}/labels`).length).toBeGreaterThan(0);
+    await routeConversation(ctx, 1, 5);
     expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
+    expect(replies(requests)).toHaveLength(kind === "beg-bounty" || kind === "startup-program" ? 1 : 0);
   });
   it("replies once to a ticket of a kind Jev is sure of, after assigning it, and not when unsure", async () => {
     const store = new MapStore();
@@ -726,20 +843,22 @@ describe("routeConversation with kinds", () => {
   });
 
   it.each(["spam", "beg-bounty"])(
-    "completes its own %s status retry without another reply or status change",
+    "acknowledges a lost %s status response without changing the pending decision",
     async (kind) => {
       const store = new MapStore();
       const ticket: Ticket = { loseStatusAnswer: 1 };
       const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: [kind, 0.95] });
 
       await expect(routeConversation(context(store, KINDS), 1, 5)).rejects.toThrow();
+      const recorded = store.get("route:1:5");
       await routeConversation(context(store, KINDS), 1, 5);
 
       expect(ticket.status).toBe("resolved");
       expect(sent(requests, "POST", `${CW}/toggle_status`)).toHaveLength(1);
-      expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("done");
+      expect(store.get("route:1:5")).toBe(recorded);
+      expect(JSON.parse(recorded ?? "{}").state).toBe("pending");
       expect(replies(requests)).toHaveLength(kind === "spam" ? 0 : 1);
-      expect(ticket.attributes).toEqual({ routing_seen: 1, routing_handled: 1, routing_kind: kind });
+      expect(ticket.attributes).toEqual({ routing_seen: 1, ...(kind === "spam" ? {} : { routing_handled: 1 }) });
     },
   );
 
@@ -931,6 +1050,9 @@ describe("per-account cutover", () => {
 });
 
 describe("sanitize", () => {
+  it("redacts identifiers before contact names can split them", () => {
+    expect(sanitize("example@example.com", ["Example Customer"])).toBe("[REDACTED]");
+  });
   it("removes identifiers", () => {
     const text =
       "Hi, I'm Alice Chen (alice.chen@example.com, +1 415-555-0199). See https://cloud.example.com/x; " +
