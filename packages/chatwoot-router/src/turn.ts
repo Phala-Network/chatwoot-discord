@@ -8,6 +8,7 @@ import type { Transition } from "./webhook.ts";
 
 const guardSchema = z.object({
   boundary: z.number().optional(),
+  pending: z.boolean().optional(),
   transitionAt: z.number().optional(),
   expected: z.object({ status: z.string(), at: z.number().optional(), after: z.number().optional() }).optional(),
   handoff: z.boolean().default(false),
@@ -40,6 +41,16 @@ export function expectActivity(
     handoff: false,
     failures: 0,
   });
+}
+
+/** Preserve an observed pending departure across retries, without using metadata timestamps. */
+export function observeStatus(store: RoutingStore, accountId: number, conversationId: number, status: string): void {
+  const guard = readGuard(store, accountId, conversationId);
+  const pending = status === "pending";
+  if (guard.pending && !pending) expectActivity(store, accountId, conversationId, { status });
+  if (guard.pending !== pending) {
+    saveGuard(store, accountId, conversationId, { ...readGuard(store, accountId, conversationId), pending });
+  }
 }
 
 export function requestHandoff(store: RoutingStore, accountId: number, conversationId: number): void {

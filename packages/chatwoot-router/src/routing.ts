@@ -12,7 +12,7 @@ import {
 } from "../../../shared/chatwoot/api.ts";
 import { parseJson } from "../../../shared/json.ts";
 import type { Settings } from "./config.ts";
-import { expectActivity, readTurn, requestHandoff } from "./turn.ts";
+import { expectActivity, observeStatus, readTurn, requestHandoff } from "./turn.ts";
 
 /** Jev's answer when no owner fits; also the reserved route name. */
 export const UNCLEAR = "unclear";
@@ -115,14 +115,14 @@ export async function routeConversation(
     const raw = await chatwoot.getConversation(accountId, conversationId);
     if (!raw || raw.inbox_id === undefined || (inboxId !== undefined && raw.inbox_id !== inboxId)) return;
     if (raw.status !== "pending") {
-      // Only an action read observed pending end. updated_at also changes for metadata.
-      if (inboxId !== undefined) expectActivity(store, accountId, conversationId, { status: raw.status ?? "open" });
+      observeStatus(store, accountId, conversationId, raw.status ?? "open");
       return;
     }
     const conversation = toRelayConversation(conversationId, raw);
     if (conversation.contact.blocked || conversation.assignee) return;
     if (raw.meta?.assignee && (raw.meta.assignee_type !== "AgentBot" || raw.meta.assignee.id !== botId)) return;
     if ((await chatwoot.inboxBot(accountId, raw.inbox_id))?.id !== botId) return;
+    observeStatus(store, accountId, conversationId, "pending");
     return { raw, conversation };
   };
   const initial = await snapshot();

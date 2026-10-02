@@ -27,8 +27,9 @@ Chatwoot owns the lifecycle: a conversation is the bot's while pending, and peop
   last boundary needed to reject stale handoff work. A new expected transition requires an activity **after that
   boundary id**, even when the old activity has the same status and second-level timestamp. Repeated delivery of
   the same transition timestamp does not start another expectation. A status webhook supplies a transition time;
-  an action read observing pending end requires a newer activity without inferring a time from `updated_at`.
-  Ordinary non-pending snapshots exit: metadata updates change `updated_at` without creating a status activity.
+  a read observing pending end requires a newer activity without inferring a time from `updated_at`. The last
+  pending observation survives retries, so a retry confirming resolution after a lost response retains that boundary.
+  Other non-pending snapshots exit: metadata updates change `updated_at` without creating a status activity.
   An expected activity not yet present retries normally; an incomplete read or a deleted known boundary hands off.
   Permanently missing activity uses the same three-attempt limit. A new boundary clears the previous turn's failure
   count and handoff. Chatwoot exposes no turn API: a lost webhook plus permanently removed, never-observed activity

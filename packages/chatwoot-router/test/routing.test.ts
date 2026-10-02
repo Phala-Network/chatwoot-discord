@@ -545,6 +545,36 @@ describe("native bot turns", () => {
     expect(sent(mock.requests, "POST", JEV)).toHaveLength(1);
   });
 
+  it("remembers a resolved retry after a lost response until its delayed activity arrives", async () => {
+    const mock = world(
+      {
+        lose: { toggle_status: 1 },
+        messages: [incoming(1, "Old spam")],
+        during: (operation) => {
+          if (operation === "toggle_status") mock.ticket.messages?.pop(); // Activity job has not run yet.
+        },
+      },
+      { owner: ["unclear", 1], kind: ["spam", 1] },
+    );
+    const ctx = context(new MemoryStore(), KINDS);
+    await expect(routeConversation(ctx, 1, 5)).rejects.toThrow("503");
+    expect(mock.ticket.status).toBe("resolved");
+    await routeConversation(ctx, 1, 5); // Retry confirms the turn ended despite the lost response.
+    delete mock.ticket.during;
+    mock.ticket.status = "pending";
+    mock.ticket.messages?.push(incoming(2, "New request"));
+    await expect(routeConversation(ctx, 1, 5)).rejects.toThrow("not available yet");
+    expect(sent(mock.requests, "POST", JEV)).toHaveLength(1);
+    expect(mock.ticket.status).toBe("pending");
+    mock.ticket.messages?.push(activity(3), incoming(4, "Follow-up after resolution activity"));
+    mock.answers.kind = ["none", 1];
+    await routeConversation(ctx, 1, 5);
+    expect(JSON.parse(sent(mock.requests, "POST", JEV).at(-1)?.body ?? "{}").state.ticket).toBe(
+      "Follow-up after resolution activity",
+    );
+    expect(mock.ticket.status).toBe("open");
+  });
+
   it.each(["initial snapshot", "fresh action read"])(
     "uses the existing resolution boundary after a metadata-only update in an %s",
     async (stage) => {
