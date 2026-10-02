@@ -171,7 +171,10 @@ parameter to `MessageFinder`, which excludes private messages and activity lines
 OpenAPI schema omits the parameter, so the shared typed client extends its generated query type; the relay
 does not enable it. Customer messages are looked for among the next 300 public messages, including agent replies.
 A newer customer message found in that scan, the latest-message page, or the job's recorded customer watermark
-makes the decision stale. If the read window is exhausted and none of those sources confirms a newer message,
+makes the decision stale only while it has used fewer than three customer messages in its input window.
+Once all three inputs have been used, later messages cannot change that decision: its remaining actions run,
+and later messages are acknowledged without being marked handled by it. If the read window is exhausted
+and none of those sources confirms a newer message,
 the decision is applied without any status action (neither unclear-ticket snoozing nor a kind's status),
 finalized, and left for a person; Jev is not asked again. A ticket assigned
 before its turn (by a person or a Chatwoot automation rule) is left alone unless its recorded decision assigns
@@ -191,9 +194,10 @@ identifiers likewise advance `routing_seen`, but wait for text in a later custom
 a kind, or snoozing. The text window starts after those empty messages.
 
 Before any kind action, the router checks for customer messages arriving during the decision, using the same
-bounded freshness check as unclear-ticket snoozing. A stale decision stays pending for the next webhook or
-sweep to decide again, not finalized or applied. If all three messages in that decision were consumed or the
-bounded scan cannot reach the newer message already confirmed by the latest page or job watermark, the next
+bounded freshness check as unclear-ticket snoozing, within the three-customer-message input window.
+An eligible stale decision stays pending and defers its existing queue job rather than completing it, so its
+retry does not depend on another webhook or an unassigned-conversation sweep. If the bounded scan cannot
+reach the newer message already confirmed by the latest page or job watermark, the next
 text window starts at that newest known customer message (or after the previous inputs when only the scan
 found new messages). As with snoozing, a message arriving
 between the final check and an action cannot be excluded atomically by Chatwoot's API.

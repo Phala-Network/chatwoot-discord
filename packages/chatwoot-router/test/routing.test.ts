@@ -791,7 +791,6 @@ describe("routeConversation with kinds", () => {
   it.each([
     { kind: "beg-bounty", count: 1 },
     { kind: "startup-program", count: 1 },
-    { kind: "beg-bounty", count: 3 },
   ])("redecides a stale $kind kind after $count messages before any action", async ({ kind, count }) => {
     const ticket: Ticket = {
       messages: Array.from({ length: count }, (_, index) => ({
@@ -806,7 +805,7 @@ describe("routeConversation with kinds", () => {
     });
     const store = new MapStore();
     const ctx = context(store, KINDS);
-    await routeConversation(ctx, 1, 5);
+    expect(await routeConversation(ctx, 1, 5)).toBe("defer");
     expect(
       requests.filter((request) => request.method === "POST" && request.url.hostname === "chatwoot.example.com"),
     ).toEqual([]);
@@ -819,6 +818,34 @@ describe("routeConversation with kinds", () => {
     expect(ticket.attributes).toEqual({ routing_seen: count + 1, routing_handled: count + 1, routing_kind: kind });
     expect(replies(requests)).toHaveLength(1);
   });
+
+  it.each(["spam", "beg-bounty", "startup-program"])(
+    "retries a full %s window without redeciding on later messages",
+    async (kind) => {
+      const ticket: Ticket = {
+        messages: [1, 2, 3].map((id) => ({ id, message_type: 0, content: `Request ${id}` })),
+        failLabels: 1,
+      };
+      const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: [kind, 1] });
+      const store = new MapStore();
+      const ctx = context(store, KINDS);
+      await expect(routeConversation(ctx, 1, 5)).rejects.toThrow();
+      ticket.messages?.push(
+        ...Array.from({ length: 400 }, (_, index) => ({ id: index + 4, message_type: 1, content: "Agent reply" })),
+        { id: 404, message_type: 0, content: "Later request" },
+      );
+      await routeConversation(ctx, 1, 5);
+      expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
+      expect(JSON.parse(store.get("route:1:5") ?? "{}")).toMatchObject({
+        state: "done",
+        messages: 3,
+        lastMessageId: 3,
+      });
+      expect(ticket.attributes).toEqual({ routing_seen: 404, routing_handled: 3, routing_kind: kind });
+      expect(replies(requests)).toHaveLength(kind === "spam" ? 0 : 1);
+      expect(ticket.status ?? "open").toBe(kind === "startup-program" ? "open" : "resolved");
+    },
+  );
 
   it.each(["resolved", "snoozed", "pending"])(
     "does not reply or change a ticket a person made %s during Jev",
@@ -1056,19 +1083,18 @@ describe("routeConversation with kinds", () => {
 });
 
 describe("coordination attributes", () => {
-  it("redecides when the latest customer message is newer than the first three inputs", async () => {
+  it("applies the first three inputs and acknowledges later messages without marking them handled", async () => {
     const ticket: Ticket = {
       messages: [1, 2, 3, 4, 5].map((id) => ({ id, message_type: 0, content: "Customer question." })),
     };
     const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["startup-program", 1] });
     const ctx = context(new MapStore(), KINDS);
     await routeConversation(ctx, 1, 5);
-    expect(ticket.attributes).toBeUndefined();
-    expect(replies(requests)).toEqual([]);
+    expect(ticket.attributes).toEqual({ routing_seen: 5, routing_handled: 3, routing_kind: "startup-program" });
     await routeConversation(ctx, 1, 5);
-    expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(2);
+    expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
     expect(replies(requests)).toHaveLength(1);
-    expect(ticket.attributes).toEqual({ routing_seen: 5, routing_handled: 5, routing_kind: "startup-program" });
+    expect(ticket.attributes).toEqual({ routing_seen: 5, routing_handled: 3, routing_kind: "startup-program" });
   });
 
   it.each(["assigned", "resolved", "snoozed", "cutover"])(

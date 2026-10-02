@@ -14,8 +14,10 @@
 ### Fixed
 
 - Recheck customer activity before any kind action, including evidence from the latest messages and the job's
-  customer watermark. Stale decisions are made again with the new text in the window, even beyond the bounded
-  scan. Only an incomplete read with no confirmed newer message permits finalizing without a status action.
+  customer watermark, while the decision has used fewer than three customer inputs. A full window stays valid
+  despite later messages, so assigned retries finish their actions. Eligible stale partial-window decisions defer
+  their existing queue job instead of losing pending work. New text remains included even beyond the bounded
+  scan; only an incomplete read with no confirmed newer message permits finalizing without a status action.
 - Filter private messages and activity lines out of router message reads using Chatwoot v4.18's
   `filter_internal_messages` parameter; keep the bounded scan for public agent replies and leave relay reads unfiltered.
 - Act only when a fresh read immediately before actions shows an open ticket that is unassigned or assigned to

@@ -162,7 +162,7 @@ export async function routeConversation(
   accountId: number,
   conversationId: number,
   messageId = 0,
-): Promise<void> {
+): Promise<"defer" | undefined> {
   const { settings, store, chatwoot } = ctx;
   const routing = settings.config.routing;
   const owners = routing?.accounts[String(accountId)];
@@ -210,17 +210,19 @@ export async function routeConversation(
     await complete(recorded);
     return;
   }
-  // A confirmed newer customer message makes a pending or waiting decision stale.
-  let activity = recorded
-    ? await customerMessages(chatwoot, accountId, conversationId, recorded.lastMessageId, 1)
-    : undefined;
-  const stale = recorded && (seen > recorded.lastMessageId || (activity?.messages.length ?? 0) > 0);
+  // Only customer messages within the decision's input window can make it stale.
+  let activity =
+    recorded && recorded.messages < MAX_MESSAGES
+      ? await customerMessages(chatwoot, accountId, conversationId, recorded.lastMessageId, 1)
+      : undefined;
+  const stale =
+    recorded &&
+    recorded.messages < MAX_MESSAGES &&
+    (seen > recorded.lastMessageId || (activity?.messages.length ?? 0) > 0);
   let decision = recorded?.state === "pending" && !stale ? recorded : undefined;
   if (!decision) {
     const after =
-      stale && (recorded.messages >= MAX_MESSAGES || activity?.complete === false)
-        ? Math.max(recorded.lastMessageId, seen - 1)
-        : (recorded?.textAfter ?? 0);
+      stale && activity?.complete === false ? Math.max(recorded.lastMessageId, seen - 1) : (recorded?.textAfter ?? 0);
     const { text, messages, lastMessageId } = await customerText(
       chatwoot,
       accountId,
@@ -267,7 +269,7 @@ export async function routeConversation(
   const assignee = assigneeFor(decision);
   const final = kind?.status !== undefined || assignee !== undefined || decision.messages >= MAX_MESSAGES;
   const snooze = !final && routing.snoozeUnclear && decision.noRequest;
-  if ((kind !== undefined || snooze) && !activity) {
+  if (decision.messages < MAX_MESSAGES && (kind !== undefined || snooze) && !activity) {
     activity = await customerMessages(chatwoot, accountId, conversationId, decision.lastMessageId, 1);
   }
   const now = await chatwoot.getConversation(accountId, conversationId);
@@ -277,7 +279,7 @@ export async function routeConversation(
     await complete();
     return;
   }
-  if (seen > decision.lastMessageId || activity?.messages.length) return;
+  if (decision.messages < MAX_MESSAGES && (seen > decision.lastMessageId || activity?.messages.length)) return "defer";
   const state: RoutingState = final || activity?.complete === false ? "done" : "waiting";
   const status = activity?.complete === false ? undefined : (kind?.status ?? (snooze ? "snoozed" : undefined));
   const withKind = (labels: string[]) =>

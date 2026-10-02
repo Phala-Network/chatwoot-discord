@@ -67,15 +67,21 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-function world(failAttributes = 0, state: { status?: string; assignee?: { id: number } } = {}, repeatInSweep = false) {
+function world(
+  failAttributes = 0,
+  state: { status?: string; assignee?: { id: number } } = {},
+  repeatInSweep = false,
+  whileJevAnswers?: () => void,
+) {
   const attributes: Record<string, unknown> = { unrelated: "kept" };
   const messages = [{ id: 501, message_type: 0, content: "Where is my invoice?" }];
   const labels: string[] = [];
   const answers = { owner: { choice: "cloud", confidence: 1 }, kind: { choice: "none", confidence: 1 } };
-  const failures = { account2: false };
+  const failures = { account2: false, labels: 0 };
   return {
     attributes,
     messages,
+    labels,
     state,
     answers,
     failures,
@@ -121,6 +127,10 @@ function world(failAttributes = 0, state: { status?: string; assignee?: { id: nu
         return json({});
       }),
       on("POST", new RegExp(`${base}/\\d+/labels$`), (request) => {
+        if (failures.labels > 0) {
+          failures.labels -= 1;
+          return json({}, { status: 503 });
+        }
         labels.splice(0, labels.length, ...JSON.parse(request.body).labels);
         return json({});
       }),
@@ -149,7 +159,10 @@ function world(failAttributes = 0, state: { status?: string; assignee?: { id: nu
         Object.assign(attributes, body.custom_attributes);
         return json({});
       }),
-      on("POST", "api.typesafe.ai/v1/systemone", () => json({ answers })),
+      on("POST", "api.typesafe.ai/v1/systemone", () => {
+        whileJevAnswers?.();
+        return json({ answers });
+      }),
     ),
   };
 }
@@ -229,6 +242,81 @@ function sweepingWorld(options: { failSecondPage?: boolean; externalClose?: bool
 }
 
 describe("router worker", () => {
+  it.each([
+    { scenario: "a full window despite later messages", duringDecision: false, arrivals: 4 },
+    { scenario: "a deferred partial window without another webhook", duringDecision: true, arrivals: 1 },
+  ])("finishes an assigned retry with $scenario", async ({ duringDecision, arrivals }) => {
+    let decisions = 0;
+    const mock = world(0, {}, false, () => {
+      decisions += 1;
+      if (duringDecision && decisions === 2) {
+        mock.messages.push({ id: 3, message_type: 0, content: "Request 3" });
+      }
+    });
+    mock.messages.splice(0, mock.messages.length, { id: 1, message_type: 0, content: "Request 1" });
+    mock.answers.kind.choice = "startup-program";
+    mock.failures.labels = 1;
+    await webhook({ ...incoming(11), id: 1 });
+    await drain();
+    expect(mock.state.assignee).toEqual({ id: 6 });
+    expect(mock.labels).toEqual([]);
+    const notBefore = await runInDurableObject(stub(), (_instance, state) => {
+      const job = state.storage.sql
+        .exec<{ attempts: number; not_before: number }>(
+          "SELECT attempts, not_before FROM jobs WHERE key = ?",
+          "route:1:11",
+        )
+        .one();
+      expect(job.attempts).toBe(1);
+      expect(job.not_before).toBeGreaterThan(Date.now());
+      expect(
+        JSON.parse(
+          state.storage.sql.exec<{ value: string }>("SELECT value FROM cache WHERE key = ?", "route:1:11").one().value,
+        ),
+      ).toMatchObject({ state: "pending", messages: 1 });
+      expect(state.storage.sql.exec("SELECT value FROM cache WHERE key = ?", "completion:1:11").toArray()).toEqual([]);
+      return job.not_before;
+    });
+    for (let messageId = 2; messageId <= arrivals + 1; messageId += 1) {
+      mock.messages.push({ id: messageId, message_type: 0, content: `Request ${messageId}` });
+      await webhook({ ...incoming(11), id: messageId });
+    }
+    await runInDurableObject(stub(), async (_instance, state) => {
+      expect(
+        state.storage.sql.exec<{ not_before: number }>("SELECT not_before FROM jobs WHERE key = ?", "route:1:11").one()
+          .not_before,
+      ).toBe(notBefore);
+      state.storage.sql.exec("UPDATE jobs SET not_before = 0 WHERE key = ?", "route:1:11");
+      await state.storage.setAlarm(Date.now());
+    });
+    await drain();
+    await stub().requestSweep();
+    await drain();
+    expect(mock.labels).toEqual(["startup-program"]);
+    expect(mock.attributes).toEqual({
+      unrelated: "kept",
+      routing_seen: duringDecision ? 3 : 5,
+      routing_handled: 3,
+      routing_kind: "startup-program",
+    });
+    expect(decisions).toBe(duringDecision ? 3 : 2);
+    const asked = mock.requests.filter((request) => request.url.hostname === "api.typesafe.ai");
+    expect(JSON.parse(asked.at(-1)?.body ?? "{}").state.ticket).toBe("Request 1 Request 2 Request 3");
+    for (const [action, count] of Object.entries({ assignments: 1, labels: 2, messages: 1, custom_attributes: 1 })) {
+      expect(
+        mock.requests.filter((request) => request.method === "POST" && request.url.pathname.endsWith(`/${action}`)),
+      ).toHaveLength(count);
+    }
+    await runInDurableObject(stub(), (_instance, state) => {
+      expect(state.storage.sql.exec("SELECT key FROM jobs").toArray()).toEqual([]);
+      expect(
+        JSON.parse(
+          state.storage.sql.exec<{ value: string }>("SELECT value FROM cache WHERE key = ?", "route:1:11").one().value,
+        ),
+      ).toMatchObject({ state: "done", messages: 3, lastMessageId: 3 });
+    });
+  });
+
   it("does not repeat routing actions or replies when a sweep lists a conversation twice", async () => {
     const mock = world(0, {}, true);
     mock.answers.owner.choice = "unclear";

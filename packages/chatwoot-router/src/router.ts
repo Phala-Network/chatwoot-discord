@@ -73,12 +73,17 @@ export class Router extends DurableObject<Env> {
       try {
         const ctx = { settings, chatwoot, store: this.store, fetch: budget.fetch };
         if (payload.type === "route") {
-          await routeConversation(
+          const result = await routeConversation(
             ctx,
             payload.accountId,
             payload.conversationId,
             Number(this.store.get(customerKey(payload.accountId, payload.conversationId)) ?? 0),
           );
+          if (result === "defer") {
+            this.store.deferJob(job);
+            yielded = true;
+            break;
+          }
         } else if (routesAccount(settings, payload.accountId)) {
           if (payload.type === "repair") await writeCompletion(ctx, payload.accountId, payload.conversationId);
           else await this.sweep(settings, chatwoot, payload.accountId);
