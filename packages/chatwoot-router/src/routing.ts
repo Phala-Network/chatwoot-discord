@@ -31,7 +31,6 @@ const REQUEST_CRITERIA = {
 /** Jev's answer when no kind fits; also a reserved kind name. */
 const NO_KIND = "none";
 const NO_KIND_CRITERION = "None of the other kinds.";
-const JEV_URL = "https://api.typesafe.ai/v1/systemone";
 const MAX_MESSAGES = 3;
 const MAX_TEXT = 1600;
 
@@ -299,7 +298,7 @@ async function decide(ctx: RoutingContext, owners: Owners, kinds: Kinds | undefi
 
   // A redirect is an error, never followed: it could carry the key to another host.
   const response = await ctx.fetch(
-    new Request(JEV_URL, {
+    new Request(routing.endpoint, {
       method: "POST",
       redirect: "manual",
       headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },

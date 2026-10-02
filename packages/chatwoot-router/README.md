@@ -164,6 +164,7 @@ no unpublished shared package needs installing.
 | --- | --- | --- | --- |
 | `chatwoot.baseUrl` | HTTP(S) URL | required | Final Chatwoot API URL; redirects are refused. |
 | `subrequestBudget` | integer 45–1000 | `45` | Per-alarm outbound budget; reserve 45 for a bounded turn read and all actions. |
+| `routing.endpoint` | HTTPS URL | `https://api.typesafe.ai/v1/systemone` | Full Jev API endpoint used for classification requests; redirects are refused. |
 | `routing.model` | non-empty string | `jev-1.13.0` | TypeSafe model. |
 | `routing.minConfidence` | number 0.5–1 | `0.7` | Probability an answer needs before it is applied. |
 | `routing.botIds` | object: account id → positive safe integer | required | Brand bot id for every routed account, and no others. |

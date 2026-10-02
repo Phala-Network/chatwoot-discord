@@ -17,6 +17,19 @@ const secrets = {
 };
 
 describe("router configuration", () => {
+  it("defaults the Jev endpoint to TypeSafe", () => {
+    expect(parseSettings(config, secrets).config.routing.endpoint).toBe("https://api.typesafe.ai/v1/systemone");
+  });
+
+  it.each(["http://jev.example.com/v1/systemone", "ftp://jev.example.com/v1/systemone", "not a URL"])(
+    "rejects an invalid or non-HTTPS Jev endpoint %s",
+    (endpoint) => {
+      expect(() => parseSettings({ ...config, routing: { ...config.routing, endpoint } }, secrets)).toThrow(
+        /routing.endpoint/,
+      );
+    },
+  );
+
   it("rejects configurable coordination names", () => {
     expect(configSchema.safeParse({ ...config, attributes: { seen: "custom" } }).success).toBe(false);
   });

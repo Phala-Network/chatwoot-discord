@@ -75,7 +75,7 @@ export interface Answers {
   kind?: [string, number];
   request?: [string, number];
 }
-export function world(ticket: Ticket = {}, answers: Answers = { owner: ["cloud", 1] }) {
+export function world(ticket: Ticket = {}, answers: Answers = { owner: ["cloud", 1] }, endpoint = JEV) {
   ticket.status ??= "pending";
   if (ticket.assigneeType === undefined) ticket.assigneeType = "AgentBot";
   if (ticket.assignee === undefined) ticket.assignee = { id: 1 };
@@ -159,7 +159,7 @@ export function world(ticket: Ticket = {}, answers: Answers = { owner: ["cloud",
           sender: { type: "agent_bot" },
         });
       }),
-      on("POST", JEV, () => {
+      on("POST", endpoint, () => {
         if (fail("jev")) return json({}, { status: 503 });
         ticket.during?.("jev");
         return json({

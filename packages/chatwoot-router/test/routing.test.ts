@@ -4,7 +4,19 @@ import { chatwootClient } from "../../../shared/chatwoot/api.ts";
 import { ROUTE_BUDGET } from "../src/router.ts";
 import { routeConversation, sanitize } from "../src/routing.ts";
 import { expectActivity, recordFailure, requestHandoff } from "../src/turn.ts";
-import { activity, CW, context, incoming, JEV, KINDS, MemoryStore, sent, type Ticket, world } from "./world.ts";
+import {
+  activity,
+  CW,
+  context,
+  incoming,
+  JEV,
+  KINDS,
+  MemoryStore,
+  ROUTING,
+  sent,
+  type Ticket,
+  world,
+} from "./world.ts";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -37,6 +49,18 @@ describe("sanitize", () => {
 });
 
 describe("native bot turns", () => {
+  it("calls the configured Jev endpoint and applies its routing decision", async () => {
+    const endpoint = "jev.example.com/custom/systemone";
+    const mock = world({}, { owner: ["sales", 1] }, endpoint);
+    const ctx = context(new MemoryStore(), { ...ROUTING, endpoint: `https://${endpoint}` });
+    await routeConversation(ctx, 1, 5);
+    expect(sent(mock.requests, "POST", endpoint)).toHaveLength(1);
+    expect(sent(mock.requests, "POST", endpoint)[0]?.url.href).toBe(`https://${endpoint}`);
+    expect(sent(mock.requests, "POST", JEV)).toEqual([]);
+    expect(mock.ticket.assignee?.id).toBe(7);
+    expect(mock.ticket.status).toBe("open");
+  });
+
   it.each(["startup", "bounty", "spam", "newsletter"])(
     "applies %s in order as the bot and stops after the ending action",
     async (kind) => {

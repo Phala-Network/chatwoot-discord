@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Configurable `routing.endpoint` for Jev requests. Requires an HTTPS URL and defaults to
+  `https://api.typesafe.ai/v1/systemone`.
+
 ### Changed
 
 - Run as each routed account's native agent bot. Route pending conversations in its linked inboxes; use status
