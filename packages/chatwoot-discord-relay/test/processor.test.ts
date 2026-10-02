@@ -854,4 +854,25 @@ describe("agent bot lifecycle", () => {
       expect(world.replies().find((text) => text.startsWith("Automatic"))).not.toContain(`<@${TRIAGE}>`);
     });
   });
+
+  it.each(["arrives", "fails"])("rechecks an answer that %s across alarms before the first triage decision", async (change) => {
+    const world = new World();
+    const reply = { id: 302, content: "The answer", message_type: 1, status: "sent" };
+    world.messages = [
+      { id: 1, content: "A customer request", message_type: 0 },
+      ...Array.from({ length: 300 }, (_, index) => ({ id: index + 2, content: "Activity", message_type: 2 })),
+      ...(change === "fails" ? [reply] : []),
+    ];
+    await withStore(async (store) => {
+      const settings = testSettings();
+      expect(await processConversation(context(store, settings, minimumBudget(4)), 3, 12)).toBe("yield");
+      expect(world.posts()).toEqual([]);
+      expect(store.get("triage:3:1")).toBeUndefined();
+      if (change === "arrives") world.messages.push(reply);
+      else reply.status = "failed";
+      await sync(store, settings);
+      const customer = world.replies().find((text) => text.startsWith("A customer request"));
+      expect(customer?.includes(`<@${TRIAGE}>`)).toBe(change === "fails");
+    });
+  });
 });

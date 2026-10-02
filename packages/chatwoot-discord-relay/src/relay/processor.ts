@@ -147,7 +147,9 @@ export async function processConversation(
           live &&
           !message.content_attributes?.email?.auto_reply
         ) {
-          const reply = await answeringReply(context, accountId, conversationId, message.id);
+          const reply =
+            page.some((later) => later.id > message.id && isAnsweringReply(later)) ||
+            (await answeringReply(context, accountId, conversationId, message.id));
           if (reply === "yield") return "yield";
           answered = reply;
         }
@@ -204,7 +206,7 @@ export async function processConversation(
   return "done";
 }
 
-/** Scan every later page, resuming under the existing job budget instead of guessing from the latest message. */
+/** Persist only continuation: re-read the final/answer page after yielding, before Notifier decides once. */
 async function answeringReply(
   { store, chatwoot, budget }: ProcessorContext,
   accountId: number,
@@ -212,20 +214,12 @@ async function answeringReply(
   messageId: number,
 ): Promise<boolean | "yield"> {
   const key = `answer-scan:${accountId}:${conversationId}:${messageId}`;
-  const saved = store.get(key);
-  if (saved === "true" || saved === "false") return saved === "true";
-  let after = Number(saved ?? messageId);
+  let after = Number(store.get(key) ?? messageId);
   for (;;) {
     if (budget.remaining < 2) return "yield";
     const messages = await chatwoot.listMessages(accountId, conversationId, { after });
-    if (messages.some(isAnsweringReply)) {
-      store.set(key, "true");
-      return true;
-    }
-    if (messages.length < MESSAGE_PAGE_SIZE) {
-      store.set(key, "false");
-      return false;
-    }
+    if (messages.some(isAnsweringReply)) return true;
+    if (messages.length < MESSAGE_PAGE_SIZE) return false;
     const next = messages.at(-1)?.id;
     if (next === undefined || next <= after) throw new Error("Chatwoot message page did not advance");
     after = next;
