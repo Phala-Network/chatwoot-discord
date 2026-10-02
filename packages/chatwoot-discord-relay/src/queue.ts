@@ -16,11 +16,11 @@ import {
   Routes,
 } from "discord-api-types/v10";
 import { z } from "zod";
-import { type ChatwootClient, CONVERSATIONS_PER_PAGE } from "../../../shared/chatwoot/api.ts";
+import { type ChatwootClient, CONVERSATIONS_PER_PAGE, personAssignee } from "../../../shared/chatwoot/api.ts";
 import { log } from "../../../shared/log.ts";
 import { relaysInbox, type Settings } from "./config.ts";
 import type { DiscordRest } from "./discord/rest.ts";
-import { QUEUE_MESSAGES, QUEUE_PAGES, SNOOZED_PAGES } from "./queue-limits.ts";
+import { PENDING_PAGES, QUEUE_MESSAGES, QUEUE_PAGES, SNOOZED_PAGES } from "./queue-limits.ts";
 import { clip, conversationUrl, defused } from "./relay/format.ts";
 
 const ESCALATION_HOURS = [1, 2, 4, 8, 16];
@@ -55,6 +55,7 @@ interface Ticket {
   assignee: { id: number; name: string } | null;
   escalate: boolean;
   snoozed: boolean;
+  pending: boolean;
 }
 
 interface Chunk {
@@ -94,6 +95,7 @@ export async function postQueue(
   const reads = [
     { status: "open", pages: QUEUE_PAGES },
     { status: "snoozed", pages: SNOOZED_PAGES },
+    { status: "pending", pages: PENDING_PAGES },
   ] as const;
   for (const account of settings.config.accounts) {
     for (const { status, pages } of reads) {
@@ -102,12 +104,12 @@ export async function postQueue(
         for (const conversation of conversations) {
           const conversationId = conversation.id;
           if (conversationId === undefined || !relaysInbox(account, conversation.inbox_id)) continue;
-          const assignee = conversation.meta?.assignee;
+          const assignee = personAssignee(conversation);
           const waitingSince = conversation.waiting_since ?? 0;
-          if (assignee && !waitingSince) continue;
+          if (status !== "pending" && assignee && !waitingSince) continue;
           const snoozed = status === "snoozed";
           let escalate = false;
-          if (!snoozed && !assignee && waitingSince && (queue.escalationRoleId ?? queue.escalationUserId)) {
+          if (status === "open" && !assignee && waitingSince && (queue.escalationRoleId ?? queue.escalationUserId)) {
             const key = `${account.id}:${conversationId}`;
             const level = escalationLevel((nowSeconds - waitingSince) / 3600);
             const reached = previous[key]?.since === waitingSince ? previous[key].level : 0;
@@ -122,6 +124,7 @@ export async function postQueue(
             assignee: assignee?.id ? { id: assignee.id, name: assignee.name ?? "" } : null,
             escalate,
             snoozed,
+            pending: status === "pending",
           });
         }
         if (conversations.length < CONVERSATIONS_PER_PAGE) break;
@@ -131,7 +134,7 @@ export async function postQueue(
   }
 
   const wait = (ticket: Ticket) => ticket.waitingSince || Number.POSITIVE_INFINITY;
-  tickets.sort((a, b) => Number(a.snoozed) - Number(b.snoozed) || wait(a) - wait(b));
+  tickets.sort((a, b) => Number(a.snoozed || a.pending) - Number(b.snoozed || b.pending) || wait(a) - wait(b));
   const chunks = tickets.length > 0 ? messages(ctx, tickets, nowSeconds, unread) : [];
   // A nonce per hour and part: Discord creates no second message for a retried request it took.
   const nonce = (index: number) => `queue-${Math.floor(nowSeconds / 3600)}-${index}`;
@@ -183,7 +186,7 @@ function messages(ctx: QueueContext, tickets: Ticket[], nowSeconds: number, unre
     } else {
       break;
     }
-    const linked = ticket.snoozed ? undefined : ctx.settings.linkedAgent(ticket.assignee?.id);
+    const linked = ticket.snoozed || ticket.pending ? undefined : ctx.settings.linkedAgent(ticket.assignee?.id);
     if (linked) chunks.at(-1)?.users.add(linked.discordUserId);
     shown += 1;
   }
@@ -204,13 +207,13 @@ function line(ctx: QueueContext, ticket: Ticket, nowSeconds: number): string {
   const url = conversationUrl(settings.frontendUrl, ticket.accountId, ticket.conversationId);
   const post = threadId ? `<#${threadId}>` : `[${ticket.accountName} #${ticket.conversationId}](<${url}>)`;
   const waiting = ticket.waitingSince ? `waiting ${duration(nowSeconds - ticket.waitingSince)}` : "replied";
-  const linked = ticket.snoozed ? undefined : settings.linkedAgent(ticket.assignee?.id);
+  const linked = ticket.snoozed || ticket.pending ? undefined : settings.linkedAgent(ticket.assignee?.id);
   const owner = linked
     ? `<@${linked.discordUserId}>`
     : ticket.assignee
       ? defused(clip(ticket.assignee.name, NAME_LIMIT))
       : "❔ Unassigned";
-  const mark = ticket.escalate ? "🔔 " : ticket.snoozed ? "💤 " : "";
+  const mark = ticket.escalate ? "🔔 " : ticket.snoozed ? "💤 " : ticket.pending ? "🤖 " : "";
   return `${mark}${post} | ${waiting} | ${owner}`;
 }
 

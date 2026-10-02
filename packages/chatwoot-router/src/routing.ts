@@ -157,7 +157,7 @@ export async function routeConversation(
   // A fresh read before every effect. A new input/boundary is work for a new queue run.
   const fresh = async () => {
     const current = await chatwoot.getConversation(accountId, conversationId);
-    if (!current || current.status !== "pending" || current.inbox_id !== raw.inbox_id) return;
+    if (current?.status !== "pending" || current.inbox_id !== raw.inbox_id) return;
     const conversation = toRelayConversation(conversationId, current);
     if (conversation.contact.blocked || conversation.assignee) return;
     if (current.meta?.assignee && (current.meta.assignee_type !== "AgentBot" || current.meta.assignee.id !== linked.id))
@@ -207,12 +207,17 @@ export async function routeConversation(
   const replyKey = `reply:${accountId}:${conversationId}`;
   if (kind?.cannedResponse && store.get(replyKey) === undefined) {
     const content = await chatwoot.cannedResponse(accountId, kind.cannedResponse);
-    if (content === undefined) return handoff();
+    if (!content?.trim()) return handoff();
     current = await fresh();
     if (current === "defer" || !current) return current;
     if (current.handoff) return handoff();
     store.set(replyKey, "attempted");
     await bot.createMessage(accountId, conversationId, { content, private: false, files: [] });
+  }
+  if (assignee !== undefined && !kind?.status) {
+    // AssignmentService silently assigns nobody for a user outside this account.
+    const agents = await chatwoot.listAgents(accountId);
+    if (!agents.some((agent) => agent.id === assignee)) return handoff();
   }
   current = await fresh();
   if (current === "defer" || !current) return current;

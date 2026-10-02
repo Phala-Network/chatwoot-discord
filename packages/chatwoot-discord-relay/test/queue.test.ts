@@ -29,6 +29,8 @@ interface Open {
   waiting?: number; // hours
   assignee?: { id: number; name: string };
   snoozed?: boolean;
+  pending?: boolean;
+  assigneeType?: string;
 }
 
 /** Open or snoozed conversations of account 3 (25 per page, like Chatwoot), none in account 1, and Discord. */
@@ -40,13 +42,13 @@ function world(open: Open[], { failPost = 0, rateLimit = false }: { failPost?: n
     on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations", (request) => {
       const page = Number(request.url.searchParams.get("page"));
       const status = request.url.searchParams.get("status");
-      const listed = open.filter((c) => (c.snoozed ? "snoozed" : "open") === status);
+      const listed = open.filter((c) => (c.snoozed ? "snoozed" : c.pending ? "pending" : "open") === status);
       const payload = listed.slice((page - 1) * 25, page * 25).map((c) => ({
         id: c.id,
         inbox_id: 2,
         status,
         waiting_since: c.waiting === undefined ? 0 : NOW - c.waiting * HOUR,
-        meta: { assignee: c.assignee ?? null },
+        meta: { assignee: c.assignee ?? null, assignee_type: c.assigneeType },
       }));
       return json({ data: { meta: {}, payload } });
     }),
@@ -110,6 +112,17 @@ describe("support queue", () => {
       "[Acme #4](<https://chatwoot.example.com/app/accounts/3/conversations/4>) | replied | ❔ Unassigned",
     ]);
     expect(message.allowed_mentions).toEqual({ parse: [], users: [ALICE], roles: [ROLE] });
+  });
+
+  it("lists pending bot turns as unassigned without pinging a same-id user or escalating", async () => {
+    const { requests } = world([
+      { id: 9, pending: true, waiting: 30, assignee: { id: 42, name: "Bot" }, assigneeType: "AgentBot" },
+    ]);
+    await postQueue(context(), NOW * 1000);
+    const [message] = posted(requests);
+    expect(message.content).toContain("🤖");
+    expect(message.content).toContain("Unassigned");
+    expect(message.allowed_mentions).toEqual({ parse: [], users: [], roles: [] });
   });
 
   it("lists snoozed tickets last, marked, without pinging anyone or escalating", async () => {

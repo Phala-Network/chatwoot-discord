@@ -9,7 +9,7 @@ import type { Settings } from "./config.ts";
 import type { Env } from "./env.ts";
 import { routeConversation, routesAccount } from "./routing.ts";
 import { loadSettings } from "./settings.ts";
-import { expectActivity, requestHandoff } from "./turn.ts";
+import { clearFailures, expectActivity, recordFailure } from "./turn.ts";
 import type { Transition } from "./webhook.ts";
 
 export const ROUTER_NAME = "global";
@@ -90,6 +90,7 @@ export class Router extends DurableObject<Env> {
             yielded = true;
             break;
           }
+          clearFailures(this.store, payload.accountId, payload.conversationId);
         } else if (routesAccount(settings, payload.accountId)) {
           await this.sweep(settings, chatwoot, payload.accountId);
         }
@@ -105,14 +106,15 @@ export class Router extends DurableObject<Env> {
           yielded = true;
           break;
         }
-        if (payload.type === "route" && job.attempts + 1 >= 3) {
-          requestHandoff(this.store, payload.accountId, payload.conversationId);
-        }
-        const delay = retryDelay(job.attempts);
-        const logAt = job.attempts + 1 >= 3 ? log.error : log.warn;
+        const attempts =
+          payload.type === "route"
+            ? recordFailure(this.store, payload.accountId, payload.conversationId)
+            : job.attempts + 1;
+        const delay = retryDelay(attempts - 1);
+        const logAt = attempts >= 3 ? log.error : log.warn;
         logAt("job failed; will retry", {
           job: job.key,
-          attempts: job.attempts + 1,
+          attempts,
           delayMs: delay,
           ...errorFields(error),
         });

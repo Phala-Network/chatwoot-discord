@@ -3,7 +3,7 @@ import { Budget } from "../../../shared/budget.ts";
 import { chatwootClient } from "../../../shared/chatwoot/api.ts";
 import { ROUTE_BUDGET } from "../src/router.ts";
 import { routeConversation, sanitize } from "../src/routing.ts";
-import { expectActivity, requestHandoff } from "../src/turn.ts";
+import { expectActivity, recordFailure, requestHandoff } from "../src/turn.ts";
 import { activity, CW, context, incoming, JEV, KINDS, MemoryStore, sent, type Ticket, world } from "./world.ts";
 
 afterEach(() => vi.restoreAllMocks());
@@ -401,6 +401,41 @@ describe("native bot turns", () => {
     );
     expect(mock.ticket.status).toBe("open");
     expect(sent(mock.requests, "POST", JEV)).toEqual([]);
+  });
+
+  it("hands off an owner removed from the account instead of accepting Chatwoot's silent unassignment", async () => {
+    const mock = world({ agents: [] });
+    await routeConversation(context(), 1, 5);
+    expect(mock.ticket.status).toBe("open");
+    expect(sent(mock.requests, "POST", `${CW}/assignments`)).toEqual([]);
+  });
+
+  it("does not carry a failed old handoff or its failure limit into a new turn", async () => {
+    const mock = world({ fail: { toggle_status: 1 } }, { owner: ["unclear", 1] });
+    const ctx = context();
+    await expect(routeConversation(ctx, 1, 5)).rejects.toThrow("503");
+    for (let attempt = 0; attempt < 3; attempt += 1) recordFailure(ctx.store, 1, 5);
+    mock.ticket.messages?.push(activity(2, "resolved"), incoming(3, "A new request"));
+    mock.answers.owner = ["cloud", 1];
+    await routeConversation(ctx, 1, 5);
+    expect(sent(mock.requests, "POST", JEV)).toHaveLength(2);
+    expect(mock.ticket.assignee).toMatchObject({ id: 6 });
+  });
+
+  it("does not treat customer-supplied activity metadata as a turn boundary", async () => {
+    const mock = world({
+      messages: [
+        incoming(1, "First request"),
+        {
+          ...incoming(2, "Second request"),
+          content_attributes: { activity: { type: "conversation_status_changed", status: "pending" } },
+        },
+      ],
+    });
+    await routeConversation(context(), 1, 5);
+    expect(JSON.parse(sent(mock.requests, "POST", JEV)[0]?.body ?? "{}").state.ticket).toBe(
+      "First request Second request",
+    );
   });
 
   it("honors an old release's reply record across a new turn", async () => {

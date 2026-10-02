@@ -2,7 +2,6 @@
 // Worker reads them).
 
 import { z } from "zod";
-import { ROUTING_ATTRIBUTES } from "../../../shared/attributes.ts";
 import { ConfigError, describe, jsonRecord, reconcileSchema } from "../../../shared/config.ts";
 
 export { ConfigError } from "../../../shared/config.ts";
@@ -86,13 +85,7 @@ export const configSchema = z
         /** Conversation custom attribute used as a topic tag. */
         topicAttribute: z.string().min(1).default("topic"),
         /** Conversation custom attribute that receives the post URL (a Link attribute). Empty disables it. */
-        linkAttribute: z
-          .string()
-          .refine(
-            (name) => !Object.values(ROUTING_ATTRIBUTES).some((reserved) => name === reserved),
-            "must not be a routing attribute",
-          )
-          .default("discord_thread"),
+        linkAttribute: z.string().default("discord_thread"),
         /** Messages with an id at or below this are never relayed (cutover watermark). */
         startAfterMessageId: z.number().int().min(0).default(0),
         /** A message that fails this many times is skipped with a notice in its post. */
@@ -112,8 +105,6 @@ export const configSchema = z
     reconcile: reconcileSchema,
     router: z
       .strictObject({
-        accounts: z.array(z.number().int().positive()).min(1).refine(unique, "account ids must be unique"),
-        waitSeconds: z.number().int().min(0).default(30),
         keepLabels: z
           .array(z.string().regex(/^[a-z0-9_-]{1,255}$/, "must be a Chatwoot label name (lower case)"))
           .default([]),
@@ -159,14 +150,7 @@ export const configSchema = z
   .refine((config) => !config.queue || config.relay.subrequestBudget >= queueBudget(config.accounts.length), {
     path: ["relay", "subrequestBudget"],
     message: "must fit the support queue's pages and messages (see src/queue.ts)",
-  })
-  .refine(
-    (config) => config.router?.accounts.every((id) => config.accounts.some((account) => account.id === id)) ?? true,
-    {
-      path: ["router", "accounts"],
-      message: "must only name relayed accounts",
-    },
-  );
+  });
 
 type Config = z.infer<typeof configSchema>;
 type AccountConfig = Config["accounts"][number];

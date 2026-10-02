@@ -131,6 +131,7 @@ export class Store extends QueueStore implements RelayStore, Cache {
       this.sql.exec(MIGRATIONS[version] ?? "");
       this.sql.exec("UPDATE schema_version SET version = ?", version + 1);
     }
+    super.migrate();
   }
 
   // Conversations

@@ -2,12 +2,12 @@
 // token, so Chatwoot applies its normal permissions and records who did it.
 
 import type { APIMessageTopLevelComponent } from "discord-api-types/v10";
-import { ROUTING_ATTRIBUTES } from "../../../../shared/attributes.ts";
 import {
   type ChatwootClient,
   ChatwootError,
   chatwootClient,
   type Fetch,
+  personAssignee,
   type StatusChange,
 } from "../../../../shared/chatwoot/api.ts";
 import { errorFields, log } from "../../../../shared/log.ts";
@@ -62,7 +62,7 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
           content: `👤 Assign **${ticket}** to:`,
           components: assigneeMenu(
             named(await chatwoot.listAgents(accountId)),
-            conversation.meta?.assignee?.id ?? null,
+            personAssignee(conversation)?.id ?? null,
           ),
           conversationGone: false,
         };
@@ -73,7 +73,7 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
         if (unknown !== undefined) throw new UserError(`There is no label "${unknown}" in this Chatwoot account.`);
         // The panel sets the topic label; the ticket's kinds stay.
         const conversation = await existing(chatwoot.getConversation(accountId, conversationId));
-        const kinds = kindLabels(conversation.custom_attributes, settings);
+        const kinds = kindLabels(settings);
         const kept = (conversation.labels ?? []).filter((label) => kinds.has(label) && !action.labels.includes(label));
         await chatwoot.setLabels(accountId, conversationId, [...action.labels, ...kept]);
         message = action.labels.length > 0 ? `Label set to ${action.labels.join(", ")}.` : "Labels removed.";
@@ -81,6 +81,16 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
       }
       case "status": {
         const { status, snoozedUntil } = action;
+        if (status === "pending") {
+          const conversation = await existing(chatwoot.getConversation(accountId, conversationId));
+          if (conversation.inbox_id === undefined) throw new UserError("This conversation has no inbox.");
+          const bot = await chatwoot.inboxBot(accountId, conversation.inbox_id);
+          if (bot) {
+            await chatwoot.assign(accountId, conversationId, bot.id, "AgentBot");
+            message = "Handed back to the inbox bot.";
+            break;
+          }
+        }
         await chatwoot.setStatus(
           accountId,
           conversationId,
@@ -153,7 +163,7 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
           // 24-hour window (Conversations::MessageWindowService at v4.18.0).
           if (conversation.can_reply === false) throw new UserError(CANNOT_REPLY);
           // A public reply to an unassigned conversation assigns it to the replying agent.
-          if (!conversation.meta?.assignee) await chatwoot.assign(accountId, conversationId, profile.id);
+          if (!personAssignee(conversation)) await chatwoot.assign(accountId, conversationId, profile.id);
         }
         const limits = settings.config.attachments;
         const files = [];
@@ -228,7 +238,7 @@ async function drawPanel(
 ): Promise<APIMessageTopLevelComponent[]> {
   const conversation = await existing(chatwoot.getConversation(accountId, conversationId));
   const agents = await chatwoot.listAgents(accountId);
-  const kinds = kindLabels(conversation.custom_attributes, settings);
+  const kinds = kindLabels(settings);
   // Its label menu is for the topic: kinds are labels of their own (recorded by chatwoot-router).
   const topics = (labels: string[]) => labels.filter((label) => !kinds.has(label));
   const labels = topics(await chatwoot.listLabels(accountId));
@@ -238,7 +248,7 @@ async function drawPanel(
   return panel(
     done ? `${title}\n✅ ${done}` : title,
     {
-      assigneeId: conversation.meta?.assignee?.id ?? null,
+      assigneeId: personAssignee(conversation)?.id ?? null,
       labels: topics(conversation.labels ?? []),
       status: conversation.status ?? "open",
     },
@@ -289,10 +299,6 @@ async function existing<T>(conversation: Promise<T | undefined>): Promise<T> {
   return found;
 }
 
-function kindLabels(attributes: Record<string, unknown> | undefined, settings: Settings): ReadonlySet<string> {
-  const kind = attributes?.[ROUTING_ATTRIBUTES.kind];
-  return new Set([
-    ...(settings.config.router?.keepLabels ?? []),
-    ...(typeof kind === "string" && kind.length > 0 ? [kind] : []),
-  ]);
+function kindLabels(settings: Settings): ReadonlySet<string> {
+  return new Set(settings.config.router?.keepLabels ?? []);
 }

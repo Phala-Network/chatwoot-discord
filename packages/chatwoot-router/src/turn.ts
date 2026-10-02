@@ -11,12 +11,13 @@ const guardSchema = z.object({
   transitionAt: z.number().optional(),
   expected: z.object({ status: z.string(), at: z.number() }).optional(),
   handoff: z.boolean().default(false),
+  failures: z.number().int().min(0).default(0),
 });
 type Guard = z.infer<typeof guardSchema>;
 
 export function readGuard(store: RoutingStore, accountId: number, conversationId: number): Guard {
   const parsed = guardSchema.safeParse(parseJson(store.get(`turn:${accountId}:${conversationId}`)));
-  return parsed.success ? parsed.data : { handoff: false };
+  return parsed.success ? parsed.data : { handoff: false, failures: 0 };
 }
 
 export function saveGuard(store: RoutingStore, accountId: number, conversationId: number, guard: Guard): void {
@@ -36,11 +37,26 @@ export function expectActivity(
     expected: transition,
     transitionAt: transition.at,
     handoff: false,
+    failures: 0,
   });
 }
 
 export function requestHandoff(store: RoutingStore, accountId: number, conversationId: number): void {
   saveGuard(store, accountId, conversationId, { ...readGuard(store, accountId, conversationId), handoff: true });
+}
+
+/** Counts processing failures for this turn, independently of an old queued job's backoff. */
+export function recordFailure(store: RoutingStore, accountId: number, conversationId: number): number {
+  const guard = readGuard(store, accountId, conversationId);
+  guard.failures += 1;
+  if (guard.failures >= 3) guard.handoff = true;
+  saveGuard(store, accountId, conversationId, guard);
+  return guard.failures;
+}
+
+export function clearFailures(store: RoutingStore, accountId: number, conversationId: number): void {
+  const guard = readGuard(store, accountId, conversationId);
+  if (guard.failures) saveGuard(store, accountId, conversationId, { ...guard, failures: 0 });
 }
 
 export class ActivityPendingError extends Error {
@@ -56,7 +72,6 @@ export async function readTurn(
   accountId: number,
   conversationId: number,
 ) {
-  const guard = readGuard(store, accountId, conversationId);
   const messages: ChatwootMessage[] = [];
   let before: number | undefined;
   let boundary: ChatwootMessage | undefined;
@@ -69,7 +84,7 @@ export async function readTurn(
         deleted = true;
         break;
       }
-      if (message.content_attributes?.activity?.type === "conversation_status_changed") {
+      if (message.message_type === 2 && message.content_attributes?.activity?.type === "conversation_status_changed") {
         boundary = message;
         break;
       }
@@ -81,6 +96,8 @@ export async function readTurn(
     if (next === undefined || (before !== undefined && next >= before)) break;
     before = next;
   }
+  // A webhook may have updated the guard while pages were being read.
+  const guard = readGuard(store, accountId, conversationId);
   const missing = guard.boundary !== undefined && (boundary?.id ?? 0) < guard.boundary;
   const expected = guard.expected;
   const activity = boundary?.content_attributes?.activity;
@@ -91,6 +108,7 @@ export async function readTurn(
   if (late && !guard.handoff && !deleted && !missing) throw new ActivityPendingError();
   if (boundary && boundary.id !== guard.boundary && guard.boundary !== undefined && !missing && !late) {
     guard.handoff = false;
+    guard.failures = 0;
   }
   if (!missing && complete) guard.boundary = boundary?.id ?? 0;
   if (expected && !late) delete guard.expected;

@@ -1,5 +1,3 @@
-import { messageWatermark, ROUTING_ATTRIBUTES } from "../../../../shared/attributes.ts";
-
 // Who a relayed message notifies, as lines added to its last part: the triage bot mention
 // (within its hourly budgets, and not for a message a routing kind handled) and the
 // linked assignee's ping on customer messages. Also who a
@@ -18,17 +16,11 @@ export interface TriageOptions {
   perHour: number;
 }
 
-export interface RouterOptions {
-  accounts: number[];
-  waitSeconds: number;
-}
-
 interface NotifierOptions {
   store: RelayStore;
   triage?: TriageOptions | undefined;
   /** The agent linked to a Chatwoot user id, if any. */
   linkedAgent?: ((chatwootUserId: number) => LinkedAgent | undefined) | undefined;
-  router?: RouterOptions | undefined;
   /** A message created longer ago than this is history. */
   liveSeconds: number;
   now: () => Date;
@@ -48,17 +40,6 @@ export function assigneeKey(conversation: RelayConversation): string {
 
 /** The longest user mention (snowflakes have at most 20 digits). */
 const LONGEST_MENTION = `<@${"9".repeat(20)}>`;
-
-/**
- * A customer message waits for its conversation's routing, which may handle it: the relay stops
- * before posting it, and its job runs again shortly.
- */
-export class RoutingPendingError extends Error {
-  constructor() {
-    super("routing pending");
-    this.name = "RoutingPendingError";
-  }
-}
 
 export class Notifier {
   /** The most room the notification lines of a message can take, in UTF-16 units. */
@@ -114,22 +95,17 @@ export class Notifier {
 
   /**
    * The triage bot mention for a customer message, or a note when a routing kind handled
-   * it or the bot's hourly budget is used up. Throws RoutingPendingError while the conversation's
-   * routing is still to run.
+   * it or the bot's hourly budget is used up.
    */
   private triage(message: RelayMessage): { mention?: string; note?: string } {
     const { triage, store } = this.options;
     if (!fromCustomer(message)) return {};
-    if (!triage) {
-      if (this.awaitingRouter(message)) throw new RoutingPendingError();
-      return {};
-    }
+    if (!triage) return {};
     const { account, conversation } = message;
     // Decided and counted once per message: a retry after a failed post repeats the decision.
     const decision = store.once(`triage:${account.id}:${message.id}`, () => {
-      if (this.awaitingRouter(message)) throw new RoutingPendingError();
       // Recorded as "answered" since v0.23, when only replies counted.
-      if (message.id <= messageWatermark(conversation.customAttributes[ROUTING_ATTRIBUTES.handled])) return "answered";
+      if (conversation.status !== "open" || message.answered) return "answered";
       const hour = this.options.now().toISOString().slice(0, 13);
       const key = `${message.account.id}:${message.conversation.id}`;
       if (store.increment(`triage:${key}:${hour}`) > triage.perConversationPerHour) return "conversation";
@@ -140,18 +116,6 @@ export class Notifier {
     if (decision === "conversation") return { note: conversationBudgetNote(triage) };
     if (decision === "hour") return { note: hourlyBudgetNote(triage) };
     return { mention: triage.userId };
-  }
-
-  private awaitingRouter(message: RelayMessage): boolean {
-    const { router, now } = this.options;
-    const { conversation, createdAt } = message;
-    return (
-      router?.accounts.includes(message.account.id) === true &&
-      messageWatermark(conversation.customAttributes[ROUTING_ATTRIBUTES.seen]) < message.id &&
-      createdAt !== undefined &&
-      createdAt !== null &&
-      now().getTime() - createdAt * 1000 < router.waitSeconds * 1000
-    );
   }
 
   /** The linked Discord user of the conversation's assignee, if any. */

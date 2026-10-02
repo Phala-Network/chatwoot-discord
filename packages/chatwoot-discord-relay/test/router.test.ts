@@ -1,93 +1,74 @@
 import { describe, expect, it } from "vitest";
-import { Notifier, RoutingPendingError } from "../src/relay/notify.ts";
+import { isAnsweringReply, toRelayConversation } from "../../../shared/chatwoot/api.ts";
+import { Notifier } from "../src/relay/notify.ts";
 import { MemoryStore, message, TRIAGE } from "./helpers.ts";
 
 const NOW = new Date("2026-09-27T20:00:00Z");
 const SECONDS = NOW.getTime() / 1000;
-const router = { accounts: [3], waitSeconds: 30 };
 const triage = { userId: TRIAGE, name: "Triage bot", perConversationPerHour: 5, perHour: 30 };
+const notifier = (store = new MemoryStore()) => new Notifier({ store, triage, liveSeconds: 3600, now: () => NOW });
 
-function notifier(store = new MemoryStore()) {
-  return new Notifier({ store, router, triage, liveSeconds: 3600, now: () => NOW });
-}
-
-describe("router conversation state", () => {
-  it("defers unseen customer messages, including an older watermark, without consuming budgets", () => {
+describe("native bot notification decisions", () => {
+  it.each(["resolved", "snoozed", "pending"])("does not call triage for a %s conversation", (status) => {
     const store = new MemoryStore();
-    const notifications = notifier(store);
-    const customer = message({ createdAt: SECONDS, conversation: { customAttributes: { routing_seen: 100 } } });
-    expect(() => notifications.notification(customer)).toThrow(RoutingPendingError);
-    expect(store.decisions.size).toBe(0);
+    expect(
+      notifier(store)
+        .notification(message({ createdAt: SECONDS, conversation: { status } }))
+        .lines.join("\n"),
+    ).not.toContain(`<@${TRIAGE}>`);
     expect(store.counters.size).toBe(0);
-    customer.conversation.customAttributes.routing_seen = customer.id;
-    expect(notifications.notification(customer).lines).toEqual([`-# <@${TRIAGE}>`]);
   });
 
-  it("waits through assignment and status changes until seen includes the handled message", () => {
-    for (const conversation of [{ assignee: { id: 42 } }, { status: "resolved" }, { status: "snoozed" }]) {
-      const notifications = notifier();
-      const customer = message({ createdAt: SECONDS, conversation });
-      expect(() => notifications.notification(customer)).toThrow(RoutingPendingError);
-      customer.conversation.customAttributes = { routing_seen: customer.id, routing_handled: customer.id };
-      expect(notifications.notification(customer).lines).toEqual([
-        "-# Triage bot not called: handled automatically. Ask it here, if needed.",
-      ]);
-    }
+  it("keeps each message's answer or mention decision through retries", () => {
+    const notifications = notifier();
+    const answered = message({ createdAt: SECONDS, answered: true });
+    const first = notifications.notification(answered);
+    expect(first.lines.join("\n")).toContain("handled automatically");
+    answered.answered = false;
+    expect(notifications.notification(answered)).toEqual(first);
+    const later = message({ id: 102, createdAt: SECONDS });
+    const mention = notifications.notification(later);
+    expect(mention.lines).toEqual([`-# <@${TRIAGE}>`]);
+    later.answered = true;
+    expect(notifications.notification(later)).toEqual(mention);
   });
 
-  it("stops waiting outside the routed accounts, at the deadline, or without a timestamp", () => {
-    const cases = [
-      message({ createdAt: SECONDS, account: { id: 1, name: "Globex" } }),
-      message({ createdAt: SECONDS - 30 }),
-      message(),
-    ];
-    for (const customer of cases) expect(notifier().notification(customer).lines).toEqual([`-# <@${TRIAGE}>`]);
-  });
-
-  it.each([101, "101", " 101 "])("reads numeric or text watermarks: %j", (watermark) => {
-    const customer = message({
-      createdAt: SECONDS,
-      conversation: { customAttributes: { routing_seen: watermark, routing_handled: watermark } },
-    });
-    expect(notifier().notification(customer).lines).toEqual([
-      "-# Triage bot not called: handled automatically. Ask it here, if needed.",
-    ]);
-  });
-
-  it.each([true, null, {}, [], "invalid", "", "1e309", "1.5", "-1"])(
-    "treats invalid watermarks as absent: %j",
-    (seen) => {
-      expect(() =>
-        notifier().notification(
-          message({ createdAt: SECONDS, conversation: { customAttributes: { routing_seen: seen } } }),
-        ),
-      ).toThrow(RoutingPendingError);
-    },
-  );
-
-  it("does not wait for agents or notes", () => {
+  it("keeps history, automatic email, private notes and outgoing messages silent", () => {
     for (const customer of [
-      message({ createdAt: SECONDS, messageType: "outgoing" }),
-      message({ createdAt: SECONDS, private: true }),
+      message({ createdAt: SECONDS - 3601 }),
+      message({ autoReply: true }),
+      message({ private: true }),
+      message({ messageType: "outgoing" }),
     ]) {
       expect(notifier().notification(customer).lines).toEqual([]);
     }
   });
 
-  it("keeps both handled and mention decisions on retries when attributes change", () => {
-    const notifications = notifier();
-    const customer = message({
-      createdAt: SECONDS,
-      conversation: { customAttributes: { routing_seen: 101, routing_handled: 101 } },
+  it("does not mistake a bot id for a person with the same numeric id", () => {
+    const bot = toRelayConversation(9, {
+      meta: { assignee: { id: 42, name: "Brand bot" }, assignee_type: "AgentBot" },
     });
-    const handled = notifications.notification(customer);
-    expect(handled.lines).toEqual(["-# Triage bot not called: handled automatically. Ask it here, if needed."]);
-    customer.conversation.customAttributes = {};
-    expect(notifications.notification(customer)).toEqual(handled);
-    const later = message({ id: 102, createdAt: SECONDS - 30 });
-    const mentioned = notifications.notification(later);
-    expect(mentioned.lines).toEqual([`-# <@${TRIAGE}>`]);
-    later.conversation.customAttributes.routing_handled = 102;
-    expect(notifications.notification(later)).toEqual(mentioned);
+    expect(bot.assignee).toBeNull();
+    expect(bot.assigneeType).toBe("AgentBot");
+    const user = toRelayConversation(9, { meta: { assignee: { id: 42, name: "User" }, assignee_type: "User" } });
+    expect(user.assignee).toEqual({ id: 42, name: "User" });
   });
+});
+
+describe("answering replies", () => {
+  it.each([
+    { message_type: 1, sender: { type: "user" } },
+    { message_type: 1, sender: { type: "agent_bot" } },
+    { message_type: 1, status: "delivered" },
+  ])("counts an actual public reply %j", (reply) => expect(isAnsweringReply({ id: 2, ...reply })).toBe(true));
+
+  it.each([
+    { message_type: 0 },
+    { message_type: 2 },
+    { message_type: 3 },
+    { message_type: 1, private: true },
+    { message_type: 1, status: "failed" },
+    { message_type: 1, content_attributes: { deleted: true } },
+    { message_type: 1, content_attributes: { email: { auto_reply: true } } },
+  ])("does not count %j as an answer", (reply) => expect(isAnsweringReply({ id: 2, ...reply })).toBe(false));
 });

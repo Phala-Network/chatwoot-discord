@@ -1,4 +1,3 @@
-import type { RouterOptions } from "./notify.ts";
 // Posts Chatwoot messages into a Discord forum: one post per conversation, opened by a ticket
 // header, with every message as a reply under its sender's name. Keeps the post's tags, archived
 // flag, and card (its last message, with the ticket's state and buttons) in step with the
@@ -144,7 +143,6 @@ export interface RelayOptions {
   triage?: TriageOptions | undefined;
   /** The agent linked to a Chatwoot user id, if any. */
   linkedAgent?: ((chatwootUserId: number) => LinkedAgent | undefined) | undefined;
-  router?: RouterOptions | undefined;
   /** The post's card for the ticket, offering the draft of the triage bot's answer `answerId`; none if unset. */
   card?: ((ticket: CardTicket, answerId: string | undefined) => MessageComponents) | undefined;
   /** Messages created longer ago than this are relayed without notifications. */
@@ -183,7 +181,6 @@ export class Relay {
       store: options.store,
       triage: options.triage,
       linkedAgent: options.linkedAgent,
-      router: options.router,
       liveSeconds: options.liveSeconds,
       now: options.now ?? (() => new Date()),
     });

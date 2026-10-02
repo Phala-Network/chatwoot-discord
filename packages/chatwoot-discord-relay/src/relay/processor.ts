@@ -7,6 +7,7 @@ import {
   type ChatwootClient,
   type ChatwootConversation,
   type ChatwootMessage,
+  isAnsweringReply,
   MESSAGE_PAGE_SIZE,
   toRelayConversation,
   toRelayMessage,
@@ -47,7 +48,6 @@ export function relayFor(settings: Settings, forum: ForumClient, store: RelaySto
     triage: triageUserId ? { ...settings.config.triage, userId: triageUserId } : undefined,
     card: ticketCard,
     linkedAgent: settings.linkedAgent,
-    router: settings.config.router,
     // Normally every message is relayed within the sweep's window (by its webhook, or else by
     // the sweep), so an older one is history: a first sync, or a catch-up after downtime.
     liveSeconds: settings.config.reconcile.lookbackSeconds,
@@ -65,7 +65,7 @@ export interface ProcessorContext {
 }
 
 /** "yield" means the invocation's request budget ran low; run again in a fresh invocation. */
-export type ProcessOutcome = "done" | "yield";
+export type ProcessOutcome = "done" | "yield" | "pending";
 
 export async function processConversation(
   context: ProcessorContext,
@@ -85,7 +85,7 @@ export async function processConversation(
     return "done";
   }
   if (!relaysInbox(account, raw.inbox_id)) return "done";
-  const conversation = toRelayConversation(conversationId, raw);
+  let conversation = toRelayConversation(conversationId, raw);
   if (!store.conversation(accountId, conversationId)?.threadId) {
     await recoverThread(context, accountId, account.forumChannelId, conversation);
   }
@@ -120,12 +120,38 @@ export async function processConversation(
       if (inboxName === undefined && !store.conversation(accountId, conversationId)?.threadId) {
         inboxName = await cachedInboxName(context, accountId, raw);
       }
+      let answered = false;
+      if (
+        message.message_type === 0 &&
+        !message.private &&
+        !message.content_attributes?.deleted &&
+        !conversation.contact.blocked
+      ) {
+        const fresh = await chatwoot.getConversation(accountId, conversationId);
+        if (!fresh) return "done";
+        if (!relaysInbox(account, fresh.inbox_id)) return "done";
+        conversation = toRelayConversation(conversationId, fresh);
+        if (
+          fresh.status === "pending" &&
+          fresh.inbox_id !== undefined &&
+          (await chatwoot.inboxBot(accountId, fresh.inbox_id))
+        ) {
+          return "pending";
+        }
+        if (fresh.status === "open" && !message.content_attributes?.email?.auto_reply) {
+          const reply = await answeringReply(context, accountId, conversationId, message.id);
+          if (reply === "yield") return "yield";
+          answered = reply;
+        }
+      }
+      if (budget.remaining < perMessage) return "yield";
       const relayMessage = toRelayMessage(message, {
         account: { id: accountId, name: account.name },
         inboxName: inboxName ?? null,
         conversation,
         ...(await linkedAgents(context, message)),
       });
+      relayMessage.answered = answered;
       try {
         await relay.relay(relayMessage);
         // With its current state: an update reported before the message was relayed is not lost.
@@ -154,6 +180,7 @@ export async function processConversation(
       }
       cursor = message.id;
       store.setCursor(accountId, conversationId, cursor);
+      store.delete(`answer-scan:${accountId}:${conversationId}:${message.id}`);
     }
     if (page.length < MESSAGE_PAGE_SIZE) break;
   }
@@ -167,6 +194,35 @@ export async function processConversation(
     await linkPost(context, accountId, account.forumChannelId, conversation, threadId);
   }
   return "done";
+}
+
+/** Scan every later page, resuming under the existing job budget instead of guessing from the latest message. */
+async function answeringReply(
+  { store, chatwoot, budget }: ProcessorContext,
+  accountId: number,
+  conversationId: number,
+  messageId: number,
+): Promise<boolean | "yield"> {
+  const key = `answer-scan:${accountId}:${conversationId}:${messageId}`;
+  const saved = store.get(key);
+  if (saved === "true" || saved === "false") return saved === "true";
+  let after = Number(saved ?? messageId);
+  for (;;) {
+    if (budget.remaining < 2) return "yield";
+    const messages = await chatwoot.listMessages(accountId, conversationId, { after });
+    if (messages.some(isAnsweringReply)) {
+      store.set(key, "true");
+      return true;
+    }
+    if (messages.length < MESSAGE_PAGE_SIZE) {
+      store.set(key, "false");
+      return false;
+    }
+    const next = messages.at(-1)?.id;
+    if (next === undefined || next <= after) throw new Error("Chatwoot message page did not advance");
+    after = next;
+    store.set(key, String(after));
+  }
 }
 
 /** A notice that must not fail the job: the failure is already logged by the caller. */

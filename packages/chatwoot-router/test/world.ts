@@ -58,6 +58,7 @@ export interface Ticket {
   assignee?: { id: number; name?: string } | null;
   assigneeType?: string | null;
   blocked?: boolean;
+  agents?: number[];
   name?: string;
   labels?: string[];
   messages?: ChatwootMessage[];
@@ -96,6 +97,9 @@ export function world(ticket: Ticket = {}, answers: Answers = { owner: ["cloud",
     ticket,
     answers,
     ...mockFetch(
+      on("GET", "chatwoot.example.com/api/v1/accounts/1/agents", () =>
+        json((ticket.agents ?? [6, 7]).map((id) => ({ id }))),
+      ),
       on("GET", CW, () =>
         fail("read")
           ? json({}, { status: 503 })

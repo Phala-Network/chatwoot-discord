@@ -41,6 +41,7 @@ class World {
     meta: { sender: { name: "Jane Doe" }, channel: "Channel::WebWidget" },
   };
   messages: FakeMessage[] = [];
+  bot: { id: number; account_id: number } | null = null;
   failLinks = 0;
   /** Assignee announcements Discord fails before accepting them. */
   failAnnouncements = 0;
@@ -75,6 +76,7 @@ class World {
         this.conversation.custom_attributes = { ...Object(this.conversation.custom_attributes), ...attributes };
         return json({});
       }),
+      on("GET", `${base}/inboxes/2/agent_bot`, () => json({ agent_bot: this.bot })),
       on("GET", `${base}/inboxes/2`, () => json({ id: 2, name: "Web" })),
       on("GET", "discord.com/api/v10/applications/@me", () => json({ id: "100000000000000001" })),
       on("GET", `discord.com/api/v10/channels/${FORUM}/webhooks`, () =>
@@ -362,7 +364,7 @@ describe("processConversation", () => {
   });
 
   it.each(["missing", "different thread", "different guild"])(
-    "repairs a %s link after a concurrent router attribute save",
+    "repairs a %s link after a concurrent custom attribute save",
     async (lost) => {
       const world = new World();
       world.messages = [{ id: 1, content: "hello", message_type: 0 }];
@@ -372,7 +374,7 @@ describe("processConversation", () => {
         const thread = store.conversation(3, 12)?.threadId;
         const link = `https://discord.com/channels/${GUILD}/${thread}`;
         world.conversation.custom_attributes = {
-          routing_seen: 1,
+          unrelated: 1,
           ...(lost === "missing"
             ? {}
             : {
@@ -383,7 +385,7 @@ describe("processConversation", () => {
               }),
         };
         await sync(store, settings);
-        expect(world.conversation.custom_attributes).toEqual({ routing_seen: 1, discord_thread: link });
+        expect(world.conversation.custom_attributes).toEqual({ unrelated: 1, discord_thread: link });
         expect(world.sent("POST", "/custom_attributes")).toHaveLength(2);
         await sync(store, settings);
         expect(world.sent("POST", "/custom_attributes")).toHaveLength(2);
@@ -576,9 +578,9 @@ describe("processConversation", () => {
     await withStore(async (store) => {
       await sync(store, testSettings());
       expect(world.replies()).toEqual([
-        `${sticker}\n-# <@${TRIAGE}>`,
-        `📇 Ana Lima: +15550100\n-# <@${TRIAGE}>`,
-        `📎 Story mention https://lookaside.example.com/story\n📎 Reel https://lookaside.example.com/reel\n📎 Shared post https://example.com/p\n-# <@${TRIAGE}>`,
+        `${sticker}\n-# Triage bot not called: handled automatically. Ask it here, if needed.`,
+        `📇 Ana Lima: +15550100\n-# Triage bot not called: handled automatically. Ask it here, if needed.`,
+        `📎 Story mention https://lookaside.example.com/story\n📎 Reel https://lookaside.example.com/reel\n📎 Shared post https://example.com/p\n-# Triage bot not called: handled automatically. Ask it here, if needed.`,
         "Pick a topic\n• Billing\n• Technical\n• other\n• five",
         "• [Pro plan](<https://example.com/pro.png>) — $10 a month · [Buy](<https://example.com/buy>)",
         "• [Reset your password](<https://help.example.com/reset>) — Steps",
@@ -769,6 +771,87 @@ describe("processMessageUpdate", () => {
         .map((request) => JSON.parse(request.body).name)
         .filter(Boolean);
       expect(renamed.at(-1)).toBe("[Acme #12] Jane Doe");
+    });
+  });
+});
+
+describe("agent bot lifecycle", () => {
+  it.each(["open", "resolved", "snoozed"])(
+    "holds pending customer messages and releases them on %s",
+    async (status) => {
+      const world = new World();
+      world.bot = { id: 42, account_id: 3 };
+      world.conversation.status = "pending";
+      world.conversation.meta = { assignee: { id: 42, name: "Brand bot" }, assignee_type: "AgentBot" };
+      world.messages = [{ id: 1, content: "Please help", message_type: 0, created_at: now() }];
+      await withStore(async (store) => {
+        const settings = testSettings();
+        expect(await processConversation(context(store, settings), 3, 12)).toBe("pending");
+        expect(world.posts()).toEqual([]);
+        expect(world.cards()).toEqual([]);
+        expect(store.conversation(3, 12)?.cursor).toBe(0);
+        world.conversation.status = status;
+        await sync(store, settings);
+        expect(world.replies()[0]).toContain("Please help");
+        expect(world.replies()[0]?.includes(`<@${TRIAGE}>`)).toBe(status === "open");
+        expect(world.replies().join("\n")).not.toContain(`<@${ALICE}>`);
+        expect(JSON.stringify(world.cards())).toContain("Unassigned");
+      });
+    },
+  );
+
+  it("releases a pending message when the inbox bot is disconnected", async () => {
+    const world = new World();
+    world.bot = { id: 1, account_id: 3 };
+    world.conversation.status = "pending";
+    world.messages = [{ id: 1, content: "Waiting greeting", message_type: 0 }];
+    await withStore(async (store) => {
+      const settings = testSettings();
+      expect(await processConversation(context(store, settings), 3, 12)).toBe("pending");
+      world.bot = null;
+      await sync(store, settings);
+      expect(world.replies().join("\n")).toContain("Waiting greeting");
+      expect(world.replies().join("\n")).not.toContain(`<@${TRIAGE}>`);
+    });
+  });
+
+  it.each([
+    { reply: { message_type: 1, sender: { id: 42, type: "user" } }, answered: true },
+    { reply: { message_type: 1, sender: { id: 42, type: "agent_bot" } }, answered: true },
+    { reply: { message_type: 1, private: true }, answered: false },
+    { reply: { message_type: 1, status: "failed" }, answered: false },
+    { reply: { message_type: 3 }, answered: false },
+    { reply: { message_type: 2 }, answered: false },
+    { reply: { message_type: 1, content_attributes: { deleted: true } }, answered: false },
+    { reply: { message_type: 1, content_attributes: { email: { auto_reply: true } } }, answered: false },
+  ])("posts the correct triage decision for a later $reply", async ({ reply, answered }) => {
+    const world = new World();
+    world.messages = [
+      { id: 1, content: "A customer request", message_type: 0 },
+      { id: 2, content: "A later message", ...reply },
+    ];
+    await withStore(async (store) => {
+      await sync(store, testSettings());
+      const customer = world.replies().find((text) => text.startsWith("A customer request"));
+      expect(customer?.includes(`<@${TRIAGE}>`)).toBe(!answered);
+      if (answered) expect(customer).toContain("handled automatically");
+    });
+  });
+
+  it("finds an answer beyond the first forward page, then keeps a later real request despite automatic email", async () => {
+    const world = new World();
+    world.messages = [
+      { id: 1, content: "First request", message_type: 0 },
+      ...Array.from({ length: 101 }, (_, i) => ({ id: i + 2, content: "Activity", message_type: 2 })),
+      { id: 103, content: "The answer", message_type: 1 },
+      { id: 104, content: "New request", message_type: 0 },
+      { id: 105, content: "Automatic", message_type: 0, content_attributes: { email: { auto_reply: true } } },
+    ];
+    await withStore(async (store) => {
+      await sync(store, testSettings());
+      expect(world.replies().find((text) => text.startsWith("First request"))).toContain("handled automatically");
+      expect(world.replies().find((text) => text.startsWith("New request"))).toContain(`<@${TRIAGE}>`);
+      expect(world.replies().find((text) => text.startsWith("Automatic"))).not.toContain(`<@${TRIAGE}>`);
     });
   });
 });

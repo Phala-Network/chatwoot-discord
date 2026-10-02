@@ -31,7 +31,6 @@ import { DiscordHttpError, DiscordRest } from "./discord/rest.ts";
 import type { Env } from "./env.ts";
 import { postQueue } from "./queue.ts";
 import { queueBudget } from "./queue-limits.ts";
-import { RoutingPendingError } from "./relay/notify.ts";
 import { latestMessageId, type ProcessorContext, processConversation, relayFor } from "./relay/processor.ts";
 import { isUnknownCard } from "./relay/relay.ts";
 import { processMessageUpdate } from "./relay/updates.ts";
@@ -59,8 +58,6 @@ const PRIORITY = {
   "message-updated": 3,
   queue: 4,
 } as const;
-/** How long a customer message may wait for its conversation's routing, checked this often (see services). */
-const ROUTE_POLL_MS = 1000;
 /** Requests a job may need before it can start without being cut short. */
 const COMMAND_BUDGET = 20;
 const MIN_BUDGET = 2;
@@ -129,6 +126,7 @@ export class Hub extends DurableObject<Env> {
 
   /** Queues a reconciliation sweep for every configured account (called by the cron trigger). */
   async requestSweep(): Promise<void> {
+    this.store.wakeHeldJobs();
     for (const account of (await loadSettings(this.env)).config.accounts)
       this.enqueue({ type: "sweep", accountId: account.id });
     await this.schedule();
@@ -225,6 +223,10 @@ export class Hub extends DurableObject<Env> {
           return "done";
         case "conversation": {
           const outcome = await processConversation(services, payload.accountId, payload.conversationId);
+          if (outcome === "pending") {
+            this.store.holdJob(job);
+            return "done";
+          }
           if (outcome === "done") this.store.completeJob(job);
           return outcome;
         }
@@ -249,10 +251,6 @@ export class Hub extends DurableObject<Env> {
       }
     } catch (error) {
       if (error instanceof BudgetExhaustedError) return "yield";
-      if (error instanceof RoutingPendingError) {
-        this.store.deferJob(job, ROUTE_POLL_MS);
-        return "done";
-      }
       const backoff = retryDelay(job.attempts);
       if (error instanceof DiscordHttpError && error.retryAfterMs !== undefined) {
         // Rate limited: wait as long as Discord asks without counting an attempt, so no rate

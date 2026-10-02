@@ -6,7 +6,8 @@
  * Before the first message: the conversation, a check that the post linked from it exists
  * (recovery), the latest messages (an adopted post's starting point), and the first page.
  */
-const SETUP_REQUESTS = 4;
+// Include a fresh customer-message state read and its first answering-reply page.
+const SETUP_REQUESTS = 6;
 
 /** Reading the next page of messages. */
 export const PAGE_REQUESTS = 1;

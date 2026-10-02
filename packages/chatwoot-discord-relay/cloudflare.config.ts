@@ -26,6 +26,7 @@ export default defineConfig(({ mode }) => ({
       DISCORD_BOT_TOKEN: bindings.secret(),
       DISCORD_PUBLIC_KEY: bindings.secret(),
       CHATWOOT_RELAY_TOKEN: bindings.secret(),
+      // Relay account webhook secrets; agent-bot credentials belong only to the router.
       CHATWOOT_WEBHOOK_SECRETS: bindings.secret(),
       ...(mode === "development" && {
         CHATWOOT_AGENT_TOKENS: bindings.secret(),

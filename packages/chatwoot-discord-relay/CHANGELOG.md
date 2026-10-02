@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Hold pending bot-inbox customer messages in the deduplicated conversation job. Status webhooks and the sweep
+  release held work; only one short race re-read is timed, with no per-message polling or routing deadline.
+- Mention triage only for open, unanswered customer messages. Public outgoing bot/human replies count; private,
+  deleted, failed, template and automatic-email messages do not. Preserve once-per-message decisions, history
+  silence, notification budgets and late delivery-failure notices.
+- Keep `assignee_type`: bot assignees are Unassigned in cards/tags/queue and never ping a same-id human.
+  `/pending` hands back through the current inbox's account bot assignment. Pending queue tickets show 🤖 without
+  pings/escalations. Queue budget is now 6 requests per account plus 4 message requests.
+- Remove `router.accounts`, `router.waitSeconds` and routing attribute reads. `router.keepLabels` preserves every
+  configured kind in Manage. The router's tokens/secrets are not needed by the relay.
+
+### Upgrade
+
+- Deploy this relay before the new native router. Remove the two old router wait settings and list every kind
+  in `router.keepLabels`. Preserve the Worker name/Hub state and retain the relay's signed account webhook.
+- Stop the old router webhook/cron, deploy the replacement with bot ids/tokens/secrets, then connect bots one
+  account at a time. Open tickets go directly to people/triage; count pending tickets before enabling routing.
+- Keep old Chatwoot attributes through the rollback window. Disconnect bots before rollback, then stop the new
+  router and restore old code/config/webhook if needed; never run both. Sweep wakes held jobs after disconnect.
+
 ## [0.29.0] - 2026-10-02
 
 ### Changed

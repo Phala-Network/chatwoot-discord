@@ -45,6 +45,7 @@ interface FakeConversation {
 class World {
   conversations = new Map<number, FakeConversation>();
   threads = new Map<string, string>(); // thread id -> parent forum
+  bot: { id: number; account_id: number } | null = null;
   failReplies = 0;
   rateLimitReplies = 0;
   failPatches = 0;
@@ -138,6 +139,7 @@ class World {
       on("GET", "chatwoot.example.com/api/v1/accounts/1/conversations", () =>
         json({ data: { meta: {}, payload: [] } }),
       ),
+      on("GET", `${cw}/inboxes/2/agent_bot`, () => json({ agent_bot: this.bot })),
       on("GET", `${cw}/inboxes/2`, () => json({ id: 2, name: "Acme — Product App" })),
       on("GET", `${cw}/conversations`, (request) => {
         const all = [...this.conversations.values()].map((c) => this.conversationJson(c));
@@ -655,7 +657,7 @@ describe("worker", () => {
     await drain();
     expect(world.webhookPosts().map((post) => post.body.content)).toEqual([
       expect.stringContaining("Open in Chatwoot"),
-      "thanks, solved\n-# <@100000000000000777>",
+      "thanks, solved\n-# Triage bot not called: handled automatically. Ask it here, if needed.",
     ]);
     // The first update failed; the retry unarchives with the tags, then archives.
     expect(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).map((request) => JSON.parse(request.body))).toEqual([
@@ -1153,13 +1155,54 @@ describe("worker", () => {
     expect(cache.map((row) => row.key)).toEqual(["sweep:3:last"]);
   });
 
+  it.each(["status", "sweep"])(
+    "holds one pending conversation job without polling and releases it through %s",
+    async (wake) => {
+      const id = wake === "status" ? 77 : 78;
+      world = new World();
+      world.bot = { id: 42, account_id: 3 };
+      world.conversation(id, [{ id: 770, content: "Pending request", message_type: 0 }], {}, "pending");
+      await chatwootWebhook({ event: "message_created", id: 770, account: { id: 3 }, conversation: { id } });
+      await vi.waitFor(
+        async () => {
+          await runInDurableObject(hub(), (_instance, state) => {
+            const rows = state.storage.sql
+              .exec<{ suspended: number }>("SELECT suspended FROM jobs WHERE key = ?", `conversation:3:${id}`)
+              .toArray();
+            expect(rows).toEqual([{ suspended: 2 }]);
+          });
+        },
+        { timeout: 5000 },
+      );
+      expect(world.webhookPosts()).toEqual([]);
+      await runInDurableObject(hub(), async (_instance, state) => expect(await state.storage.getAlarm()).toBeNull());
+      const conversation = world.conversations.get(id);
+      if (!conversation) throw new Error("Test conversation missing");
+      conversation.status = "open";
+      if (wake === "status") {
+        await chatwootWebhook({ event: "conversation_status_changed", id, account: { id: 3 } });
+      } else {
+        conversation.lastActivityAt = 1; // Far outside the relay's ordinary activity window.
+        await sweep();
+      }
+      await vi.waitFor(
+        () =>
+          expect(world.webhookPosts().some((post) => String(post.body.content).includes("Pending request"))).toBe(true),
+        { timeout: 5000 },
+      );
+      expect(world.webhookPosts().filter((post) => String(post.body.content).includes("Pending request"))).toHaveLength(
+        1,
+      );
+    },
+  );
+
   it("relays a message a kind's reply answered after routing, without calling the triage bot", async () => {
     const globex = "chatwoot.example.com/api/v1/accounts/1";
     const conversation = {
       id: 8,
       status: "open",
       inbox_id: 2,
-      custom_attributes: { routing_seen: 80, routing_handled: 80, routing_kind: "startup-program" },
+      custom_attributes: {},
       meta: { sender: { name: "Jane Doe" }, assignee: null, channel: "Channel::Email" },
       messages: [{ id: 80 }],
       last_activity_at: Math.floor(Date.now() / 1000),
@@ -1172,7 +1215,14 @@ describe("worker", () => {
     };
     world = new World([
       on("GET", `${globex}/conversations/8`, () => json(conversation)),
-      on("GET", `${globex}/conversations/8/messages`, () => json({ payload: [customer] })),
+      on("GET", `${globex}/conversations/8/messages`, (request) =>
+        json({
+          payload: [
+            customer,
+            { id: 81, content: "Thanks for applying", message_type: 1, sender: { type: "agent_bot" } },
+          ].filter((message) => message.id > Number(request.url.searchParams.get("after") ?? 0)),
+        }),
+      ),
       on("GET", `${globex}/inboxes/2`, () => json({ id: 2, name: "Globex — Email" })),
       on("POST", `${globex}/conversations/8/custom_attributes`, () => json({})),
     ]);

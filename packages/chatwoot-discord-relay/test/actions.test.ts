@@ -56,10 +56,39 @@ describe("executeCommand", () => {
   it("marks as pending", async () => {
     const { result, requests } = run(
       { type: "status", status: "pending" },
+      on("GET", conversation, () => json({ id: 15, inbox_id: 2 })),
+      on("GET", `${cw}/accounts/3/inboxes/2/agent_bot`, () => json({ agent_bot: null })),
       ok("POST", `${conversation}/toggle_status`),
     );
     expect(await result).toBe("✅ Marked as pending.");
     expect(JSON.parse(requests.at(-1)?.body ?? "")).toEqual({ status: "pending" });
+  });
+
+  it("hands pending back to the inbox bot with a typed assignment using the invoking user token", async () => {
+    const { result, requests } = run(
+      { type: "status", status: "pending" },
+      on("GET", conversation, () =>
+        json({ id: 15, inbox_id: 2, meta: { assignee: { id: 42 }, assignee_type: "User" } }),
+      ),
+      on("GET", `${cw}/accounts/3/inboxes/2/agent_bot`, () =>
+        json({ agent_bot: { id: 42, account_id: 3, secret: "ignored", access_token: "ignored" } }),
+      ),
+      ok("POST", `${conversation}/assignments`),
+    );
+    expect(await result).toBe("✅ Handed back to the inbox bot.");
+    expect(JSON.parse(requests.at(-1)?.body ?? "{}")).toEqual({ assignee_id: 42, assignee_type: "AgentBot" });
+    expect(requests.every((request) => request.headers.get("api_access_token") === "token-alice")).toBe(true);
+    expect(requests.some((request) => request.url.pathname.endsWith("toggle_status"))).toBe(false);
+  });
+
+  it("refuses handback to a bot from another account", async () => {
+    const { result, requests } = run(
+      { type: "status", status: "pending" },
+      on("GET", conversation, () => json({ id: 15, inbox_id: 2 })),
+      on("GET", `${cw}/accounts/3/inboxes/2/agent_bot`, () => json({ agent_bot: { id: 42, account_id: 1 } })),
+    );
+    expect(await result).toBe("❌ That did not work. Please do it in Chatwoot.");
+    expect(requests.some((request) => request.method === "POST")).toBe(false);
   });
 
   it("snoozes until the next reply without a time, or until the given time", async () => {
@@ -377,14 +406,14 @@ describe("executeCommand", () => {
     });
 
     it.each([undefined, "security"])(
-      "keeps legacy labels alongside routing_kind %s when replacing or clearing a topic",
+      "keeps configured kind labels %s when replacing or clearing a topic",
       async (kind) => {
-        const settings = testSettings({ router: { accounts: [3], keepLabels: ["spam", "beg-bounty"] } });
+        const settings = testSettings({ router: { keepLabels: ["spam", "beg-bounty", ...(kind ? [kind] : [])] } });
         const ticket = on("GET", conversation, () =>
           json({
             id: 15,
             labels: ["vip", "spam", "security"],
-            custom_attributes: kind ? { routing_kind: kind } : {},
+            custom_attributes: {},
           }),
         );
         for (const labels of [["refund"], []]) {
@@ -396,13 +425,13 @@ describe("executeCommand", () => {
     );
 
     it("keeps the ticket's kinds when it sets its topic label", async () => {
-      const withKinds = testSettings({ router: { accounts: [3] } });
+      const withKinds = testSettings({ router: { keepLabels: ["security"] } });
       const ticket = on("GET", conversation, () =>
         json({
           id: 15,
           status: "open",
           labels: ["security", "vip"],
-          custom_attributes: { routing_kind: "security" },
+          custom_attributes: {},
           meta: {},
         }),
       );
@@ -471,14 +500,14 @@ describe("executeCommand", () => {
       });
     });
 
-    it("excludes kept legacy labels and routing_kind from the Manage topic menu", async () => {
-      const settings = testSettings({ router: { accounts: [3], keepLabels: ["spam"] } });
+    it("excludes configured kind labels from the Manage topic menu", async () => {
+      const settings = testSettings({ router: { keepLabels: ["spam", "security"] } });
       const ticket = on("GET", conversation, () =>
         json({
           id: 15,
           status: "open",
           labels: ["spam", "security", "vip"],
-          custom_attributes: { routing_kind: "security" },
+          custom_attributes: {},
         }),
       );
       const allLabels = on("GET", `${cw}/accounts/3/labels`, () =>

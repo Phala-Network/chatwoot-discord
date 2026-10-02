@@ -44,7 +44,6 @@ export default defineConfig({
               "100000000000000055": { "account:3": "100000000000000301", "status:open": "100000000000000302" },
             },
             triage: { userId: "100000000000000777" },
-            router: { accounts: [1] },
           },
           DISCORD_BOT_TOKEN: "test-bot-token",
           DISCORD_PUBLIC_KEY: publicHex,
