@@ -7,7 +7,8 @@ Neither Worker calls the other: Chatwoot is their only coordination surface.
 
 ## How it works
 
-The router is a level-triggered reconciler: triggers request a read, not a transition.
+The router is a level-triggered reconciler running one-time automation per input version.
+People own assignment, labels, and status after those effects, just as with a Chatwoot automation rule.
 
 - Webhooks and the all-status, newest-activity-first sweep enqueue the same deduplicated
   `route:<account>:<conversation>` job. Every run reads Chatwoot; event payloads are not routing inputs.
@@ -15,23 +16,27 @@ The router is a level-triggered reconciler: triggers request a read, not a trans
   the previous pass's start, using the same pass model as the relay.
 - Inputs are the first three customer messages with usable, redacted text, capped at 1,600 characters.
   Their message ids form the memoization key. An unchanged key reuses Jev's answer; a new message
-  entering this window gets a new answer. There are no pending/waiting/done decisions or stale checks.
+  entering this window gets a new answer. There are no pending/waiting/done decision states.
   Internal messages are filtered out; public replies are scanned within a bounded three-page read.
   If that read cannot fill or finish the window, no automatic status action is allowed.
-- The answer and a fresh conversation read determine desired labels, owner, reply, and status.
+- Immediately before effects, a fresh read recomputes the input key. If it changed during Jev,
+  nothing from the old plan is applied or acknowledged; the existing queue reruns the job.
+  The answer and the fresh conversation determine applicable labels, owner, reply, and status.
   Non-open, blocked, pre-cutover, or differently assigned conversations receive no routing actions.
   An assignment to this decision's owner is eligible on retry. Empty inputs never call Jev or snooze.
-- Labels and assignment converge by comparison with Chatwoot. Reply and status attempts are recorded
-  **before** sending, under `reply:<account>:<conversation>` and
-  `status:<account>:<conversation>:<input key>`. A reply is attempted once per conversation; a status
-  once per input window, so reopening does not repeat it. These local idempotency keys deliberately
-  favor avoiding duplicates over delivery: an uncertain or failed attempt is not sent again. Confirmed
-  kind actions carry their handled message id in the same outbox entry, not a separate completion record.
-- Coordination attributes are desired state too: `routing_seen` acknowledges the latest customer
-  message observed by the completed run; `routing_handled` identifies inputs a kind handled;
-  `routing_kind` preserves its label. Runs derive them from messages, labels, memoized answers, and
-  the outbox, retain greater existing watermarks, and write only differences after applicable actions.
-  The same run repairs missing attributes for any status, without a repair job or a second state machine.
+- Every action has an effects-ledger key: `<effect>:<account>:<conversation>:<input key>` for
+  `assign`, `labels` (topic and kind together), and `status`; `reply:<account>:<conversation>` remains
+  once per ticket. Recorded effects never run again for that version, even if a person unassigns or
+  clears labels. Assignment and labels are recorded after confirmed success, or without a request when
+  already satisfied. Failed idempotent actions retry. Reply and status attempts are recorded before
+  sending; failed or uncertain attempts are not repeated. Confirmed kind actions carry their handled
+  input id in that ledger entry. This is an attempt ledger, not an outbox with a dispatcher.
+- `routing_seen` projects a durable, monotonic per-conversation checkpoint: the highest customer
+  message id observed after applicable effects complete. Persist it before synchronizing attributes,
+  retaining greater existing values. Later bounded reads cannot lower it. `routing_handled` and
+  `routing_kind` derive from the effects ledger, not current labels or the bounded message view.
+  Each run writes only differences; this repairs lost attributes for any status without a repair job.
+  Memo lookups use exact keys; ledger history uses indexed key ranges, never a whole-cache scan.
 - A run completes after applicable actions and attribute synchronization succeed, or after acknowledging
   an out-of-scope conversation. Errors retry; deleted conversations are dropped. Events during a run
   keep its job queued for another read. The sweep provides the same reconciliation if a webhook is lost.
