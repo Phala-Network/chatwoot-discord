@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bot handoff. Pending sweeps have no time window and resume pages across alarms; another pass covers page shifts.
 - Match a late status webhook to its already-read activity; distinct transitions need a newer boundary id, even
   in the same second. Metadata-only `updated_at` changes never create an activity expectation. Pending observations
-  survive retries, preserving the boundary when a resolution succeeds but its response is lost.
+  survive retries, preserving the boundary when a resolution succeeds but its response is lost. Merging the first
+  timestamped webhook preserves any existing activity ID lower bound, so reopening cannot reuse an older resolution.
 - After three processing failures or a missing canned response, persist handoff and retry it until Chatwoot accepts
   it or the turn is no longer eligible. A canned reply's attempt remains once per conversation, even on an unknown
   send outcome. Greeting/no-request tickets stay pending until a request or three usable texts.

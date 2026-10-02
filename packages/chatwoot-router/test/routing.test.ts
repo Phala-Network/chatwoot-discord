@@ -413,6 +413,42 @@ describe("native bot turns", () => {
     expect(mock.ticket.status).toBe("pending");
   });
 
+  it("retains a known lower bound when the first timestamped webhook arrives", async () => {
+    const at = Math.floor(Date.now() / 1000);
+    vi.spyOn(Date, "now").mockReturnValue(at * 1000 + 100);
+    const mock = world(
+      {
+        messages: [
+          incoming(1, "Older request"),
+          { ...activity(2, "resolved"), created_at: at },
+          incoming(3, "Spam in the next turn"),
+        ],
+        during: (operation) => {
+          if (operation === "toggle_status") mock.ticket.messages?.pop();
+        },
+      },
+      { owner: ["unclear", 1], kind: ["spam", 1] },
+    );
+    const ctx = context(new MemoryStore(), KINDS);
+    await routeConversation(ctx, 1, 5);
+    expect(mock.ticket.status).toBe("resolved");
+    expect(JSON.parse(ctx.store.get("turn:1:5") ?? "{}").expected.after).toBe(2);
+    expectActivity(ctx.store, 1, 5, { status: "resolved", at: at + 0.8 });
+    mock.ticket.status = "pending";
+    mock.ticket.messages?.push(incoming(4, "A real new request"));
+    let waiting = false;
+    try {
+      await routeConversation(ctx, 1, 5);
+    } catch (error) {
+      waiting = error instanceof Error && error.name === "ActivityPendingError";
+    }
+    expect({ waiting, decisions: sent(mock.requests, "POST", JEV).length, status: mock.ticket.status }).toEqual({
+      waiting: true,
+      decisions: 1,
+      status: "pending",
+    });
+  });
+
   it.each(["handback", "router resolution"])(
     "merges a late %s webhook with its already-read activity without handing off a greeting",
     async (source) => {

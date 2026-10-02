@@ -38,9 +38,11 @@ export function expectActivity(
   // An activity read before its first status webhook can claim that transition. A boundary
   // already matched to a timestamp cannot also satisfy a different transition in the same second.
   const claimed = guard.claimed ?? guard.transitionAt !== undefined;
+  const after = transition.at === undefined || claimed ? (guard.boundary ?? 0) : 0;
   saveGuard(store, accountId, conversationId, {
     ...guard,
-    expected: { ...transition, after: transition.at === undefined || claimed ? guard.boundary : undefined },
+    // A first webhook must not relax a newer activity requirement already observed locally.
+    expected: { ...transition, after: Math.max(guard.expected?.after ?? 0, after) },
     transitionAt: transition.at ?? guard.transitionAt,
     handoff: false,
     failures: 0,
