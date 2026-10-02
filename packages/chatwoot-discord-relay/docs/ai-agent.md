@@ -1,6 +1,6 @@
 # Connecting an AI agent
 
-chatwoot-discord does not run an AI model. It gives an AI agent (any Discord bot you operate,
+chatwoot-discord-relay does not run an AI model. It gives an AI agent (any Discord bot you operate,
 called the *triage bot* in the configuration) a place in the ticket workflow: the agent is called
 on customer messages, reads the ticket in its forum post, and proposes a reply that a human sends.
 This page is the contract such an agent follows.

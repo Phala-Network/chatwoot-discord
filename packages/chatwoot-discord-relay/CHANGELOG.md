@@ -7,18 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- AI routing moves to the independently deployed `chatwoot-router` package in the `chatwoot-workers` monorepo.
+  The relay no longer accepts `routing`, `TYPESAFE_API_KEY`, or `CHATWOOT_BOT_TOKENS`; configure
+  `router.accounts` (and optionally `router.waitSeconds`, default 30) instead. **Deploy this relay first**,
+  removing embedded routing, so the old and new routers never act together. Then take the newest Chatwoot
+  conversation id across the routed accounts at cutover, deploy `chatwoot-router` with the old `routing`
+  configuration and secrets (`CHATWOOT_TOKEN` replaces `CHATWOOT_RELAY_TOKEN` there), and set its
+  `startAfterConversationId` to that id. Add its signed Chatwoot webhook and create conversation attributes
+  `routing_seen` and `routing_handled` (Number), and `routing_kind` (Text). Pre-cutover conversations are
+  intentionally not routed by the new Worker; its Durable Object does not import the relay's decisions.
+- New relay deployments default to Worker name `chatwoot-discord-relay`. **Existing deployments must keep
+  their current Worker `name` and `Hub` export**: renaming a Worker creates another Worker without its
+  Durable Object state. Source deployments now live in `packages/chatwoot-discord-relay`; run `npm ci`
+  at the workspace root. Both npm packages keep self-contained exports and type declarations.
+
 ## [0.28.0] - 2026-10-02
 
 ### Changed
 
 - Built and deployed with the [Cloudflare CLI](https://developers.cloudflare.com/cf/) (`cf`) and Vite instead of
-  Wrangler: `cloudflare.config.ts` replaces `wrangler.jsonc`, `npm run dev`, `build`, and `deploy` run `cf`, and
+  the legacy Cloudflare CLI: `cloudflare.config.ts` replaces the legacy JSON configuration, `npm run dev`, `build`, and `deploy` run `cf`, and
   secrets are uploaded with `npx cf deploy --secrets-file <file>`. To upgrade a deployment from a checkout, move your
-  `CONFIG` from `wrangler.jsonc` into `cloudflare.config.ts` and deploy with `npx cf deploy`: the Worker keeps its
+  `CONFIG` from the legacy JSON configuration into `cloudflare.config.ts` and deploy with `npx cf deploy`: the Worker keeps its
   secrets and its Hub Durable Object. A deploy now fails while a required secret is not set. The Deploy to Cloudflare
-  button is gone, as it needs a Wrangler configuration: deploy a copy made with it from a checkout or from CI (see
+  button is gone, as it needs a legacy CLI configuration: deploy a copy made with it from a checkout or from CI (see
   [Use cf in CI](https://developers.cloudflare.com/cf/ci/)). A deployment from a repository of your own can build with
-  Vite instead of Wrangler with `vite`, `@cloudflare/vite-plugin`, and a `vite.config.ts` (see the README).
+  Vite instead of the legacy Cloudflare CLI with `vite`, `@cloudflare/vite-plugin`, and a `vite.config.ts` (see the README).
 
 ### Fixed
 
@@ -360,7 +376,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- The example `wrangler.jsonc` no longer has the `tag` keys that 0.4.0 removed, which made its
+- The example the legacy JSON configuration no longer has the `tag` keys that 0.4.0 removed, which made its
   `CONFIG` invalid.
 
 ## [0.4.0] - 2026-09-28
@@ -470,12 +486,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `@here`, and a leading `-#` get a zero-width space).
 - Drafts are read with CommonMark's code fence rules, so a draft may contain a code block.
 - A linked agent whose Chatwoot user left the account is told so instead of "not linked".
-- `wrangler.jsonc` is committed with placeholder `CONFIG` (replacing `wrangler.example.jsonc`),
+- the legacy JSON configuration is committed with placeholder `CONFIG` (replacing the previous example configuration),
   and `package.json` describes each secret for the Cloudflare dashboard.
 - npm replaces Bun (npm 12 pinned in `packageManager`; `allowScripts` limits install scripts to
   esbuild and workerd); `register-commands` runs with Node's type stripping and takes its options
   after `--`.
-- TypeScript 7; runtime types come from `wrangler types`; compatibility date 2026-08-15; wrangler
+- TypeScript 7; runtime types come from the legacy type generator; compatibility date 2026-08-15; the legacy CLI
   4.142.0. `gen:chatwoot` runs openapi-typescript through `npx`.
 
 ### Fixed
@@ -517,7 +533,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Bun replaces pnpm as the package manager and script runner (`bun install`, `bun run <script>`,
-  lockfile `bun.lock`); `register-commands` runs with Bun instead of tsx. Vitest and wrangler still
+  lockfile `bun.lock`); `register-commands` runs with Bun instead of tsx. Vitest and the legacy CLI still
   run on Node 24.
 - The status tag is the conversation's Chatwoot status (`open`, `pending`, `snoozed`, or
   `resolved`); only resolved posts are archived.
@@ -568,39 +584,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-invocation subrequest budget, and a cron reconciliation sweep for missed webhooks.
 - Verification of Chatwoot webhook HMAC signatures and Discord Ed25519 interaction signatures.
 
-[Unreleased]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.28.0...HEAD
-[0.28.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.27.0...v0.28.0
-[0.27.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.26.0...v0.27.0
-[0.26.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.25.0...v0.26.0
-[0.25.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.24.0...v0.25.0
-[0.24.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.23.0...v0.24.0
-[0.23.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.22.0...v0.23.0
-[0.22.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.21.0...v0.22.0
-[0.21.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.20.1...v0.21.0
-[0.20.1]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.20.0...v0.20.1
-[0.20.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.19.1...v0.20.0
-[0.19.1]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.19.0...v0.19.1
-[0.19.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.18.1...v0.19.0
-[0.18.1]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.18.0...v0.18.1
-[0.18.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.17.0...v0.18.0
-[0.17.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.16.0...v0.17.0
-[0.16.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.15.0...v0.16.0
-[0.15.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.14.0...v0.15.0
-[0.14.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.13.1...v0.14.0
-[0.13.1]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.13.0...v0.13.1
-[0.13.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.12.0...v0.13.0
-[0.12.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.11.0...v0.12.0
-[0.11.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.10.0...v0.11.0
-[0.10.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.9.0...v0.10.0
-[0.9.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.8.1...v0.9.0
-[0.8.1]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.8.0...v0.8.1
-[0.8.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.7.1...v0.8.0
-[0.7.1]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.7.0...v0.7.1
-[0.7.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.6.1...v0.7.0
-[0.6.1]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.6.0...v0.6.1
-[0.6.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/Phala-Network/chatwoot-discord-relay/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/Phala-Network/chatwoot-discord-relay/releases/tag/v0.1.0
+[Unreleased]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.28.0...HEAD
+[0.28.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.27.0...v0.28.0
+[0.27.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.26.0...v0.27.0
+[0.26.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.25.0...v0.26.0
+[0.25.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.24.0...v0.25.0
+[0.24.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.23.0...v0.24.0
+[0.23.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.22.0...v0.23.0
+[0.22.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.21.0...v0.22.0
+[0.21.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.20.1...v0.21.0
+[0.20.1]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.20.0...v0.20.1
+[0.20.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.19.1...v0.20.0
+[0.19.1]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.19.0...v0.19.1
+[0.19.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.18.1...v0.19.0
+[0.18.1]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.18.0...v0.18.1
+[0.18.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.17.0...v0.18.0
+[0.17.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.16.0...v0.17.0
+[0.16.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.15.0...v0.16.0
+[0.15.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.14.0...v0.15.0
+[0.14.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.13.1...v0.14.0
+[0.13.1]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.13.0...v0.13.1
+[0.13.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.12.0...v0.13.0
+[0.12.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.11.0...v0.12.0
+[0.11.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.10.0...v0.11.0
+[0.10.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.8.1...v0.9.0
+[0.8.1]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.7.1...v0.8.0
+[0.7.1]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.6.1...v0.7.0
+[0.6.1]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/Phala-Network/chatwoot-workers/releases/tag/v0.1.0

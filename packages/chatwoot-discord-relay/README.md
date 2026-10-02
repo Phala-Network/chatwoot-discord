@@ -1,8 +1,8 @@
 # chatwoot-discord-relay
 
-[![CI](https://github.com/Phala-Network/chatwoot-discord-relay/actions/workflows/ci.yml/badge.svg)](https://github.com/Phala-Network/chatwoot-discord-relay/actions/workflows/ci.yml)
-[![CodeQL](https://github.com/Phala-Network/chatwoot-discord-relay/actions/workflows/codeql.yml/badge.svg)](https://github.com/Phala-Network/chatwoot-discord-relay/actions/workflows/codeql.yml)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Phala-Network/chatwoot-discord-relay/badge)](https://scorecard.dev/viewer/?uri=github.com/Phala-Network/chatwoot-discord-relay)
+[![CI](https://github.com/Phala-Network/chatwoot-workers/actions/workflows/ci.yml/badge.svg)](https://github.com/Phala-Network/chatwoot-workers/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/Phala-Network/chatwoot-workers/actions/workflows/codeql.yml/badge.svg)](https://github.com/Phala-Network/chatwoot-workers/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Phala-Network/chatwoot-workers/badge)](https://scorecard.dev/viewer/?uri=github.com/Phala-Network/chatwoot-workers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Mirror every [Chatwoot](https://www.chatwoot.com/) conversation into a Discord forum post, and
@@ -19,12 +19,11 @@ is enough).
 - **Ready for AI workflows.** Any Discord bot joins as an AI agent without integration code: it is
   called on each customer message, reads the whole ticket in its post, and proposes a reply that
   a human sends with **Reply with draft**. Budgets per ticket and per hour bound its cost
-  ([Connecting an AI agent](docs/ai-agent.md)).
-- **AI triage with [TypeSafe Jev](https://docs.typesafe.ai).** A new ticket is assigned to its
-  owner and gets a topic label. Kinds you describe in plain words, such as spam or security
-  reports, get their label and, if you choose, a canned response and resolution; optionally, a
-  greeting with no request yet is snoozed until the customer says more. Jev acts only when it is confident, and
-  common identifiers are redacted before the text leaves the Worker ([Routing](#routing)).
+  ([Connecting an AI agent](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/docs/ai-agent.md)).
+- **AI triage with [chatwoot-router](https://github.com/Phala-Network/chatwoot-workers/tree/main/packages/chatwoot-router).**
+  A separately deployed Worker assigns owners, adds topic and kind labels, and optionally sends
+  canned replies or sets tickets aside. The relay waits briefly for its decision and does not call
+  the Discord triage bot for messages it handled ([Routing](#routing)).
 - **A support queue.** Every hour, the tickets waiting for a reply or an assignee, pinging their
   assignees and escalating long-unassigned ones ([Support queue](#support-queue)).
 - **Reliable and secure.** Work is queued durably and retried, and a sweep every 5 minutes catches
@@ -41,11 +40,11 @@ is enough).
 a minor release may change configuration or setup; the [changelog](CHANGELOG.md) says what to
 do when it does.
 
-![A Discord forum with one post per Chatwoot conversation, tagged by account, status, assignee, and topic](docs/assets/forum.png)
+![A Discord forum with one post per Chatwoot conversation, tagged by account, status, assignee, and topic](https://raw.githubusercontent.com/Phala-Network/chatwoot-workers/main/packages/chatwoot-discord-relay/docs/assets/forum.png)
 
 *Each conversation is a forum post, tagged by account, status, assignee, topic, and priority.*
 
-![A ticket post: the ticket header, a customer message that mentions a triage bot, an assignment, the bot's answer with a draft, a private note, and the ticket's card with its buttons](docs/assets/ticket.png)
+![A ticket post: the ticket header, a customer message that mentions a triage bot, an assignment, the bot's answer with a draft, a private note, and the ticket's card with its buttons](https://raw.githubusercontent.com/Phala-Network/chatwoot-workers/main/packages/chatwoot-discord-relay/docs/assets/ticket.png)
 
 *Inside a post: the customer's message calls the triage bot, whose answer carries a draft; the
 ticket's card at the bottom offers **Reply with draft** and the other actions. Illustrations
@@ -61,8 +60,8 @@ with fictional data.*
 - [Security model](#security-model)
 - [Limits and the Workers Free plan](#limits-and-the-workers-free-plan)
 - [Development](#development)
-- More: [Connecting an AI agent](docs/ai-agent.md), [How conversations are relayed](docs/relay.md),
-  [Operations](docs/operations.md) (existing Chatwoot, cutover, recovery), [Internals](docs/internals.md)
+- More: [Connecting an AI agent](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/docs/ai-agent.md), [How conversations are relayed](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/docs/relay.md),
+  [Operations](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/docs/operations.md) (existing Chatwoot, cutover, recovery), [Internals](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/docs/internals.md)
 
 ## How it works
 
@@ -76,7 +75,7 @@ Cron (every 5 min) ─▶ Worker ──▶ Hub Durable Object ──▶ sweep: r
   It opens with a ticket header (channel, inbox, customer email, phone number on phone channels,
   "Open in Chatwoot" link), every message follows under its sender's name (customers, agents,
   🔒 private notes, activity lines), and it ends with the ticket's card: its status, assignee, and
-  labels, with buttons to act on it. [How conversations are relayed](docs/relay.md) has the details.
+  labels, with buttons to act on it. [How conversations are relayed](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/docs/relay.md) has the details.
 - Forum tags follow the conversation: account, status (`Open`, `Pending`, `Snoozed`,
   `Resolved`), assignee or `Unassigned`, topic, priority, and labels. Resolved posts are archived.
 - Agents act inside the post with the card's buttons or with [commands](#commands-and-buttons)
@@ -88,9 +87,8 @@ Cron (every 5 min) ─▶ Worker ──▶ Hub Durable Object ──▶ sweep: r
   **Apps → Reply with this**.
 - Optionally, every hour a message lists the tickets waiting for a reply or without an assignee,
   pings their assignees, and escalates long-unassigned ones to a role ([support queue](#support-queue)).
-- Optionally, a new ticket is assigned to its owner and given a topic by
-  [TypeSafe Jev](https://docs.typesafe.ai), a classifier, when it is confident enough
-  ([routing](#routing)).
+- Optionally, the separate [chatwoot-router](https://github.com/Phala-Network/chatwoot-workers/tree/main/packages/chatwoot-router)
+  Worker assigns a new ticket's owner and topic with TypeSafe Jev ([routing](#routing)).
 
 Design choices:
 
@@ -105,7 +103,7 @@ Design choices:
   messages only when mentioned inline, so the agent wakes up for customer messages and nothing
   else: agent replies, private notes, and activity lines carry no mention. The relay's
   `allowed_mentions` suppresses the notification, so the token pings no human. See
-  [Connecting an AI agent](docs/ai-agent.md).
+  [Connecting an AI agent](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/docs/ai-agent.md).
 - **The AI drafts, humans send.** The agent writes its proposed reply as the last fenced code
   block of its answer. A human opens the reply editor prefilled with it, edits if needed, and
   submits.
@@ -116,14 +114,14 @@ Design choices:
 - **Reliable by construction.** Chatwoot sends each webhook once, without retry, so webhooks are
   only triggers: the Worker queues the work durably in one Durable Object, which reads Chatwoot's
   API, retries failed work until it succeeds, and sweeps every 5 minutes for anything missed
-  ([Internals](docs/internals.md) says what the sweep does not cover).
+  ([Internals](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/docs/internals.md) says what the sweep does not cover).
 
 ## Deploy
 
 You need a Cloudflare account, a Chatwoot instance (v4.18 or later) reachable from the internet,
 and a Discord server where you can add an application and a forum channel. To install on a
 Chatwoot that already has conversations, or to replace another relay, read
-[Operations](docs/operations.md) first.
+[Operations](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/docs/operations.md) first.
 
 ### 1. Discord
 
@@ -171,10 +169,12 @@ The secrets are described in [`.dev.vars.example`](.dev.vars.example) and the
 the secrets; to change some, deploy again with a file that holds only those (the others are kept).
 Do not leave the file lying around: it holds every credential.
 
-**From a checkout.**
+**From a checkout.** Install dependencies at the workspace root, then deploy the package.
+Run npm and build commands inside Docker as shown in the root contribution guide.
 
 ```sh
 npm ci
+cd packages/chatwoot-discord-relay
 # Replace the placeholder CONFIG in cloudflare.config.ts (see the configuration reference).
 npx cf deploy --secrets-file <secrets file>
 ```
@@ -195,14 +195,14 @@ import { storedConfig } from "chatwoot-discord-relay/stored-config";
 export default defineConfig({
   accountId: "<account id>",
   worker: {
-    name: "chatwoot-discord",
+    name: "chatwoot-discord-relay",
     entrypoint: "src/index.ts",
     compatibilityDate: "2026-08-15",
     domains: ["<worker host>"],
     triggers: [triggers.scheduled({ schedule: "*/5 * * * *" })],
     exports: { Hub: exports.durableObject({ storage: "sqlite" }) },
     env: {
-      HUB: bindings.durableObject({ worker: "chatwoot-discord", exportName: "Hub" }),
+      HUB: bindings.durableObject({ worker: "chatwoot-discord-relay", exportName: "Hub" }),
       CONFIG_STORE: bindings.kv({ id: "<namespace id>" }),
       CONFIG_KEY: bindings.text(storedConfig(new URL("config.jsonc", import.meta.url)).key),
     },
@@ -215,7 +215,7 @@ without `--mode` (this configuration has no modes): `npx cf build`, then `npx cf
 the configuration. By hand:
 
 ```sh
-npx cf kv namespaces create --title chatwoot-discord-config   # once
+npx cf kv namespaces create --title chatwoot-discord-relay-config   # once
 npx chatwoot-discord-store-config config.jsonc --namespace-id <namespace id> && npx cf deploy
 ```
 
@@ -287,7 +287,7 @@ working, and the commands work everywhere.
 | `/unblock` | | Like Chatwoot's "Unblock contact": their new messages are posted again (messages received while blocked are not). The status is unchanged. |
 | | **Manage** | A card only you see, to change the assignee, the label, and the status (below). |
 
-![The Manage card: menus for the assignee and the label, and Open, Resolved, and Snooze buttons with the current status highlighted](docs/assets/manage.png)
+![The Manage card: menus for the assignee and the label, and Open, Resolved, and Snooze buttons with the current status highlighted](https://raw.githubusercontent.com/Phala-Network/chatwoot-workers/main/packages/chatwoot-discord-relay/docs/assets/manage.png)
 
 **Manage** opens a card only you see, drawn with the ticket as it is and coloured by its status:
 menus for its assignee and its label (the card sets the one topic label: choosing one replaces
@@ -337,7 +337,7 @@ a larger configuration goes in a [KV namespace](https://developers.cloudflare.co
 | `relay.maxChunks` | integer 1–10 | `4` | Discord messages per Chatwoot message before truncation. |
 | `relay.topicAttribute` | non-empty string | `topic` | Conversation custom attribute used as a topic tag. |
 | `relay.linkAttribute` | string | `discord_thread` | Conversation custom attribute that receives the post URL (`""` disables it). |
-| `relay.startAfterMessageId` | integer ≥ 0 | `0` | Messages with an id at or below this are never relayed (cutover watermark, see [Operations](docs/operations.md)). |
+| `relay.startAfterMessageId` | integer ≥ 0 | `0` | Messages with an id at or below this are never relayed (cutover watermark, see [Operations](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/docs/operations.md)). |
 | `relay.maxAttempts` | integer ≥ 1 | `5` | Attempts before a message Discord refuses as invalid is skipped with a notice. |
 | `relay.subrequestBudget` | integer 20–1000, and ≥ `relay.maxChunks` + 28 | `45` | Outbound requests per alarm invocation (Free plan limit: 50). The minimum fits a run's setup and one message's worst case (`src/relay/limits.ts`). |
 | `avatars.chatwoot` | https URL | `<publicUrl>/favicon-512x512.png` | Avatar of activity lines, cards, notices, agent bots without an https Chatwoot avatar, and agents with neither a linked Discord user nor an https Chatwoot avatar. |
@@ -346,18 +346,12 @@ a larger configuration goes in a [KV namespace](https://developers.cloudflare.co
 | `queue.channelId` | Discord id (17–20 digits) | required | Channel or forum post the queue is posted in. The bot needs *Send Messages* there (*Send Messages in Threads* for a post). |
 | `queue.escalationRoleId` | Discord id (17–20 digits) | unset | Role pinged for tickets unassigned too long. To ping a role that is not mentionable, the bot needs *Mention @everyone, @here, and All Roles* in the channel. Unset: no escalation. |
 | `queue.escalationUserId` | Discord id (17–20 digits) | unset | A user pinged instead of a role (set one of the two). |
-| `routing` | object | unset | Assigns new tickets, adds their topic label, and acts on their kind with TypeSafe Jev ([routing](#routing)). Requires the `TYPESAFE_API_KEY` secret. Unset: off. |
-| `routing.model` | non-empty string | `jev-1.13.0` | TypeSafe model. |
-| `routing.minConfidence` | number 0.5–1 | `0.7` | Probability an answer needs before it is applied. |
-| `routing.snoozeUnclear` | boolean | `false` | Snooze a ticket with no clear owner in which the customer asked for nothing yet (a greeting, a test) until their next message. |
-| `routing.accounts` | object: account id → (owner name → owner) | required | Routed accounts (configured in `accounts[]`) and the owners Jev chooses from. Owner names are 1–40 lower-case letters, digits, or `_`; `unclear` is reserved. |
-| `routing.accounts.<id>.<name>.assignee` | integer > 0 | required | Chatwoot user id to assign. |
-| `routing.accounts.<id>.<name>.covers` | 1–1000 characters | required | What the owner handles: Jev's criterion for choosing them. |
-| `routing.topics` | object: label → what it covers | unset | Topic labels (Chatwoot label names, lower case) Jev chooses from; one is added when a ticket has no label other than its kinds (an automation rule's label is kept alone). Show them as forum tags with `label:<label>` keys in `forumTags`. Unset: no topic. |
-| `routing.kinds` | object: account id → (kind name → kind) | unset | Kinds of ticket Jev recognizes in routed accounts, added as labels beside the topic, and what is done once when it does ([routing](#routing)). Kind names are the account's label names (1–40 lower-case letters, digits, `_`, or `-`); `none` is reserved. Unset: none. |
-| `routing.kinds.<id>.<name>.covers` | 1–1000 characters | required | What the kind is: Jev's criterion for recognizing it. |
-| `routing.kinds.<id>.<name>.cannedResponse` | short code | unset | The account's Chatwoot canned response sent to the customer once, by the account's agent bot (`CHATWOOT_BOT_TOKENS`); none while it does not exist. |
-| `routing.kinds.<id>.<name>.status` | `resolved` or `snoozed` | unset | Set instead of routing the ticket (`snoozed`: until the customer's next message), after the reply of a `cannedResponse`; a new customer message reopens it. |
+| `router` | object | unset | Coordinate with a separate chatwoot-router Worker. Unset: no waiting. |
+| `router.accounts` | array of account ids | required | Relayed accounts whose open, unassigned customer messages wait for routing. |
+| `router.waitSeconds` | integer ≥ 0 | `30` | Maximum wait measured from the customer's message timestamp, not queue arrival. |
+| `router.attributes.seen` | non-empty string | `routing_seen` | Numeric latest customer message id decided on. |
+| `router.attributes.handled` | non-empty string | `routing_handled` | Numeric latest customer message id handled automatically. |
+| `router.attributes.kind` | non-empty string | `routing_kind` | Kind label kept when Manage replaces the topic label. |
 | `reconcile.lookbackSeconds` | integer ≥ 60 | `3600` | Minimum sweep window (conversations with activity within it are checked). Messages older than this are relayed without notifications. |
 | `reconcile.maxCatchUpSeconds` | integer ≥ 60 | `604800` (7 days) | Maximum sweep window after downtime. |
 | `attachments.maxFiles` | integer 0–10 | `10` | Files per `/reply` or `/note` (0 hides the editor's upload field). |
@@ -375,80 +369,29 @@ Worker secrets, never in the configuration, also validated at startup:
 | `CHATWOOT_RELAY_TOKEN` | non-empty | Access token of the Chatwoot user the relay reads as (an agent in every relayed inbox, or an administrator). |
 | `CHATWOOT_WEBHOOK_SECRETS` | JSON object, `{"<account id>":"<secret>"}` | Each account's webhook secret. |
 | `CHATWOOT_AGENT_TOKENS` | JSON object, `{"<Discord user id>":"<token>"}`; optional, default `{}` | Each linked agent's own Chatwoot access token; commands act with it. |
-| `TYPESAFE_API_KEY` | non-empty; required with `routing` | TypeSafe API key for routing. |
-| `CHATWOOT_BOT_TOKENS` | JSON object, `{"<account id>":"<token>"}`; optional, default `{}` | Each account's Chatwoot agent bot, which sends routing kinds' replies under its own name; required for an account whose kinds reply. |
 | `TRIAGE_HOOK_SECRET` | 32+ characters; optional | Signs the triage bot's hook ([triage bot hook](#triage-bot-hook)). Unset: the route is off. |
 
 ## Routing
 
-With `routing`, each new ticket of a routed account is routed when it is open, has no assignee, and
-has a customer message. The Worker asks Jev multiple-choice questions, who owns the ticket (one
-of the account's owners, or `unclear`) and its topic (with `topics`), plus its kind (with `kinds`)
-and whether the customer asks for anything yet (with `snoozeUnclear`), using the email subject and
-the first three customer messages. Before they leave the Worker, emails, URLs, hex and base58 addresses, long
-tokens, phone numbers, IP addresses (and four-part version numbers, which read as one), @handles, and the contact's name (each word of two characters or more) are replaced with
-`[REDACTED]`. This is best-effort redaction of common identifiers, not anonymization: other personal
-details in the text still reach TypeSafe, so check that its data policy suits you. An owner at
-`minConfidence` or above is assigned, and a topic at or above it is added as a label when the ticket
-has no label other than its kinds (a ticket has one topic label, so one an automation rule set stays alone). When no owner
-is clear, Jev is asked again each time the customer adds a message, until one is or three customer
-messages were seen; the ticket then stays for a person. With `snoozeUnclear`, Jev is also asked
-whether the customer asks for support, information, or an action yet: a ticket without a clear owner
-for which Jev is at least `minConfidence` sure there is no request (a greeting, a test, a name alone)
-is snoozed until the customer's next message, which reopens it and
-asks Jev again, so it waits for detail instead of escalating; after the third message it stays open.
-Any other (a request no owner covers, or Jev unsure) stays open for a person. A ticket the customer
-wrote to after the messages Jev was given is not snoozed (a message in the moment between that
-check and the snooze waits for the customer's next one; the support queue lists the ticket
-meanwhile). Customer messages are looked for among the next 300 messages (notes and activity lines count
-too): one beyond them is not seen, and the ticket is then not snoozed but left for a person. A ticket assigned
-before its turn (by a person or a Chatwoot automation rule) is left alone, and a routed ticket is
-never routed again, even if someone unassigns it. The decision is recorded, without expiry, before
-it is applied, so a retry applies the same one without asking Jev again. It is applied to the ticket
-as it is after Jev answered: an assignee or topic label someone set meanwhile is kept. Routing acts
-with `CHATWOOT_RELAY_TOKEN`, whose user must be an agent in the routed inboxes; Chatwoot records the
-assignment as made by that user. The sweep queues routing for open, unassigned tickets in its
-window, so a missed webhook only delays it.
+AI routing runs in [chatwoot-router](https://github.com/Phala-Network/chatwoot-workers/tree/main/packages/chatwoot-router),
+not in the relay. Deploy it with its own Chatwoot webhook and secrets. Configure the relay with, for example,
+`router: { accounts: [1], waitSeconds: 30 }`. Each id must also appear in `accounts`.
 
-With `kinds`, Jev is also asked which of the account's kinds the ticket is (or `none`). Kinds are
-labels of a second family: a ticket has one topic label, the category, and a kind Jev is confident
-about is added beside it (create each kind as a label in its account; it needs no forum tag, and
-the card shows it). It also acts with the decision: a kind with a `status` (spam, for example) sets the
-ticket aside, resolved or snoozed until the customer's next message, instead of routing it; the
-contact is not blocked, so a new message reopens the ticket as usual. A kind with a `cannedResponse` sends that
-Chatwoot canned response (Settings → Canned Responses, by its short code) to the customer, for
-example to acknowledge an application or point a security report to its process; a kind with both
-replies, then sets the ticket aside (a templated security report: acknowledged, then resolved). It is read when
-it is sent, so it is edited in Chatwoot, can use Chatwoot's variables such as `{{contact.name}}`,
-and nothing is sent while it does not exist. It is sent as the account's
-Chatwoot agent bot (`CHATWOOT_BOT_TOKENS`): customers see the bot's name, such as "Acme Support"; a
-bot's message assigns nobody and is no human first reply, and Chatwoot then counts the customer as
-answered (no longer waiting) until they write again. Create the bot in the account (Settings →
-Bots), without connecting it to an inbox. A reply goes out at most once per ticket: it is recorded
-before it is sent, so a failed send is not retried. Once a kind replied or set the ticket aside, the
-customer messages it handled (those Jev was given) are relayed without calling the triage bot, with a
-note. In an account whose kinds act, a ticket's new customer message is not posted while the ticket's
-routing is queued (and has not failed), up to 30 seconds after it was queued; a routing that fails or
-stays queued longer lets it through with the mention as usual. The customer's next message calls the bot as usual. Rules that need no judgement of the text (by inbox, sender, or
-subject) are Chatwoot's automation rules.
+The Workers coordinate only through the Chatwoot conversation the relay already fetches. Create conversation
+custom attribute definitions for `routing_seen` (**Number**), `routing_handled` (**Number**), and `routing_kind`
+(**Text**) in each routed account. If you rename them, set the router's `attributes` and the relay's
+`router.attributes` to the same names (`seen`, `handled`, `kind`). Keep them distinct from existing attributes.
 
-```jsonc
-"routing": {
-  "accounts": {
-    "1": {
-      "cloud": { "assignee": 6, "covers": "Cloud support and billing: deployments, invoices, account access." },
-      "sales": { "assignee": 7, "covers": "Sales and partnerships: pricing, capacity, volume deals." }
-    }
-  },
-  "topics": { "technical-support": "Something does not work.", "billing": "Payments, invoices, refunds." },
-  "kinds": {
-    "1": {
-      "spam": { "covers": "Unsolicited promotion or scams.", "status": "resolved" },
-      "startup-program": { "covers": "A Startup Program application.", "cannedResponse": "startup-program" }
-    }
-  }
-}
-```
+A customer message of an open, unassigned conversation waits while `routing_seen` is absent or below its id.
+It proceeds once that watermark reaches its id, the conversation becomes assigned or stops being open, or the
+message reaches `router.waitSeconds` old. A message without a timestamp proceeds immediately rather than waiting
+indefinitely. Historical messages and automatic email replies retain their existing no-notification behavior.
+Messages at or below `routing_handled` keep the **handled automatically** note instead of calling the triage bot.
+Each notification decision is recorded once, including across failed Discord posts. Manage keeps the label named
+by `routing_kind` when replacing the topic label.
+
+For an existing routed deployment, follow the [upgrade order](CHANGELOG.md#unreleased): deploy the relay without
+embedded routing first, then start the separate router above the cutover conversation id. Never run both routers.
 
 ## Triage bot hook
 
@@ -462,7 +405,7 @@ once per answer (a repeated call adds nothing), while the message it answers is 
 latest (an answer to an earlier one, or older than one already reported, changes nothing). Report only answers that have a draft, and only
 after they were sent, so the card follows them (right after the answer unless another message
 came in between). The hook is a convenience: if a call is lost, the card offers no draft, and
-**Reply with this** still works. See [Connecting an AI agent](docs/ai-agent.md) for the agent's side.
+**Reply with this** still works. See [Connecting an AI agent](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/docs/ai-agent.md) for the agent's side.
 
 ## Support queue
 
@@ -496,13 +439,13 @@ messages; tickets beyond that are counted at the end.
 - Discord messages are sent with `allowed_mentions` locked down; only linked agents can be
   pinged: the conversation's assignee, and agents mentioned in a private note; the support queue
   also pings its configured escalation role or user. Customer text
-  cannot call a bot either (see [Message content](docs/relay.md#message-content)).
+  cannot call a bot either (see [Message content](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/docs/relay.md#message-content)).
 - Attachments are fetched only from Discord's CDN (`cdn.discordapp.com`, `media.discordapp.net`)
   over HTTPS, without following redirects, with size caps.
 - Logs carry ids and outcomes only, never message bodies or tokens. Errors shown to users are
   generic; details go to Workers Logs (`observability` in `cloudflare.config.ts`).
 
-See [SECURITY.md](SECURITY.md) to report a vulnerability.
+See [SECURITY.md](https://github.com/Phala-Network/chatwoot-workers/blob/main/SECURITY.md) to report a vulnerability.
 
 ## Limits and the Workers Free plan
 
@@ -525,25 +468,29 @@ Cloudflare's current pricing for the Free allowance.
 
 ## Development
 
+Run these commands inside Docker; the root [contribution guide](https://github.com/Phala-Network/chatwoot-workers/blob/main/CONTRIBUTING.md)
+has the complete container command and checks both packages.
+
 ```sh
 npm ci
+cd packages/chatwoot-discord-relay
 npm run lint && npm run typecheck && npm test   # tests run inside workerd (@cloudflare/vitest-pool-workers)
 npm run build                                   # cf build into .cloudflare/output (no deploy)
 npm run dev                                     # local Worker (cf dev); copy .dev.vars.example to .dev.vars first
 npm run types                                   # regenerate .cloudflare/types (typecheck runs it)
-npm run gen:chatwoot                            # regenerate src/chatwoot/schema.d.ts (Chatwoot v4.18.0 OpenAPI)
+npm run gen:chatwoot                            # regenerate ../../shared/chatwoot/schema.d.ts (Chatwoot v4.18.0 OpenAPI)
 sh docs/assets/render.sh                        # re-render the README illustrations (needs Docker)
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and releases, [Internals](docs/internals.md)
+See [CONTRIBUTING.md](https://github.com/Phala-Network/chatwoot-workers/blob/main/CONTRIBUTING.md) for guidelines and releases, [Internals](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/docs/internals.md)
 for how the service is built, and [CHANGELOG.md](CHANGELOG.md) for the release history. This
-project follows the [Contributor Covenant](CODE_OF_CONDUCT.md).
+project follows the [Contributor Covenant](https://github.com/Phala-Network/chatwoot-workers/blob/main/CODE_OF_CONDUCT.md).
 
 ## Getting help
 
-- Questions and setup help: [GitHub Discussions](https://github.com/Phala-Network/chatwoot-discord-relay/discussions).
-- Bug reports and feature requests: [GitHub Issues](https://github.com/Phala-Network/chatwoot-discord-relay/issues).
-- Security vulnerabilities: report privately as described in [SECURITY.md](SECURITY.md), not in a
+- Questions and setup help: [GitHub Discussions](https://github.com/Phala-Network/chatwoot-workers/discussions).
+- Bug reports and feature requests: [GitHub Issues](https://github.com/Phala-Network/chatwoot-workers/issues).
+- Security vulnerabilities: report privately as described in [SECURITY.md](https://github.com/Phala-Network/chatwoot-workers/blob/main/SECURITY.md), not in a
   public issue.
 - Chatwoot or Discord behaviour itself: their own documentation and support channels.
 

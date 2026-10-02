@@ -35,7 +35,7 @@ and a run yields before the subrequest limit. A job that Discord rate limits wai
 Discord asks, without counting an attempt. A command runs at most once: it is not retried, since
 running it again could, for example, send a reply twice, and one that could not start while
 Discord's 15-minute interaction window left time to report is answered that nothing was done.
-Background jobs (syncing posts, routing, the sweep) retry until they succeed: after a few
+Background jobs (syncing posts, the sweep) retry until they succeed: after a few
 failures a job's log turns into errors, and it keeps retrying at most every 30 minutes, so an
 outage of any length loses no background work. The support queue is the exception: it posts
 nothing after its first three minutes (Discord's nonce, which keeps a retried post from appearing
@@ -87,4 +87,12 @@ Discord calls use a small fetch-based client (`src/discord/rest.ts`), typed with
 timers and queues across calls, which does not fit per-invocation subrequest accounting).
 Chatwoot calls use only routes in Chatwoot's published OpenAPI spec, typed by `openapi-fetch` and
 generated types; messages are validated with zod because the spec's `message` schema does not
-describe the fields the API returns (see `src/chatwoot/api.ts`).
+describe the fields the API returns (see the repository's `shared/chatwoot/api.ts`).
+
+## Separate routing Worker
+
+AI routing lives in chatwoot-router, with its own queue and decision store. Hub queues no routing jobs and
+reads no router storage. The fetched conversation's routing watermarks drive notification deferrals and
+handled notes; its kind attribute keeps Manage from replacing the kind with a topic. See the package README
+for the timeout and upgrade contract. Shared implementations live in the repository's `shared/` source tree
+and are bundled independently into each published package.
