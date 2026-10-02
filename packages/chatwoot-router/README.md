@@ -96,25 +96,23 @@ no unpublished shared package needs installing.
 
 | Fixed name | Type | Meaning |
 | --- | --- | --- |
-| `routing_seen` | Number | Latest customer message id processed or skipped, written after applicable actions. The relay's sole completion signal; it does not imply a `done` decision. |
+| `routing_seen` | Number | Latest customer message id observed by a completed run, including skipped tickets, written after applicable actions. The relay's sole completion signal. |
 | `routing_handled` | Number | Latest customer message id handled by a kind's successful reply or set-aside action. |
 | `routing_kind` | Text | Kind label added by the router, preserved by the relay's Manage card. |
 
-Every public incoming contact `message_created` in a routed account queues a completion check, even for an
+Every public incoming contact `message_created` in a routed account queues reconciliation, even for an
 assigned, closed, pre-cutover, or already-routed ticket. Skipped messages and no-owner decisions also advance
 `routing_seen`; only eligible tickets ask Jev. When a kind handles messages, `routing_handled`
 and `routing_kind` are included in the same update as `routing_seen`, after its reply/status/label actions.
 
 Attributes are updated through Chatwoot's `custom_attributes` API with `merge: true`. Chatwoot v4.18 implements
-this as read-merge-save, not an atomic merge: concurrent relay/router writes can still lose keys. The router
-durably records the applied decision state and its completion watermarks and kind before reading or writing
-attributes, and repairs missing or older attributes on
-subsequent webhooks or sweeps, including resolved and snoozed tickets in the sweep's activity window.
-A sweep repair only writes the recorded completion again: no Jev, message scan, or replay of routing actions.
-It retains the greatest watermarks observed;
-unchanged attributes are not written again. The relay similarly repairs its missing or different post URL on sync.
-Recovery is eventual, not a cross-Worker transaction. A failed attribute read or write is repaired from the
-recorded completion without repeating successful actions.
+this as read-merge-save, not an atomic merge: concurrent relay/router writes can still lose keys. Every run
+derives the desired attributes again from Chatwoot, memoized inputs, and its durable outbox. This repairs
+assigned, resolved, and snoozed tickets too, without a separate repair job. Greater existing watermarks are
+retained; unchanged attributes are not written again. A lost, externally edited watermark can only be restored
+to what messages and confirmed actions establish, not to an arbitrary value no longer present in Chatwoot.
+The relay similarly repairs its missing or different post URL on sync. Recovery is eventual, not a cross-Worker
+transaction. Failed reads and writes retry without reclassifying unchanged inputs or repeating irreversible actions.
 With the relay, set `router.accounts` there; its default wait is 30 seconds from each customer's message time.
 Assignment and status changes never release that wait; only `routing_seen` or the timeout does.
 The three attribute names are fixed. The relay's link attribute must not use any of them.
@@ -177,69 +175,38 @@ so deployment without canned replies does not require one. Do not connect a repl
 
 ## Routing behavior
 
-With `routing`, each new ticket of a routed account is routed when it is open, has no assignee, and
-has a customer message. The Worker asks Jev multiple-choice questions, who owns the ticket (one
-of the account's owners, or `unclear`) and its topic (with `topics`), plus its kind (with `kinds`)
-and whether the customer asks for anything yet (with `snoozeUnclear`), using the email subject and
-the first three customer messages. Before they leave the Worker, emails, URLs, hex and base58 addresses, long
-tokens, phone numbers, IP addresses (and four-part version numbers, which read as one), @handles, and the contact's name (each word of two characters or more) are replaced with
-`[REDACTED]`. Identifier patterns run before contact-name replacement so a name cannot split an identifier.
-This is best-effort redaction of common identifiers, not anonymization: other personal
-details in the text still reach TypeSafe, so check that its data policy suits you. An owner at
-`minConfidence` or above is assigned, and a topic at or above it is added as a label when the ticket
-has no label other than its kinds (a ticket has one topic label, so one an automation rule set stays alone). When no owner
-is clear, Jev is asked again each time the customer adds a message, until one is or three customer
-messages were seen; the ticket then stays for a person. With `snoozeUnclear`, Jev is also asked
-whether the customer asks for support, information, or an action yet: a ticket without a clear owner
-for which Jev is at least `minConfidence` sure there is no request (a greeting, a test, a name alone)
-is snoozed until the customer's next message, which reopens it and
-asks Jev again, so it waits for detail instead of escalating; after the third message it stays open.
-Any other (a request no owner covers, or Jev unsure) stays open for a person. A ticket the customer
-wrote to after the messages Jev was given is not snoozed (a message in the moment between that
-check and the snooze waits for the customer's next one; the support queue lists the ticket
-meanwhile). The router uses `filter_internal_messages=true`: v4.18's `MessagesController` passes this query
-parameter to `MessageFinder`, which excludes private messages and activity lines before paging. The published
-OpenAPI schema omits the parameter, so the shared typed client extends its generated query type; the relay
-does not enable it. Customer messages are looked for among the next 300 public messages, including agent replies.
-A newer customer message found in that scan, the latest-message page, or the job's recorded customer watermark
-makes the decision stale only while it has used fewer than three customer messages in its input window.
-Once all three inputs have been used, later messages cannot change that decision: its remaining actions run,
-and later messages are acknowledged without being marked handled by it. If the read window is exhausted
-and none of those sources confirms a newer message,
-the decision is applied without any status action (neither unclear-ticket snoozing nor a kind's status),
-finalized, and left for a person; Jev is not asked again. A ticket assigned
-before its turn (by a person or a Chatwoot automation rule) is left alone unless its recorded decision assigns
-that exact agent, and a routed ticket is
-never routed again, even if someone unassigns it. The decision is recorded, without expiry, before
-it is applied, so a retry applies the same one without asking Jev again unless a newer customer message is
-confirmed. A fresh conversation read immediately before actions must show an open ticket, either unassigned
-or assigned to exactly the agent this decision assigns;
-an assignee or topic label someone set meanwhile is kept. Routing acts
-with `CHATWOOT_TOKEN`, whose user must be an agent in the routed inboxes; Chatwoot records the
-assignment as made by that user. The sweep queues routing for open, unassigned tickets in its
-window, so a missed webhook only delays it.
+The [reconciliation model](#how-it-works) defines the flow. Jev answers multiple-choice questions about the
+account's owner (or `unclear`), topic (with `topics`), kind (with `kinds`), and whether the customer asks for
+anything yet (with `snoozeUnclear`). Inputs include email subjects and the first three customer messages with
+usable text. Before they leave the Worker, emails, URLs, hex and base58 addresses, long tokens, phone numbers,
+IP addresses (and four-part version numbers, which read as one), @handles, and the contact's name (each word
+of two characters or more) are replaced with `[REDACTED]`. Identifier patterns run before name replacement
+so a name cannot split an identifier. This is best-effort redaction, not anonymization: other personal details
+can still reach TypeSafe. Attachment-only and redacted-only messages are acknowledged but do not consume
+the text window, call Jev, or cause snoozing.
 
-Blocked contacts are skipped without Jev, assignment, or replies, including if blocked while Jev answers;
-their messages still advance `routing_seen`. Attachment-only messages and text containing only redacted
-identifiers likewise advance `routing_seen`, but wait for text in a later customer message without Jev,
-a kind, or snoozing. The text window starts after those empty messages.
+An owner at `minConfidence` or above is assigned unless the kind sets the ticket aside. A confident topic is
+added when there are no labels other than kinds; labels set by an automation rule or a person are kept.
+New messages entering the three-text-message window get a new memoized answer, even after an earlier
+assignment; later messages outside that window do not change it. When no owner fits, the ticket is left for
+a person. With `snoozeUnclear`, a confident `no request` answer can snooze an unassigned ticket until a
+customer writes again, but not once all three inputs have been used. Reopening with the same inputs never
+repeats that status action. A new window can apply a new status action. Messages arriving during a run are
+read on the next queued run or sweep; there is no second freshness protocol or atomic snapshot across APIs.
 
-Before any kind action, the router checks for customer messages arriving during the decision, using the same
-bounded freshness check as unclear-ticket snoozing, within the three-customer-message input window.
-An eligible stale decision stays pending and defers its existing queue job rather than completing it, so its
-retry does not depend on another webhook or an unassigned-conversation sweep. If the bounded scan cannot
-reach the newer message already confirmed by the latest page or job watermark, the next
-text window starts at that newest known customer message (or after the previous inputs when only the scan
-found new messages). As with snoozing, a message arriving
-between the final check and an action cannot be excluded atomically by Chatwoot's API.
+Router message reads set `filter_internal_messages=true`: Chatwoot v4.18's controller passes it to
+`MessageFinder`, which filters private notes and activity lines before paging. The generated OpenAPI schema
+omits it, so the shared typed client extends the query type; relay reads are unchanged. The forward scan is
+bounded to 300 public messages, including agent replies. If it cannot fill or finish the input window, labels,
+assignment, and a kind reply can still apply, but no status action does; the ticket stays for a person.
 
-If that fresh read shows a different assignee or a non-open ticket (including `pending`), the router only acknowledges
-`routing_seen`, leaving its recorded decision unchanged: `pending` stays `pending`, `waiting` stays `waiting`.
-This applies equally to human intervention and the router's own snooze. A later customer message reopens
-the conversation and routing continues from that state. Actions run in order: labels/assignment, reply
-(recorded before sending, at most once), then status. A lost status response needs no special record:
-the retry rereads the conversation and skips actions if it is no longer eligible. An assignment whose response
-was lost does not block the remaining actions when the assignee matches the decision; it is not assigned twice.
+Immediately before actions a fresh read must show an open ticket, with an unblocked contact, unassigned or
+assigned to this answer's owner. Otherwise only coordination attributes are synchronized. Routing resumes
+after reopening or unassignment by reconciling the same observations and memoized inputs, not by advancing
+a saved decision state. Actions run in order: assignment/labels, reply, status, then attributes. Successful
+assignment and label changes are not repeated when their responses are lost. Routing uses `CHATWOOT_TOKEN`,
+whose user must be an agent in the routed inboxes; Chatwoot records the assignment as made by that user.
+
 
 With `kinds`, Jev is also asked which of the account's kinds the ticket is (or `none`). Kinds are
 labels of a second family: a ticket has one topic label, the category, and a kind Jev is confident
@@ -251,7 +218,7 @@ Chatwoot canned response (Settings → Canned Responses, by its short code) to t
 example to acknowledge an application or point a security report to its process; a kind with both
 replies, then sets the ticket aside (a templated security report: acknowledged, then resolved). It is read when
 it is sent, so it is edited in Chatwoot, can use Chatwoot's variables such as `{{contact.name}}`,
-and nothing is sent while it does not exist. It is sent as the account's
+and a missing response leaves the job retrying without recording a send attempt. It is sent as the account's
 Chatwoot agent bot (`CHATWOOT_BOT_TOKENS`): customers see the bot's name, such as "Acme Support"; a
 bot's message assigns nobody and is no human first reply, and Chatwoot then counts the customer as
 answered (no longer waiting) until they write again. Create the bot in the account (Settings →
@@ -284,19 +251,19 @@ subject) are Chatwoot's automation rules.
 ## Reliability and cutover
 
 The Worker acknowledges after a SQLite job is queued. Alarms serialize decisions, preserve work across failures,
-and retry with exponential backoff capped at 30 minutes. The subrequest budget reserves 19 requests for the
+and retry with exponential backoff capped at 30 minutes. The subrequest budget reserves 12 requests for the
 worst-case route and yields to a fresh invocation before starting work it cannot finish.
 Chatwoot's conversation-not-found response (JSON HTTP 404) is logged and the job is dropped, including a deletion
 during a message read or write. Other failures, including proxy errors and account-level API failures, keep their backoff.
 A sweep every five minutes pages **all statuses**, newest activity first, using the same shared Chatwoot client
-and pass-window/cursor logic as the relay. It queues routing for open, unassigned tickets and attribute-only
-repair wherever the conversation's attributes are behind its recorded completion, regardless of status.
+and pass-window/cursor logic as the relay. It queues the same route job for every listed conversation,
+regardless of status or assignment; reconciliation includes attribute repair.
 Closing a ticket does not remove it from this list. Activity can move it to the front, so it may be seen again;
 the next window starts from the previous pass's **start**, with a 60-second overlap, bounded by
 `reconcile.lookbackSeconds` and `reconcile.maxCatchUpSeconds`.
-The persisted page cursor survives budget yields and failed-page backoff. Route and repair jobs run between
+The persisted page cursor survives budget yields and failed-page backoff. Route jobs run between
 pages; a failed sweep does not hold due jobs in its own account or any other account.
-Old completed decisions and reply-once markers remain in the Router's own Durable Object.
+Memoized answers and idempotency keys remain in the Router's own Durable Object without expiry.
 
 When splitting an existing relay deployment, **deploy the new relay first**, removing its old `routing` setting and
 routing secrets and adding `router.accounts`. Keep its existing Worker `name` and `Hub` export to preserve state.

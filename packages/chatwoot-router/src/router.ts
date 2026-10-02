@@ -6,20 +6,18 @@ import { parseJson } from "../../../shared/json.ts";
 import { errorFields, log } from "../../../shared/log.ts";
 import { QueueStore, retryDelay } from "../../../shared/store.ts";
 import { readSweepPass, saveSweepPass } from "../../../shared/sweep.ts";
-import { needsCompletionRepair, writeCompletion } from "./completion.ts";
 import type { Settings } from "./config.ts";
 import type { Env } from "./env.ts";
 import { routeConversation, routesAccount } from "./routing.ts";
 import { loadSettings } from "./settings.ts";
 
 export const ROUTER_NAME = "global";
-export const ROUTE_BUDGET = 19;
-const BUDGET = { route: ROUTE_BUDGET, repair: 2, sweep: 1 };
+export const ROUTE_BUDGET = 12;
+const BUDGET = { route: ROUTE_BUDGET, sweep: 1 };
 const RUN_WALL_MS = 5 * 60 * 1000;
 const id = z.number().int().positive();
 const jobSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("route"), accountId: id, conversationId: id }),
-  z.object({ type: z.literal("repair"), accountId: id, conversationId: id }),
   z.object({ type: z.literal("sweep"), accountId: id }),
 ]);
 type Payload = z.infer<typeof jobSchema>;
@@ -33,13 +31,9 @@ export class Router extends DurableObject<Env> {
     context.blockConcurrencyWhile(async () => this.store.migrate());
   }
 
-  async enqueueConversation(accountId: number, conversationId: number, messageId?: number): Promise<void> {
+  async enqueueConversation(accountId: number, conversationId: number): Promise<void> {
     const settings = await loadSettings(this.env);
     if (!routesAccount(settings, accountId)) return;
-    if (messageId !== undefined) {
-      const key = customerKey(accountId, conversationId);
-      this.store.set(key, String(Math.max(Number(this.store.get(key) ?? 0), messageId)));
-    }
     this.enqueue({ type: "route", accountId, conversationId });
     await this.schedule();
   }
@@ -73,20 +67,9 @@ export class Router extends DurableObject<Env> {
       try {
         const ctx = { settings, chatwoot, store: this.store, fetch: budget.fetch };
         if (payload.type === "route") {
-          const result = await routeConversation(
-            ctx,
-            payload.accountId,
-            payload.conversationId,
-            Number(this.store.get(customerKey(payload.accountId, payload.conversationId)) ?? 0),
-          );
-          if (result === "defer") {
-            this.store.deferJob(job);
-            yielded = true;
-            break;
-          }
+          await routeConversation(ctx, payload.accountId, payload.conversationId);
         } else if (routesAccount(settings, payload.accountId)) {
-          if (payload.type === "repair") await writeCompletion(ctx, payload.accountId, payload.conversationId);
-          else await this.sweep(settings, chatwoot, payload.accountId);
+          await this.sweep(settings, chatwoot, payload.accountId);
         }
         this.store.completeJob(job);
       } catch (error) {
@@ -129,12 +112,7 @@ export class Router extends DurableObject<Env> {
       }
       const conversationId = conversation.id;
       if (conversationId === undefined) continue;
-      if (conversation.status === "open" && !conversation.meta?.assignee) {
-        this.enqueue({ type: "route", accountId, conversationId });
-      }
-      if (needsCompletionRepair({ store: this.store }, accountId, conversation)) {
-        this.enqueue({ type: "repair", accountId, conversationId });
-      }
+      this.enqueue({ type: "route", accountId, conversationId });
     }
     if (finished) {
       saveSweepPass(this.store, accountId, pass);
@@ -158,8 +136,4 @@ export class Router extends DurableObject<Env> {
     const current = await this.ctx.storage.getAlarm();
     if (current === null || current > next) await this.ctx.storage.setAlarm(next);
   }
-}
-
-function customerKey(accountId: number, conversationId: number): string {
-  return `customer:${accountId}:${conversationId}`;
 }
