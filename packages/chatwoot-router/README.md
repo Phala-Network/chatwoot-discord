@@ -71,17 +71,19 @@ no unpublished shared package needs installing.
 
 Every public incoming contact `message_created` in a routed account queues a completion check, even for an
 assigned, closed, pre-cutover, or already-routed ticket. Skipped messages and no-owner decisions also advance
-`routing_seen`; only eligible open, unassigned tickets ask Jev. When a kind handles messages, `routing_handled`
+`routing_seen`; only eligible tickets ask Jev. When a kind handles messages, `routing_handled`
 and `routing_kind` are included in the same update as `routing_seen`, after its reply/status/label actions.
 
 Attributes are updated through Chatwoot's `custom_attributes` API with `merge: true`. Chatwoot v4.18 implements
 this as read-merge-save, not an atomic merge: concurrent relay/router writes can still lose keys. The router
-durably records completion watermarks and kind before writing, and repairs missing or older attributes on
+durably records the applied decision state and its completion watermarks and kind before reading or writing
+attributes, and repairs missing or older attributes on
 subsequent webhooks or sweeps, including resolved and snoozed tickets in the sweep's activity window.
 A sweep repair only writes the recorded completion again: no Jev, message scan, or replay of routing actions.
 It retains the greatest watermarks observed;
 unchanged attributes are not written again. The relay similarly repairs its missing or different post URL on sync.
-Recovery is eventual, not a cross-Worker transaction. Failed writes retry rather than prematurely finishing the job.
+Recovery is eventual, not a cross-Worker transaction. A failed attribute read or write is repaired from the
+recorded completion without repeating successful actions.
 With the relay, set `router.accounts` there; its default wait is 30 seconds from each customer's message time.
 Assignment and status changes never release that wait; only `routing_seen` or the timeout does.
 The three attribute names are fixed. The relay's link attribute must not use any of them.
@@ -164,14 +166,20 @@ asks Jev again, so it waits for detail instead of escalating; after the third me
 Any other (a request no owner covers, or Jev unsure) stays open for a person. A ticket the customer
 wrote to after the messages Jev was given is not snoozed (a message in the moment between that
 check and the snooze waits for the customer's next one; the support queue lists the ticket
-meanwhile). Customer messages are looked for among the next 300 messages (notes and activity lines count
-too): one beyond them is not seen. If the read window is exhausted without finding a newer customer message,
+meanwhile). The router uses `filter_internal_messages=true`: v4.18's `MessagesController` passes this query
+parameter to `MessageFinder`, which excludes private messages and activity lines before paging. The published
+OpenAPI schema omits the parameter, so the shared typed client extends its generated query type; the relay
+does not enable it. Customer messages are looked for among the next 300 public messages, including agent replies.
+A newer customer message found in that scan, the latest-message page, or the job's recorded customer watermark
+makes the decision stale. If the read window is exhausted and none of those sources confirms a newer message,
 the decision is applied without any status action (neither unclear-ticket snoozing nor a kind's status),
 finalized, and left for a person; Jev is not asked again. A ticket assigned
-before its turn (by a person or a Chatwoot automation rule) is left alone, and a routed ticket is
+before its turn (by a person or a Chatwoot automation rule) is left alone unless its recorded decision assigns
+that exact agent, and a routed ticket is
 never routed again, even if someone unassigns it. The decision is recorded, without expiry, before
 it is applied, so a retry applies the same one without asking Jev again unless a newer customer message is
-confirmed. A fresh conversation read immediately before actions must show an open, unassigned ticket;
+confirmed. A fresh conversation read immediately before actions must show an open ticket, either unassigned
+or assigned to exactly the agent this decision assigns;
 an assignee or topic label someone set meanwhile is kept. Routing acts
 with `CHATWOOT_TOKEN`, whose user must be an agent in the routed inboxes; Chatwoot records the
 assignment as made by that user. The sweep queues routing for open, unassigned tickets in its
@@ -184,16 +192,19 @@ a kind, or snoozing. The text window starts after those empty messages.
 
 Before any kind action, the router checks for customer messages arriving during the decision, using the same
 bounded freshness check as unclear-ticket snoozing. A stale decision stays pending for the next webhook or
-sweep to decide again, not finalized or applied. If all three messages in that decision were consumed,
-the next text window starts after them so the new request is included. As with snoozing, a message arriving
+sweep to decide again, not finalized or applied. If all three messages in that decision were consumed or the
+bounded scan cannot reach the newer message already confirmed by the latest page or job watermark, the next
+text window starts at that newest known customer message (or after the previous inputs when only the scan
+found new messages). As with snoozing, a message arriving
 between the final check and an action cannot be excluded atomically by Chatwoot's API.
 
-If that fresh read shows an assigned or non-open ticket (including `pending`), the router only acknowledges
+If that fresh read shows a different assignee or a non-open ticket (including `pending`), the router only acknowledges
 `routing_seen`, leaving its recorded decision unchanged: `pending` stays `pending`, `waiting` stays `waiting`.
 This applies equally to human intervention and the router's own snooze. A later customer message reopens
 the conversation and routing continues from that state. Actions run in order: labels/assignment, reply
 (recorded before sending, at most once), then status. A lost status response needs no special record:
-the retry rereads the conversation and skips actions if it is no longer open and unassigned.
+the retry rereads the conversation and skips actions if it is no longer eligible. An assignment whose response
+was lost does not block the remaining actions when the assignee matches the decision; it is not assigned twice.
 
 With `kinds`, Jev is also asked which of the account's kinds the ticket is (or `none`). Kinds are
 labels of a second family: a ticket has one topic label, the category, and a kind Jev is confident
