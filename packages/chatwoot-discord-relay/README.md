@@ -92,8 +92,10 @@ Cron (every 5 min) ─▶ Worker ──▶ Hub Durable Object ──▶ sweep: r
   A reply must be outgoing, public, undeleted, not failed, not a template (greeting/out-of-office), and not an
   automatic email. Bot and human replies both count, including replies after a message outside Jev's input window.
   Resolved/snoozed messages get no triage mention. Answer scans persist only their pagination cursor across alarm
-  budgets; the final page or the page containing an answer is re-read on resume. An answer arriving or failing
-  before the first notification decision therefore changes that decision. Once decided, notification eligibility
+  budgets; the final page or the page containing an answer is re-read on resume. Receiving `message_updated`
+  for an outgoing reply invalidates unfinished scans immediately and wakes their conversation job, including
+  a failed reply retried as sent on an already-scanned middle page. An in-flight read cannot restore an invalidated
+  cursor. Ordinary budget yields retain progress; updates require a fresh scan. Once decided, notification eligibility
   and hourly budgets are recorded per message, so Discord retries keep the same notification/source association.
   History and automatic customer email stay silent. A later delivery failure produces the existing notice without
   retrospective triage after the notification decision.
@@ -109,7 +111,9 @@ Cron (every 5 min) ─▶ Worker ──▶ Hub Durable Object ──▶ sweep: r
 These contracts use Chatwoot v4.18.0's
 [typed assignment](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/services/conversations/assignment_service.rb),
 [assignee presenter](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/presenters/conversations/event_data_presenter.rb),
-[message types/reopen behavior](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/models/message.rb), and
+[message types/reopen behavior](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/models/message.rb),
+[reply retries](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/controllers/api/v1/accounts/conversations/messages_controller.rb),
+[update webhooks](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/listeners/webhook_listener.rb), and
 [message paging](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/finders/message_finder.rb).
 
 Design choices:

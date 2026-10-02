@@ -10,7 +10,15 @@ import {
 import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { Budget } from "../../../shared/budget.ts";
+import { chatwootClient } from "../../../shared/chatwoot/api.ts";
+import { DiscordForum } from "../src/discord/forum.ts";
+import { DiscordRest } from "../src/discord/rest.ts";
 import worker from "../src/index.ts";
+import { minimumBudget } from "../src/relay/limits.ts";
+import { processConversation, relayFor } from "../src/relay/processor.ts";
+import { loadSettings } from "../src/settings.ts";
+import { Store } from "../src/store.ts";
 import { ALICE, json, mockFetch, on, type Recorded, type Route } from "./helpers.ts";
 
 const FORUM = "100000000000000055";
@@ -36,6 +44,7 @@ interface FakeConversation {
     message_type: number;
     content_type?: string;
     private?: boolean;
+    status?: string;
     sender?: Record<string, unknown>;
     content_attributes?: Record<string, unknown>;
   }>;
@@ -1195,6 +1204,46 @@ describe("worker", () => {
       );
     },
   );
+
+  it("rechecks a failed middle-page reply retried as sent before the first triage decision", async () => {
+    const id = 79;
+    const reply = { id: 150, content: "The answer", message_type: 1, status: "failed" };
+    world.conversation(id, [
+      { id: 1, content: "A customer request", message_type: 0 },
+      ...Array.from({ length: 300 }, (_, index) =>
+        index + 2 === reply.id ? reply : { id: index + 2, content: "Activity", message_type: 2 },
+      ),
+    ]);
+    await runInDurableObject(hub(), async (_instance, state) => {
+      const store = new Store(state.storage.sql);
+      const settings = await loadSettings(env);
+      const budget = new Budget(minimumBudget(4));
+      const chatwoot = chatwootClient(settings.config.chatwoot.baseUrl, "relay-token", budget.fetch);
+      const rest = new DiscordRest("test-bot-token", budget.fetch);
+      const forum = new DiscordForum(rest, store);
+      const services = { settings, store, budget, chatwoot, rest, forum, relay: relayFor(settings, forum, store) };
+      expect(await processConversation(services, 3, id)).toBe("yield");
+      expect(store.get("triage:3:1")).toBeUndefined();
+    });
+    expect(world.webhookPosts()).toEqual([]);
+    expect(world.sent("GET", /\/messages$/).some((request) => request.url.searchParams.get("after") === "301")).toBe(
+      true,
+    );
+    reply.status = "sent";
+    // Chatwoot's native retry changes the same message and dispatches message_updated.
+    await chatwootWebhook({
+      ...created(id),
+      event: "message_updated",
+      id: reply.id,
+      message_type: "outgoing",
+      status: "sent",
+    });
+    await chatwootWebhook(created(id)); // Resume the yielded conversation as the next alarm would.
+    await drain();
+    const customer = world.webhookPosts().find((post) => String(post.body.content).startsWith("A customer request"));
+    expect(customer?.body.content).toContain("handled automatically");
+    expect(customer?.body.content).not.toContain("<@100000000000000777>");
+  });
 
   it("relays a message a kind's reply answered after routing, without calling the triage bot", async () => {
     const globex = "chatwoot.example.com/api/v1/accounts/1";

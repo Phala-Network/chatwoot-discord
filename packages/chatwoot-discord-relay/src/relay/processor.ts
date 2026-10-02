@@ -155,12 +155,15 @@ export async function processConversation(
         }
       }
       if (budget.remaining < perMessage) return "yield";
+      const scanKey = `answer-scan:${accountId}:${conversationId}:${message.id}`;
+      const scan = store.get(scanKey);
       const relayMessage = toRelayMessage(message, {
         account: { id: accountId, name: account.name },
         inboxName: inboxName ?? null,
         conversation,
         ...(await linkedAgents(context, message)),
       });
+      if (scan !== undefined && store.get(scanKey) !== scan) return "yield";
       relayMessage.answered = answered;
       try {
         await relay.relay(relayMessage);
@@ -190,7 +193,7 @@ export async function processConversation(
       }
       cursor = message.id;
       store.setCursor(accountId, conversationId, cursor);
-      store.delete(`answer-scan:${accountId}:${conversationId}:${message.id}`);
+      store.delete(scanKey);
     }
     if (page.length < MESSAGE_PAGE_SIZE) break;
   }
@@ -217,7 +220,10 @@ async function answeringReply(
   let after = Number(store.get(key) ?? messageId);
   for (;;) {
     if (budget.remaining < 2) return "yield";
+    store.set(key, String(after));
     const messages = await chatwoot.listMessages(accountId, conversationId, { after });
+    // An update received during the read invalidates it too; do not restore its stale cursor.
+    if (store.get(key) === undefined) return "yield";
     if (messages.some(isAnsweringReply)) return true;
     if (messages.length < MESSAGE_PAGE_SIZE) return false;
     const next = messages.at(-1)?.id;

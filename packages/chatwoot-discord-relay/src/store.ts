@@ -122,6 +122,14 @@ const COLUMNS: ReadonlyArray<readonly [keyof ConversationFields, string]> = [
 export type { Job } from "../../../shared/store.ts";
 
 export class Store extends QueueStore implements RelayStore, Cache {
+  /** A changed reply can qualify even on an already-scanned page. No notification was decided yet. */
+  invalidateAnswerScans(accountId: number, conversationId: number): boolean {
+    return (
+      this.sql.exec("DELETE FROM cache WHERE key LIKE ?", `answer-scan:${accountId}:${conversationId}:%`).rowsWritten >
+      0
+    );
+  }
+
   override migrate(): void {
     this.sql.exec("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)");
     const row = this.sql.exec<{ version: number }>("SELECT version FROM schema_version").toArray()[0];

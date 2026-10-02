@@ -120,10 +120,11 @@ describe("message_updated routing", () => {
     }
   });
 
-  it("queues an outgoing message the channel failed to deliver", () => {
+  it("queues outgoing updates including failed replies retried as sent", () => {
     const failed = { message_type: "outgoing", content_attributes: { external_error: "Outside the 24 hour window" } };
     expect(eventTarget(updated(failed))).toEqual(target);
     expect(eventTarget(updated({ ...failed, message_type: "incoming" }))).toBeUndefined();
+    expect(eventTarget(updated({ message_type: "outgoing", status: "sent", content_attributes: {} }))).toEqual(target);
   });
 
   it("ignores other message updates", () => {
@@ -133,7 +134,6 @@ describe("message_updated routing", () => {
       { content_type: "input_email", content_attributes: { submitted_email: "" } },
       { content_type: "cards", content_attributes: { submitted_values: [{ title: "A" }] } },
       { content_type: "input_csat", content_attributes: { submitted_values: {} } },
-      { message_type: "outgoing", content_attributes: { external_error: null } },
     ]) {
       expect(eventTarget(updated(fields))).toBeUndefined();
     }

@@ -107,9 +107,13 @@ export class Hub extends DurableObject<Env> {
 
   /**
    * Queues a check of a message reported as deleted (its Discord messages are removed), as
-   * answered by the customer (the response is posted), or as not delivered (a notice is posted).
+   * answered by the customer (the response is posted), or with a changed outgoing delivery status.
    */
   async enqueueMessageUpdate(accountId: number, conversationId: number, messageId: number): Promise<void> {
+    // Do this on receipt: the conversation job runs before the message-update job.
+    if (this.store.invalidateAnswerScans(accountId, conversationId)) {
+      this.enqueue({ type: "conversation", accountId, conversationId });
+    }
     this.enqueue({ type: "message-updated", accountId, conversationId, messageId });
     await this.schedule();
   }

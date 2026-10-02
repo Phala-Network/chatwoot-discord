@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deleted, failed, template and automatic-email messages do not. Preserve once-per-message decisions, history
   silence, notification budgets and late delivery-failure notices.
 - Resume answer scans by page cursor and re-read the final/answer page before the first notification decision;
-  answers arriving or failing between alarms do not leave a stale cached boolean.
+  answers arriving or failing between alarms do not leave a stale cached boolean. Outgoing `message_updated`
+  invalidates unfinished scans, including failed replies retried as sent on already-scanned pages.
 - Keep `assignee_type`: bot assignees are Unassigned in cards/tags/queue and never ping a same-id human.
   `/pending` hands back through the current inbox's account bot assignment. Pending queue tickets show 🤖 without
   pings/escalations. Queue budget is now 6 requests per account plus 4 message requests.

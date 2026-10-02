@@ -855,6 +855,50 @@ describe("agent bot lifecycle", () => {
     });
   });
 
+  it("does not restore a stale answer cursor when an update arrives during a page read", async () => {
+    const world = new World();
+    const reply = { id: 150, content: "The answer", message_type: 1, status: "failed" };
+    world.messages = [
+      { id: 1, content: "A customer request", message_type: 0 },
+      ...Array.from({ length: 300 }, (_, index) =>
+        index + 2 === reply.id ? reply : { id: index + 2, content: "Activity", message_type: 2 },
+      ),
+    ];
+    await withStore(async (store) => {
+      const settings = testSettings();
+      const services = context(store, settings);
+      const read = services.chatwoot.listMessages;
+      vi.spyOn(services.chatwoot, "listMessages").mockImplementation(async (...args) => {
+        const page = await read(...args);
+        if (args[2]?.after === 201) {
+          reply.status = "sent";
+          store.invalidateAnswerScans(3, 12); // The Hub invalidates on webhook receipt, during this read.
+        }
+        return page;
+      });
+      expect(await processConversation(services, 3, 12)).toBe("yield");
+      expect(world.posts()).toEqual([]);
+      expect(store.get("triage:3:1")).toBeUndefined();
+      await sync(store, settings);
+      expect(world.replies().find((text) => text.startsWith("A customer request"))).toContain("handled automatically");
+    });
+  });
+
+  it("completes a long answer scan across minimum-budget alarms without restarting each time", async () => {
+    const world = new World();
+    world.messages = [
+      { id: 1, content: "A customer request", message_type: 0 },
+      ...Array.from({ length: 6200 }, (_, index) => ({ id: index + 2, content: "Activity", message_type: 2 })),
+    ];
+    await withStore(async (store) => {
+      const settings = testSettings();
+      for (let alarm = 0; alarm < 5 && world.posts().length === 0; alarm += 1) {
+        await processConversation(context(store, settings, minimumBudget(4)), 3, 12);
+      }
+      expect(world.replies().find((text) => text.startsWith("A customer request"))).toContain(`<@${TRIAGE}>`);
+    });
+  });
+
   it.each(["arrives", "fails"])(
     "rechecks an answer that %s across alarms before the first triage decision",
     async (change) => {
