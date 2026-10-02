@@ -108,6 +108,9 @@ export const configSchema = z
       .strictObject({
         accounts: z.array(z.number().int().positive()).min(1).refine(unique, "account ids must be unique"),
         waitSeconds: z.number().int().min(0).default(30),
+        keepLabels: z
+          .array(z.string().regex(/^[a-z0-9_-]{1,255}$/, "must be a Chatwoot label name (lower case)"))
+          .default([]),
         attributes: attributesSchema.prefault({}),
       })
       .optional(),

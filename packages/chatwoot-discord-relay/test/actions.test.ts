@@ -376,6 +376,25 @@ describe("executeCommand", () => {
       expect(sent(cleared.requests)).toEqual([{ labels: [] }]);
     });
 
+    it.each([undefined, "security"])(
+      "keeps legacy labels alongside routing_kind %s when replacing or clearing a topic",
+      async (kind) => {
+        const settings = testSettings({ router: { accounts: [3], keepLabels: ["spam", "beg-bounty"] } });
+        const ticket = on("GET", conversation, () =>
+          json({
+            id: 15,
+            labels: ["vip", "spam", "security"],
+            custom_attributes: kind ? { routing_kind: kind } : {},
+          }),
+        );
+        for (const labels of [["refund"], []]) {
+          const changed = runWith(settings, { type: "labels", labels }, accountLabels, setLabels, ticket);
+          await changed.result;
+          expect(sent(changed.requests)).toEqual([{ labels: [...labels, "spam", ...(kind ? [kind] : [])] }]);
+        }
+      },
+    );
+
     it("keeps the ticket's kinds when it sets its topic label", async () => {
       const withKinds = testSettings({ router: { accounts: [3] } });
       const ticket = on("GET", conversation, () =>
@@ -450,6 +469,26 @@ describe("executeCommand", () => {
           ["panel:status:open*", "panel:status:resolved", "panel:status:until_next_reply"],
         ],
       });
+    });
+
+    it("excludes kept legacy labels and routing_kind from the Manage topic menu", async () => {
+      const settings = testSettings({ router: { accounts: [3], keepLabels: ["spam"] } });
+      const ticket = on("GET", conversation, () =>
+        json({
+          id: 15,
+          status: "open",
+          labels: ["spam", "security", "vip"],
+          custom_attributes: { routing_kind: "security" },
+        }),
+      );
+      const allLabels = on("GET", `${cw}/accounts/3/labels`, () =>
+        json({ payload: ["spam", "security", "vip", "refund"].map((title, index) => ({ id: index + 1, title })) }),
+      );
+      const { components } = await runWith(settings, { type: "panel" }, ticket, agents, allLabels).outcome;
+      const rendered = JSON.stringify(components);
+      expect(rendered).not.toContain('"value":"spam"');
+      expect(rendered).not.toContain('"value":"security"');
+      expect(rendered).toContain('"value":"vip"');
     });
 
     it("draws it again after a change from the panel, with what was done", async () => {

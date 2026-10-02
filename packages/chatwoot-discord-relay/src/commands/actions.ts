@@ -290,5 +290,8 @@ async function existing<T>(conversation: Promise<T | undefined>): Promise<T> {
 
 function kindLabels(attributes: Record<string, unknown> | undefined, settings: Settings): ReadonlySet<string> {
   const kind = attributes?.[settings.config.router?.attributes.kind ?? "routing_kind"];
-  return new Set(typeof kind === "string" && kind.length > 0 ? [kind] : []);
+  return new Set([
+    ...(settings.config.router?.keepLabels ?? []),
+    ...(typeof kind === "string" && kind.length > 0 ? [kind] : []),
+  ]);
 }

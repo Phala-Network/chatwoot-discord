@@ -9,6 +9,17 @@ const minimal = {
 };
 
 describe("configuration", () => {
+  it("validates router keepLabels as lower-case labels and defaults to none", () => {
+    const router = { accounts: [1] };
+    expect(configSchema.parse({ ...minimal, router }).router).toMatchObject({ keepLabels: [] });
+    expect(
+      configSchema.parse({ ...minimal, router: { ...router, keepLabels: ["spam", "security", "beg-bounty"] } }).router,
+    ).toMatchObject({ keepLabels: ["spam", "security", "beg-bounty"] });
+    for (const keepLabels of [["Spam"], ["two words"], [""], ["a".repeat(256)]]) {
+      expect(configSchema.safeParse({ ...minimal, router: { ...router, keepLabels } }).success).toBe(false);
+    }
+  });
+
   it("rejects unknown keys, so a typo does not silently fall back to a default", () => {
     // Including the discord.applicationId key that 0.2.0 removed.
     expect(configSchema.safeParse({ ...minimal, discord: { applicationId: "1" } }).success).toBe(false);
