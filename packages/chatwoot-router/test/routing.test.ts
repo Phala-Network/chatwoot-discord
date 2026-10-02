@@ -545,6 +545,42 @@ describe("native bot turns", () => {
     expect(sent(mock.requests, "POST", JEV)).toHaveLength(1);
   });
 
+  it.each(["initial snapshot", "fresh action read"])(
+    "uses the existing resolution boundary after a metadata-only update in an %s",
+    async (stage) => {
+      const at = Math.floor(Date.now() / 1000);
+      const mock = world(
+        { status: "resolved", updatedAt: at + 10, messages: [incoming(1, "Old spam"), activity(2)] },
+        { owner: ["unclear", 1], kind: ["spam", 1] },
+      );
+      const ctx = context(new MemoryStore(), KINDS);
+      if (stage === "fresh action read") {
+        mock.ticket.status = "pending";
+        mock.ticket.messages?.push(incoming(3, "Earlier turn"));
+        mock.ticket.during = (operation) => {
+          if (operation === "jev") {
+            mock.ticket.status = "resolved";
+            mock.ticket.messages?.push({ ...activity(4), created_at: at });
+          }
+        };
+      }
+      await routeConversation(ctx, 1, 5);
+      delete mock.ticket.during;
+      mock.ticket.status = "pending";
+      mock.ticket.messages?.push(incoming(5, "New advertisement"));
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        try {
+          await routeConversation(ctx, 1, 5);
+          break;
+        } catch {
+          recordFailure(ctx.store, 1, 5); // The alarm's bounded retry policy.
+        }
+      }
+      expect(mock.ticket.status).toBe("resolved");
+      expect(JSON.parse(sent(mock.requests, "POST", JEV).at(-1)?.body ?? "{}").state.ticket).toBe("New advertisement");
+    },
+  );
+
   it("honors an old release's reply record across a new turn", async () => {
     const mock = world({}, { owner: ["cloud", 1], kind: ["startup", 1] });
     const ctx = context(new MemoryStore(), KINDS);

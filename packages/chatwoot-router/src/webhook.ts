@@ -24,7 +24,7 @@ const CONVERSATION_EVENTS = new Set([
 
 export interface Transition {
   status: string;
-  at: number;
+  at?: number;
 }
 
 export function eventTarget(

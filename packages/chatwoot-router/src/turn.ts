@@ -9,7 +9,7 @@ import type { Transition } from "./webhook.ts";
 const guardSchema = z.object({
   boundary: z.number().optional(),
   transitionAt: z.number().optional(),
-  expected: z.object({ status: z.string(), at: z.number(), after: z.number().optional() }).optional(),
+  expected: z.object({ status: z.string(), at: z.number().optional(), after: z.number().optional() }).optional(),
   handoff: z.boolean().default(false),
   failures: z.number().int().min(0).default(0),
 });
@@ -31,11 +31,12 @@ export function expectActivity(
   transition: Transition,
 ): void {
   const guard = readGuard(store, accountId, conversationId);
-  if (transition.at <= (guard.transitionAt ?? 0)) return;
+  if (transition.at !== undefined && transition.at <= (guard.transitionAt ?? 0)) return;
+  if (transition.at === undefined && guard.expected?.status === transition.status) return;
   saveGuard(store, accountId, conversationId, {
     ...guard,
     expected: { ...transition, after: guard.boundary },
-    transitionAt: transition.at,
+    transitionAt: transition.at ?? guard.transitionAt,
     handoff: false,
     failures: 0,
   });
@@ -106,7 +107,7 @@ export async function readTurn(
     expected &&
     (!boundary ||
       boundary.id <= (expected.after ?? 0) ||
-      (boundary.created_at ?? 0) < Math.floor(expected.at) ||
+      (expected.at !== undefined && (boundary.created_at ?? 0) < Math.floor(expected.at)) ||
       activity?.status !== expected.status);
   if (late && !guard.handoff && !deleted && !missing) throw new ActivityPendingError();
   if (boundary && boundary.id !== guard.boundary && guard.boundary !== undefined && !missing && !late) {

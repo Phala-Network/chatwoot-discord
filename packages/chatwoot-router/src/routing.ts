@@ -110,19 +110,24 @@ export async function routeConversation(
   if (!owners || !token) return;
   const bot = chatwootClient(settings.config.chatwoot.baseUrl, token, ctx.fetch);
   const kinds = routing.kinds?.[String(accountId)] ?? {};
-  const raw = await chatwoot.getConversation(accountId, conversationId);
-  if (!raw || raw.inbox_id === undefined) return;
-  const linked = await chatwoot.inboxBot(accountId, raw.inbox_id);
-  if (!linked || linked.id !== routing.botIds[String(accountId)]) return;
-  const initial = toRelayConversation(conversationId, raw);
-  if (initial.status !== "pending") {
-    if (raw.updated_at !== undefined)
-      expectActivity(store, accountId, conversationId, { status: initial.status ?? "open", at: raw.updated_at });
-    return;
-  }
-  if (initial.contact.blocked || initial.assignee) return;
-  if (raw.meta?.assignee && (raw.meta.assignee_type !== "AgentBot" || raw.meta.assignee.id !== linked.id)) return;
-  const identities = [initial.contact.name, initial.contact.email];
+  const botId = routing.botIds[String(accountId)];
+  const snapshot = async (inboxId?: number) => {
+    const raw = await chatwoot.getConversation(accountId, conversationId);
+    if (!raw || raw.inbox_id === undefined || (inboxId !== undefined && raw.inbox_id !== inboxId)) return;
+    if (raw.status !== "pending") {
+      // Only an action read observed pending end. updated_at also changes for metadata.
+      if (inboxId !== undefined) expectActivity(store, accountId, conversationId, { status: raw.status ?? "open" });
+      return;
+    }
+    const conversation = toRelayConversation(conversationId, raw);
+    if (conversation.contact.blocked || conversation.assignee) return;
+    if (raw.meta?.assignee && (raw.meta.assignee_type !== "AgentBot" || raw.meta.assignee.id !== botId)) return;
+    if ((await chatwoot.inboxBot(accountId, raw.inbox_id))?.id !== botId) return;
+    return { raw, conversation };
+  };
+  const initial = await snapshot();
+  if (!initial) return;
+  const identities = [initial.conversation.contact.name, initial.conversation.contact.email];
   const inputs = (messages: ChatwootMessage[]) => {
     const texts = messages
       .filter(isCustomer)
@@ -156,22 +161,11 @@ export async function routeConversation(
 
   // A fresh read before every effect. A new input/boundary is work for a new queue run.
   const fresh = async () => {
-    const current = await chatwoot.getConversation(accountId, conversationId);
-    if (!current || current.inbox_id !== raw.inbox_id) return;
-    if (current.status !== "pending") {
-      if (current.updated_at !== undefined) {
-        expectActivity(store, accountId, conversationId, { status: current.status ?? "open", at: current.updated_at });
-      }
-      return;
-    }
-    const conversation = toRelayConversation(conversationId, current);
-    if (conversation.contact.blocked || conversation.assignee) return;
-    if (current.meta?.assignee && (current.meta.assignee_type !== "AgentBot" || current.meta.assignee.id !== linked.id))
-      return;
-    if ((await chatwoot.inboxBot(accountId, raw.inbox_id ?? 0))?.id !== linked.id) return;
+    const current = await snapshot(initial.raw.inbox_id);
+    if (!current) return;
     const latest = await readTurn(chatwoot, store, accountId, conversationId);
     if (latest.boundary !== turn.boundary || inputs(latest.messages).key !== input.key) return "defer" as const;
-    return { current, conversation, handoff: latest.handoff || humanReply(latest.messages) };
+    return { ...current, handoff: latest.handoff || humanReply(latest.messages) };
   };
   const handoff = async () => {
     requestHandoff(store, accountId, conversationId);
@@ -232,7 +226,7 @@ export async function routeConversation(
     const at = Date.now() / 1000;
     await bot.setStatus(accountId, conversationId, { status: kind.status });
     expectActivity(store, accountId, conversationId, { status: kind.status, at });
-  } else if (assignee !== undefined && current.current.meta?.assignee_type === "AgentBot") {
+  } else if (assignee !== undefined && current.raw.meta?.assignee_type === "AgentBot") {
     const at = Date.now() / 1000;
     await bot.assign(accountId, conversationId, assignee);
     expectActivity(store, accountId, conversationId, { status: "open", at });
