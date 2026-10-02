@@ -67,9 +67,10 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-function world(failAttributes = 0, state: { status?: string; assignee?: { id: number } } = {}) {
+function world(failAttributes = 0, state: { status?: string; assignee?: { id: number } } = {}, repeatInSweep = false) {
   const attributes: Record<string, unknown> = { unrelated: "kept" };
   const messages = [{ id: 501, message_type: 0, content: "Where is my invoice?" }];
+  const labels: string[] = [];
   const answers = { owner: { choice: "cloud", confidence: 1 }, kind: { choice: "none", confidence: 1 } };
   const failures = { account2: false };
   return {
@@ -83,7 +84,7 @@ function world(failAttributes = 0, state: { status?: string; assignee?: { id: nu
         json({
           data: {
             payload:
-              Number(request.url.searchParams.get("page")) === 1 &&
+              Number(request.url.searchParams.get("page")) <= (repeatInSweep ? 2 : 1) &&
               (request.url.searchParams.get("status") === "all" || (state.status ?? "open") === "open")
                 ? [
                     {
@@ -107,7 +108,7 @@ function world(failAttributes = 0, state: { status?: string; assignee?: { id: nu
           status: state.status ?? "open",
           meta: { assignee: state.assignee ?? null },
           custom_attributes: attributes,
-          labels: [],
+          labels,
         }),
       ),
       on("GET", new RegExp(`${base}/\\d+/messages$`), (request) =>
@@ -119,7 +120,21 @@ function world(failAttributes = 0, state: { status?: string; assignee?: { id: nu
         state.assignee = { id: 6 };
         return json({});
       }),
-      on("POST", new RegExp(`${base}/\\d+/labels$`), () => json({})),
+      on("POST", new RegExp(`${base}/\\d+/labels$`), (request) => {
+        labels.splice(0, labels.length, ...JSON.parse(request.body).labels);
+        return json({});
+      }),
+      on("GET", "chatwoot.example.com/api/v1/accounts/1/canned_responses", () =>
+        json([{ short_code: "startup", content: "Thanks for applying!" }]),
+      ),
+      on("POST", new RegExp(`${base}/\\d+/messages$`), (request) => {
+        messages.push({
+          id: (messages.at(-1)?.id ?? 0) + 1,
+          message_type: 1,
+          content: JSON.parse(request.body).content,
+        });
+        return json({});
+      }),
       on("POST", new RegExp(`${base}/\\d+/toggle_status$`), (request) => {
         state.status = JSON.parse(request.body).status;
         return json({});
@@ -214,6 +229,25 @@ function sweepingWorld(options: { failSecondPage?: boolean; externalClose?: bool
 }
 
 describe("router worker", () => {
+  it("does not repeat routing actions or replies when a sweep lists a conversation twice", async () => {
+    const mock = world(0, {}, true);
+    mock.answers.owner.choice = "unclear";
+    mock.answers.kind.choice = "startup-program";
+    await stub().requestSweep();
+    await drain();
+    expect(
+      mock.requests
+        .filter((request) => request.method === "GET" && `${request.url.hostname}${request.url.pathname}` === base)
+        .map((request) => request.url.searchParams.get("page")),
+    ).toEqual(["1", "2", "3"]);
+    expect(mock.requests.filter((request) => request.url.hostname === "api.typesafe.ai")).toHaveLength(1);
+    for (const action of ["labels", "messages", "custom_attributes"]) {
+      expect(
+        mock.requests.filter((request) => request.method === "POST" && request.url.pathname.endsWith(`/${action}`)),
+      ).toHaveLength(1);
+    }
+    expect(mock.attributes).toMatchObject({ routing_seen: 501, routing_handled: 501, routing_kind: "startup-program" });
+  });
   it.each(["assigned", "resolved", "snoozed"])(
     "queues and acknowledges contact messages on %s tickets",
     async (reason) => {

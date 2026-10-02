@@ -153,6 +153,10 @@ interface NewMessage {
 
 export type ChatwootClient = ReturnType<typeof chatwootClient>;
 
+type MessageQuery = NonNullable<operations["list-all-messages"]["parameters"]["query"]> & {
+  filter_internal_messages?: true;
+};
+
 export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
   const client = createClient<paths>({
     baseUrl: baseUrl.replace(/\/+$/, ""),
@@ -192,7 +196,7 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
   }
 
   /** Messages oldest first, or undefined when the conversation does not exist. */
-  async function listMessages(accountId: number, conversationId: number, query: { after?: number; before?: number }) {
+  async function listMessages(accountId: number, conversationId: number, query: MessageQuery) {
     const list = await dataUnlessNotFound(
       "list messages",
       client.GET("/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages", {
@@ -228,8 +232,12 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
     },
 
     /** Messages with an id above `after`, oldest first; without `after`, the latest page. */
-    async listMessages(accountId: number, conversationId: number, after?: number): Promise<ChatwootMessage[]> {
-      const messages = await listMessages(accountId, conversationId, after === undefined ? {} : { after });
+    async listMessages(
+      accountId: number,
+      conversationId: number,
+      query: MessageQuery = {},
+    ): Promise<ChatwootMessage[]> {
+      const messages = await listMessages(accountId, conversationId, query);
       if (!messages) throw new ChatwootError(404, "list messages", true);
       return messages;
     },

@@ -113,7 +113,7 @@ export async function processConversation(
   let inboxName: string | null | undefined;
   for (;;) {
     if (budget.remaining < perMessage + PAGE_REQUESTS) return "yield";
-    const page = await chatwoot.listMessages(accountId, conversationId, cursor);
+    const page = await chatwoot.listMessages(accountId, conversationId, { after: cursor });
     for (const message of page) {
       if (message.id <= cursor) continue;
       if (budget.remaining < perMessage) return "yield";

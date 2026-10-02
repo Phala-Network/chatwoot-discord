@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Budget, BudgetExhaustedError } from "../../../shared/budget.ts";
 import { chatwootClient } from "../../../shared/chatwoot/api.ts";
+import { needsCompletionRepair, writeCompletion } from "../src/completion.ts";
 import { ROUTE_BUDGET } from "../src/router.ts";
 import { type RoutingStore, routeConversation, sanitize } from "../src/routing.ts";
 import { json, mockFetch, on, type Recorded, testSettings } from "./helpers.ts";
@@ -35,6 +36,8 @@ interface Ticket {
   attributes?: Record<string, unknown>;
   failAttributes?: number;
   failLabels?: number;
+  failCompletionRead?: number;
+  loseAssignAnswer?: number;
   messages?: Array<{ id: number; content: string; message_type: number; private?: boolean }>;
   /** Snooze requests that fail before Chatwoot answers. */
   failSnooze?: number;
@@ -53,6 +56,11 @@ function world(
   whileJevAnswers?: () => void,
 ) {
   let failures = failAssign;
+  let replied = false;
+  ticket.messages ??= [
+    { id: 1, content: "My CVM will not start, says Jane Doe (jane@example.com)", message_type: 0 },
+    { id: 2, content: "Looking into it", message_type: 1 },
+  ];
   const conversation = () => ({
     id: 5,
     status: ticket.status ?? "open",
@@ -66,21 +74,32 @@ function world(
     last_non_activity_message: (ticket.messages ?? []).filter((m) => m.message_type <= 1).at(-1) ?? null,
   });
   const mock = mockFetch(
-    on("GET", CW, () => json(conversation())),
+    on("GET", CW, () => {
+      if (replied && (ticket.failCompletionRead ?? 0) > 0) {
+        ticket.failCompletionRead = (ticket.failCompletionRead ?? 0) - 1;
+        return json({}, { status: 503 });
+      }
+      return json(conversation());
+    }),
     on("GET", `${CW}/messages`, (request) => {
-      const all = ticket.messages ?? [
-        { id: 1, content: "My CVM will not start, says Jane Doe (jane@example.com)", message_type: 0 },
-        { id: 2, content: "Looking into it", message_type: 1 },
-      ];
+      const all = (ticket.messages ?? []).filter(
+        (message) =>
+          !request.url.searchParams.has("filter_internal_messages") || (!message.private && message.message_type !== 2),
+      );
       // Chatwoot's MessageFinder: the latest 20 without `after`, else up to 100 after that id.
       const after = request.url.searchParams.get("after");
       const payload = after === null ? all.slice(-20) : all.filter((m) => m.id > Number(after)).slice(0, 100);
       return json({ payload });
     }),
-    on("POST", `${CW}/assignments`, () => {
+    on("POST", `${CW}/assignments`, (request) => {
       if (failures > 0) {
         failures -= 1;
         return json({ error: "unavailable" }, { status: 503 });
+      }
+      ticket.assignee = { id: JSON.parse(request.body).assignee_id, name: "Routed agent" };
+      if ((ticket.loseAssignAnswer ?? 0) > 0) {
+        ticket.loseAssignAnswer = (ticket.loseAssignAnswer ?? 0) - 1;
+        return json({}, { status: 503 });
       }
       return json({});
     }),
@@ -109,11 +128,19 @@ function world(
         { id: 3, short_code: "security", content: "Please report it to security@example.com." },
       ]),
     ),
-    on("POST", `${CW}/messages`, () => {
+    on("POST", `${CW}/messages`, (request) => {
       if ((ticket.failReply ?? 0) > 0) {
         ticket.failReply = (ticket.failReply ?? 0) - 1;
         return json({ error: "unavailable" }, { status: 503 });
       }
+      const body = JSON.parse(request.body);
+      ticket.messages?.push({
+        id: (ticket.messages.at(-1)?.id ?? 0) + 1,
+        content: body.content,
+        message_type: 1,
+        private: body.private,
+      });
+      replied = true;
       return json({});
     }),
     on("POST", `${CW}/toggle_status`, (request) => {
@@ -169,6 +196,33 @@ afterEach(() => {
 });
 
 describe("routeConversation", () => {
+  it("filters internal messages for routing without filtering the relay's reads", async () => {
+    const ticket: Ticket = {
+      messages: [
+        { id: 1, content: "Hello", message_type: 0 },
+        ...Array.from({ length: 400 }, (_, index) => ({
+          id: index + 2,
+          content: "Internal",
+          message_type: index % 2 ? 2 : 1,
+          private: index % 2 === 0,
+        })),
+      ],
+    };
+    const { requests } = world(ticket, { owner: ["unclear", 1], topic: ["billing", 0] });
+    const ctx = context(new MapStore(), { ...ROUTING, snoozeUnclear: true });
+    await routeConversation(ctx, 1, 5);
+    expect(ticket.status).toBe("snoozed");
+    expect(
+      sent(requests, "GET", `${CW}/messages`).every(
+        (request) => request.url.searchParams.get("filter_internal_messages") === "true",
+      ),
+    ).toBe(true);
+    const unfiltered = await ctx.chatwoot.listMessages(1, 5);
+    expect(unfiltered.some((message) => message.private)).toBe(true);
+    expect(unfiltered.some((message) => message.message_type === 2)).toBe(true);
+    expect(requests.at(-1)?.url.searchParams.has("filter_internal_messages")).toBe(false);
+  });
+
   it("does not classify an identifier containing the contact's name", async () => {
     const ticket: Ticket = {
       name: "Example Customer",
@@ -288,8 +342,8 @@ describe("routeConversation", () => {
     const ticket: Ticket = {
       messages: Array.from({ length: 403 }, (_, index) => ({
         id: index + 1,
-        message_type: index === 200 || index === 201 ? 0 : 2,
-        content: index === 200 || index === 201 ? "Hello." : "Activity.",
+        message_type: index === 200 || index === 201 ? 0 : 1,
+        content: index === 200 || index === 201 ? "Hello." : "Agent reply.",
       })),
     };
     const { requests } = world(ticket, { owner: ["unclear", 1], topic: ["billing", 1], kind: ["startup-program", 1] });
@@ -311,7 +365,7 @@ describe("routeConversation", () => {
     } else {
       await expect(run).rejects.toBeInstanceOf(BudgetExhaustedError);
       expect(ticket.attributes).toBeUndefined();
-      expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("pending");
+      expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("waiting");
     }
     expect(ticket.status).toBe("snoozed");
     expect(budget.remaining).toBe(0);
@@ -594,6 +648,133 @@ const replies = (requests: Recorded[]) =>
   sent(requests, "POST", `${CW}/messages`).map((request) => JSON.parse(request.body));
 
 describe("routeConversation with kinds", () => {
+  it.each(["latest", "watermark"])(
+    "resumes a waiting decision from %s evidence beyond public replies",
+    async (evidence) => {
+      const ticket: Ticket = { messages: [{ id: 1, content: "A startup application", message_type: 0 }] };
+      const answer: { owner: [string, number]; topic: [string, number]; kind: [string, number] } = {
+        owner: ["unclear", 1],
+        topic: ["billing", 1],
+        kind: ["startup-program", 1],
+      };
+      const { requests } = world(ticket, answer);
+      const ctx = context(new MapStore(), KINDS);
+      await routeConversation(ctx, 1, 5);
+      ticket.messages?.push(
+        ...Array.from({ length: 400 }, (_, index) => ({ id: index + 3, content: "Agent reply", message_type: 1 })),
+        { id: 403, content: "A different billing request", message_type: 0 },
+        ...(evidence === "watermark"
+          ? Array.from({ length: 30 }, (_, index) => ({ id: index + 404, content: "Agent reply", message_type: 1 }))
+          : []),
+      );
+      answer.owner = ["cloud", 1];
+      answer.kind = ["none", 1];
+      await routeConversation(ctx, 1, 5, evidence === "watermark" ? 403 : 0);
+      const asked = sent(requests, "POST", "api.typesafe.ai/v1/systemone");
+      expect(asked).toHaveLength(2);
+      expect(JSON.parse(asked.at(-1)?.body ?? "{}").state.ticket).toContain("A different billing request");
+      expect(replies(requests)).toHaveLength(1);
+      expect(ticket.assignee?.id).toBe(6);
+      expect(ticket.attributes).toEqual({ routing_seen: 403, routing_handled: 1, routing_kind: "startup-program" });
+    },
+  );
+
+  it.each([
+    { evidence: "latest", internal: true },
+    { evidence: "watermark", internal: true },
+    { evidence: "latest", internal: false },
+    { evidence: "watermark", internal: false },
+  ])("redecides from $evidence evidence beyond 400 messages: internal=$internal", async ({ evidence, internal }) => {
+    const ticket: Ticket = { messages: [{ id: 1, content: "A startup application", message_type: 0 }], failLabels: 1 };
+    const answer: { owner: [string, number]; topic: [string, number]; kind: [string, number] } = {
+      owner: ["unclear", 1],
+      topic: ["billing", 1],
+      kind: ["startup-program", 1],
+    };
+    const { requests } = world(ticket, answer);
+    const ctx = context(new MapStore(), KINDS);
+    await expect(routeConversation(ctx, 1, 5)).rejects.toThrow();
+    ticket.messages?.push(
+      ...Array.from({ length: 400 }, (_, index) => ({
+        id: index + 2,
+        content: "Activity or agent reply",
+        message_type: internal ? 2 : 1,
+      })),
+      { id: 402, content: "A different billing request", message_type: 0 },
+      ...(evidence === "watermark"
+        ? Array.from({ length: 30 }, (_, index) => ({ id: index + 403, content: "Agent reply", message_type: 1 }))
+        : []),
+    );
+    answer.owner = ["cloud", 1];
+    answer.kind = ["none", 1];
+    await routeConversation(ctx, 1, 5, evidence === "watermark" ? 402 : 0);
+    const asked = sent(requests, "POST", "api.typesafe.ai/v1/systemone");
+    expect(asked).toHaveLength(2);
+    expect(JSON.parse(asked.at(-1)?.body ?? "{}").state.ticket).toContain("A different billing request");
+    expect(replies(requests)).toEqual([]);
+    expect(ticket.assignee?.id).toBe(6);
+    expect(ticket.attributes).toEqual({ routing_seen: 402 });
+  });
+
+  it.each(["labels", "assignment response"])("finishes its own assignment after losing %s", async (failure) => {
+    const ticket: Ticket = {
+      failLabels: failure === "labels" ? 1 : 0,
+      loseAssignAnswer: failure === "assignment response" ? 1 : 0,
+    };
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["startup-program", 1] });
+    const store = new MapStore();
+    const ctx = context(store, KINDS);
+    await expect(routeConversation(ctx, 1, 5)).rejects.toThrow();
+    expect(ticket.assignee?.id).toBe(6);
+    expect(replies(requests)).toEqual([]);
+    await routeConversation(ctx, 1, 5);
+    expect(ticket.labels).toEqual(["billing", "startup-program"]);
+    expect(replies(requests)).toHaveLength(1);
+    expect(sent(requests, "POST", `${CW}/assignments`)).toHaveLength(1);
+    expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
+    expect(ticket.attributes).toEqual({ routing_seen: 1, routing_handled: 1, routing_kind: "startup-program" });
+    expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("done");
+  });
+
+  it("leaves a different assignee alone after its own assignment succeeds", async () => {
+    const ticket: Ticket = { failLabels: 1 };
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["startup-program", 1] });
+    const store = new MapStore();
+    const ctx = context(store, KINDS);
+    await expect(routeConversation(ctx, 1, 5)).rejects.toThrow();
+    ticket.assignee = { id: 9, name: "Doyle" };
+    const recorded = store.get("route:1:5");
+    await routeConversation(ctx, 1, 5);
+    expect(ticket.labels).toBeUndefined();
+    expect(replies(requests)).toEqual([]);
+    expect(sent(requests, "POST", `${CW}/assignments`)).toHaveLength(1);
+    expect(store.get("route:1:5")).toBe(recorded);
+    expect(ticket.attributes).toEqual({ routing_seen: 1 });
+  });
+
+  it.each(["retry", "repair"])(
+    "records completion before a failing completion GET and recovers by %s",
+    async (recovery) => {
+      const ticket: Ticket = { failCompletionRead: 1 };
+      const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["startup-program", 1] });
+      const store = new MapStore();
+      const ctx = context(store, KINDS);
+      await expect(routeConversation(ctx, 1, 5)).rejects.toThrow();
+      expect(ticket.assignee?.id).toBe(6);
+      expect(ticket.labels).toEqual(["billing", "startup-program"]);
+      expect(replies(requests)).toHaveLength(1);
+      expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("done");
+      expect(needsCompletionRepair(ctx, 1, { id: 5, custom_attributes: {} })).toBe(true);
+      if (recovery === "retry") await routeConversation(ctx, 1, 5);
+      else await writeCompletion(ctx, 1, 5);
+      expect(ticket.attributes).toEqual({ routing_seen: 1, routing_handled: 1, routing_kind: "startup-program" });
+      expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
+      expect(sent(requests, "POST", `${CW}/assignments`)).toHaveLength(1);
+      expect(sent(requests, "POST", `${CW}/labels`)).toHaveLength(1);
+      expect(replies(requests)).toHaveLength(1);
+    },
+  );
+
   it.each(["resolved", "snoozed", "pending"])(
     "acknowledges already-%s tickets without recording a decision",
     async (status) => {
@@ -699,15 +880,15 @@ describe("routeConversation with kinds", () => {
     { kind: "spam", retry: true },
     { kind: "beg-bounty", retry: true },
     { kind: "startup-program", retry: true },
-  ])("finalizes $kind without a status action beyond 400 activity messages: retry=$retry", async ({ kind, retry }) => {
+  ])("finalizes $kind without a status action beyond 400 public replies: retry=$retry", async ({ kind, retry }) => {
     const ticket: Ticket = {
       messages: [{ id: 1, content: "Hello", message_type: 0 }],
       failLabels: retry ? 1 : 0,
     };
     const activity = Array.from({ length: 400 }, (_, index) => ({
       id: index + 2,
-      content: "Activity",
-      message_type: 2,
+      content: "Agent reply",
+      message_type: 1,
     }));
     const { requests } = world(ticket, { owner: ["unclear", 1], topic: ["billing", 1], kind: [kind, 1] }, 0, () => {
       if (!retry) ticket.messages?.push(...activity);
@@ -875,13 +1056,19 @@ describe("routeConversation with kinds", () => {
 });
 
 describe("coordination attributes", () => {
-  it("acknowledges messages beyond Jev's first three without marking them handled", async () => {
+  it("redecides when the latest customer message is newer than the first three inputs", async () => {
     const ticket: Ticket = {
       messages: [1, 2, 3, 4, 5].map((id) => ({ id, message_type: 0, content: "Customer question." })),
     };
-    world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["startup-program", 1] });
-    await routeConversation(context(new MapStore(), KINDS), 1, 5);
-    expect(ticket.attributes).toEqual({ routing_seen: 5, routing_handled: 3, routing_kind: "startup-program" });
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["startup-program", 1] });
+    const ctx = context(new MapStore(), KINDS);
+    await routeConversation(ctx, 1, 5);
+    expect(ticket.attributes).toBeUndefined();
+    expect(replies(requests)).toEqual([]);
+    await routeConversation(ctx, 1, 5);
+    expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(2);
+    expect(replies(requests)).toHaveLength(1);
+    expect(ticket.attributes).toEqual({ routing_seen: 5, routing_handled: 5, routing_kind: "startup-program" });
   });
 
   it.each(["assigned", "resolved", "snoozed", "cutover"])(
@@ -939,7 +1126,10 @@ describe("coordination attributes", () => {
   it.each(["done", "waiting", "skipped"])(
     "repairs lost %s watermarks after a relay read-merge-save without replaying actions",
     async (state) => {
-      const ticket: Ticket = state === "skipped" ? { assignee: { id: 9, name: "Doyle" } } : {};
+      const ticket: Ticket = {
+        ...(state === "skipped" ? { assignee: { id: 9, name: "Doyle" } } : {}),
+        messages: [{ id: 101, content: "Billing question", message_type: 0 }],
+      };
       const { requests } = world(ticket, {
         owner: [state === "waiting" ? "unclear" : "cloud", 1],
         topic: ["billing", 1],

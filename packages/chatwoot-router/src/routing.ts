@@ -167,12 +167,20 @@ export async function routeConversation(
   const routing = settings.config.routing;
   const owners = routing?.accounts[String(accountId)];
   if (!routing || !owners) return;
+  const kinds = routing.kinds?.[String(accountId)] ?? {};
+  const assigneeFor = (decision?: Decision) =>
+    decision &&
+    decision.owner !== null &&
+    decision.ownerConfidence >= routing.minConfidence &&
+    !(decision.kind !== null && decision.kindConfidence >= routing.minConfidence && kinds[decision.kind]?.status)
+      ? owners[decision.owner]?.assignee
+      : undefined;
   const key = routingKey(accountId, conversationId);
   const recorded = readDecision(store.get(key));
   const raw = await chatwoot.getConversation(accountId, conversationId);
   if (!raw) return;
   const conversation = toRelayConversation(conversationId, raw);
-  const latest = await chatwoot.listMessages(accountId, conversationId);
+  const latest = await chatwoot.listMessages(accountId, conversationId, { filter_internal_messages: true });
   const seen = Math.max(
     messageId,
     ...latest.filter((message) => message.message_type === 0 && !message.private).map((message) => message.id),
@@ -198,19 +206,21 @@ export async function routeConversation(
     await complete(recorded, recorded.kindConfidence >= routing.minConfidence ? recorded.kind : null);
     return;
   }
-  if (conversation.status !== "open" || conversation.assignee) {
+  if (conversation.status !== "open" || (conversation.assignee && conversation.assignee.id !== assigneeFor(recorded))) {
     await complete(recorded);
     return;
   }
-  // The customer wrote after the messages Jev was given: a decision not applied yet is made again.
-  let activity =
-    recorded?.state === "pending"
-      ? await customerMessages(chatwoot, accountId, conversationId, recorded.lastMessageId, 1)
-      : undefined;
-  const stale = recorded?.state === "pending" && (activity?.messages.length ?? 0) > 0;
+  // A confirmed newer customer message makes a pending or waiting decision stale.
+  let activity = recorded
+    ? await customerMessages(chatwoot, accountId, conversationId, recorded.lastMessageId, 1)
+    : undefined;
+  const stale = recorded && (seen > recorded.lastMessageId || (activity?.messages.length ?? 0) > 0);
   let decision = recorded?.state === "pending" && !stale ? recorded : undefined;
   if (!decision) {
-    const after = stale && recorded.messages >= MAX_MESSAGES ? recorded.lastMessageId : (recorded?.textAfter ?? 0);
+    const after =
+      stale && (recorded.messages >= MAX_MESSAGES || activity?.complete === false)
+        ? Math.max(recorded.lastMessageId, seen - 1)
+        : (recorded?.textAfter ?? 0);
     const { text, messages, lastMessageId } = await customerText(
       chatwoot,
       accountId,
@@ -249,33 +259,31 @@ export async function routeConversation(
     activity = undefined;
   }
 
-  const kinds = routing.kinds?.[String(accountId)] ?? {};
   const kindName =
     decision.kind !== null && decision.kindConfidence >= routing.minConfidence && Object.hasOwn(kinds, decision.kind)
       ? decision.kind
       : null;
   const kind = kindName === null ? undefined : kinds[kindName];
-  const owner =
-    decision.owner !== null && decision.ownerConfidence >= routing.minConfidence ? owners[decision.owner] : undefined;
-  const final = kind?.status !== undefined || owner !== undefined || decision.messages >= MAX_MESSAGES;
+  const assignee = assigneeFor(decision);
+  const final = kind?.status !== undefined || assignee !== undefined || decision.messages >= MAX_MESSAGES;
   const snooze = !final && routing.snoozeUnclear && decision.noRequest;
   if ((kind !== undefined || snooze) && !activity) {
-    activity = await customerMessages(chatwoot, accountId, conversationId, Math.max(seen, decision.lastMessageId), 1);
+    activity = await customerMessages(chatwoot, accountId, conversationId, decision.lastMessageId, 1);
   }
   const now = await chatwoot.getConversation(accountId, conversationId);
   if (!now) return;
   const current = toRelayConversation(conversationId, now);
-  if (current.status !== "open" || current.assignee || current.contact?.blocked) {
+  if (current.status !== "open" || (current.assignee && current.assignee.id !== assignee) || current.contact?.blocked) {
     await complete();
     return;
   }
-  if (activity?.messages.length) return;
+  if (seen > decision.lastMessageId || activity?.messages.length) return;
   const state: RoutingState = final || activity?.complete === false ? "done" : "waiting";
   const status = activity?.complete === false ? undefined : (kind?.status ?? (snooze ? "snoozed" : undefined));
   const withKind = (labels: string[]) =>
     kindName === null || labels.includes(kindName) ? labels : [...labels, kindName];
-  const assign = owner !== undefined && !kind?.status;
-  if (assign) await chatwoot.assign(accountId, conversationId, owner.assignee);
+  const assign = assignee !== undefined && !current.assignee;
+  if (assign) await chatwoot.assign(accountId, conversationId, assignee);
 
   // The topic is a label, and a ticket has one besides its kinds: added when Jev is confident and the
   // ticket has no other label yet (an automation rule's label, such as an inbox's, is kept alone).
@@ -296,8 +304,8 @@ export async function routeConversation(
     await chatwoot.setStatus(accountId, conversationId, { status });
     if (kind?.status) store.set(handledKey(accountId, conversationId), String(decision.lastMessageId));
   }
-  await complete(decision, kindName);
   store.set(key, JSON.stringify({ ...decision, state }));
+  await complete(decision, kindName);
   log.info("ticket routed", {
     accountId,
     conversationId,
@@ -322,7 +330,7 @@ const PAGES = 3;
 
 /**
  * Up to `limit` customer messages after message `messageId` (0: from the start), and whether that
- * is all there are: notes and activity lines may come in between, and only PAGES pages of messages
+ * is all there are: public agent replies may come in between, and only PAGES pages of messages
  * are read.
  */
 async function customerMessages(
@@ -335,7 +343,7 @@ async function customerMessages(
   const found: ChatwootMessage[] = [];
   let after = messageId;
   for (let page = 0; page < PAGES && found.length < limit; page += 1) {
-    const messages = await chatwoot.listMessages(accountId, conversationId, after);
+    const messages = await chatwoot.listMessages(accountId, conversationId, { after, filter_internal_messages: true });
     found.push(...messages.filter((message) => message.message_type === 0 && !message.private));
     const last = messages.at(-1);
     if (!last || messages.length < MESSAGE_PAGE_SIZE) return { messages: found.slice(0, limit), complete: true };

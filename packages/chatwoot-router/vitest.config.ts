@@ -19,6 +19,7 @@ export default defineConfig({
                 "1": {
                   spam: { covers: "Unsolicited advertising.", status: "resolved" },
                   newsletter: { covers: "A newsletter.", status: "snoozed" },
+                  "startup-program": { covers: "A startup application.", cannedResponse: "startup" },
                 },
               },
               accounts: {
@@ -31,6 +32,7 @@ export default defineConfig({
           CHATWOOT_TOKEN: "agent-token",
           CHATWOOT_WEBHOOK_SECRETS: JSON.stringify({ "1": "secret-acme", "2": "secret-globex" }),
           TYPESAFE_API_KEY: "ts-key",
+          CHATWOOT_BOT_TOKENS: JSON.stringify({ "1": "bot-token" }),
         },
       },
     }),
