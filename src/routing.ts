@@ -33,6 +33,7 @@
 // call the triage bot (see handledAutomatically): the Hub relays them after routing, unless routing
 // fails or is late.
 
+import ipRegex from "ip-regex";
 import { z } from "zod";
 import {
   type ChatwootClient,
@@ -74,9 +75,8 @@ const REDACTIONS = [
   /(?<![1-9A-HJ-NP-Za-km-z])[1-9A-HJ-NP-Za-km-z]{32,64}(?![1-9A-HJ-NP-Za-km-z])/g, // base58 addresses
   /(?<![A-Za-z0-9_+/=-])[A-Za-z0-9_+/=-]{40,}(?![A-Za-z0-9_+/=-])/g, // keys and tokens
   /(?<!\w)\+?\d[\d ()-]{8,}\d(?!\w)/g, // phone numbers
-  /(?<!\w)(?:\d{1,3}\.){3}\d{1,3}(?!\w)/g, // IPv4
-  // IPv6: four groups or more (a time has three at most), or a compressed address with "::".
-  /(?<![\w:])(?:(?:[0-9a-f]{1,4}:){3,7}[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*)?::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*)?)(?![\w:])/gi,
+  // IPv4 and IPv6 (with a zone id), not inside a word, a version number, or a path such as std::io.
+  new RegExp(`(?<![\\w:]|\\d\\.)(?:${ipRegex().source})(?![\\w:]|\\.\\d)`, "g"),
   /(?<!\w)@[A-Za-z0-9_.-]{2,}/g, // handles
 ];
 
