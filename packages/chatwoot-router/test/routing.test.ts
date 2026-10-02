@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { chatwootClient } from "../../../shared/chatwoot/api.ts";
 import {
   actsAutomatically,
+  awaitsRouting,
   handledAutomatically,
   type RoutingStore,
   routeConversation,
@@ -592,12 +593,35 @@ describe("coordination attributes", () => {
     expect(ticket.attributes).toEqual({ seen: 200, handled: 200, kind: "spam" });
   });
 
-  it("never routes conversations at or below the cutover id, even with a recorded decision", async () => {
-    const { requests } = world({}, { owner: ["cloud", 1], topic: ["billing", 1] });
+  it("never applies a recorded decision at or below the account's cutover id", async () => {
+    const { requests } = world({}, { owner: ["cloud", 1], topic: ["billing", 1] }, 1);
     const ctx = context();
-    ctx.settings.config.startAfterConversationId = 5;
+    await expect(routeConversation(ctx, 1, 5)).rejects.toThrow();
+    const before = requests.length;
+    ctx.settings.config.startAfterConversationId = { "1": 5 };
     await routeConversation(ctx, 1, 5);
-    expect(requests).toEqual([]);
+    expect(requests).toHaveLength(before);
+  });
+});
+
+describe("per-account cutover", () => {
+  it.each([
+    { cutover: { "1": 5, "2": 1 }, eligible: false },
+    { cutover: { "1": 6, "2": 1 }, eligible: false },
+    { cutover: { "1": 4, "2": 100 }, eligible: true },
+    { cutover: { "2": 100 }, eligible: true },
+    { cutover: {}, eligible: true },
+  ])("uses only the current account's cutoff %j", async ({ cutover, eligible }) => {
+    const { requests } = world({}, { owner: ["cloud", 1], topic: ["billing", 1] });
+    const store = new MapStore();
+    const settings = testSettings({
+      routing: { ...ROUTING, accounts: { "1": ROUTING.accounts["1"], "2": ROUTING.accounts["1"] } },
+      startAfterConversationId: cutover,
+    });
+    expect(awaitsRouting(settings, store, 1, { id: 5, status: "open" })).toBe(eligible);
+    await routeConversation({ ...context(store), settings }, 1, 5);
+    expect(sent(requests, "POST", `${CW}/assignments`)).toHaveLength(eligible ? 1 : 0);
+    if (!eligible) expect(requests).toEqual([]);
   });
 });
 

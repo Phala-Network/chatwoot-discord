@@ -19,11 +19,34 @@ describe("router configuration", () => {
   it("defaults the coordination names, cutover, and reconcile window", () => {
     const parsed = configSchema.parse(config);
     expect(parsed.attributes).toEqual({ seen: "routing_seen", handled: "routing_handled", kind: "routing_kind" });
-    expect(parsed.startAfterConversationId).toBe(0);
+    expect(parsed.startAfterConversationId).toEqual({});
     expect(parsed.routing.minConfidence).toBe(0.7);
     expect(parsed.reconcile.lookbackSeconds).toBe(3600);
-    expect(configSchema.safeParse({ ...config, startAfterConversationId: -1 }).success).toBe(false);
     expect(configSchema.safeParse({ ...config, attributes: { seen: "same", handled: "same" } }).success).toBe(false);
+  });
+
+  it("accepts per-account cutovers only for routed accounts", () => {
+    const parsed = configSchema.parse({
+      ...config,
+      routing: { accounts: { "1": owners, "2": owners } },
+      startAfterConversationId: { "1": 100, "2": 0 },
+    });
+    expect(parsed.startAfterConversationId).toEqual({ "1": 100, "2": 0 });
+    expect(configSchema.safeParse({ ...config, startAfterConversationId: { "2": 100 } }).success).toBe(false);
+  });
+
+  it.each([
+    0,
+    100,
+    { "1": -1 },
+    { "1": 1.5 },
+    { "1": "5" },
+    { "1": 9007199254740992 },
+    { "0": 5 },
+    { "01": 5 },
+    { "9007199254740992": 5 },
+  ])("rejects an invalid cutover map %j", (startAfterConversationId) => {
+    expect(configSchema.safeParse({ ...config, startAfterConversationId }).success).toBe(false);
   });
 
   it("validates owners, reserved names, kinds, and label families", () => {
@@ -64,6 +87,6 @@ describe("router configuration", () => {
     const later = { ...stored, CONFIG_KEY: "later" };
     await expect(loadSettings(later)).rejects.toThrow(/not in CONFIG_STORE/);
     await bindings.CONFIG_STORE?.put("later", JSON.stringify(CONFIG));
-    expect((await loadSettings(later)).config.startAfterConversationId).toBe(10);
+    expect((await loadSettings(later)).config.startAfterConversationId).toEqual({ "1": 10, "2": 2 });
   });
 });

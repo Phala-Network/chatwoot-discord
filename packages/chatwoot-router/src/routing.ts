@@ -215,7 +215,7 @@ export function awaitsRouting(
   return (
     routesAccount(settings, accountId) &&
     conversation.id !== undefined &&
-    conversation.id > settings.config.startAfterConversationId &&
+    conversation.id > (settings.config.startAfterConversationId[String(accountId)] ?? 0) &&
     conversation.status === "open" &&
     !conversation.meta?.assignee &&
     readDecision(store.get(routingKey(accountId, conversation.id)))?.state !== "done"
@@ -226,7 +226,9 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
   const { settings, store, chatwoot } = ctx;
   const routing = settings.config.routing;
   const owners = routing?.accounts[String(accountId)];
-  if (!routing || !owners || conversationId <= settings.config.startAfterConversationId) return;
+  if (!routing || !owners || conversationId <= (settings.config.startAfterConversationId[String(accountId)] ?? 0)) {
+    return;
+  }
   const key = routingKey(accountId, conversationId);
   const recorded = readDecision(store.get(key));
   if (recorded?.state === "done") return;

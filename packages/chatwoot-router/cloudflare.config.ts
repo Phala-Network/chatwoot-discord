@@ -22,7 +22,7 @@ export default defineConfig(({ mode }) => ({
       CONFIG: bindings.json({
         chatwoot: { baseUrl: "https://chatwoot.example.com" },
         routing: { accounts: { "1": { support: { assignee: 6, covers: "Product support and billing." } } } },
-        startAfterConversationId: 0,
+        startAfterConversationId: { "1": 0 },
       }),
     },
   },

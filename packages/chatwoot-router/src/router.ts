@@ -32,7 +32,12 @@ export class Router extends DurableObject<Env> {
 
   async enqueueConversation(accountId: number, conversationId: number): Promise<void> {
     const settings = await loadSettings(this.env);
-    if (!routesAccount(settings, accountId) || conversationId <= settings.config.startAfterConversationId) return;
+    if (
+      !routesAccount(settings, accountId) ||
+      conversationId <= (settings.config.startAfterConversationId[String(accountId)] ?? 0)
+    ) {
+      return;
+    }
     this.enqueue({ type: "route", accountId, conversationId });
     await this.schedule();
   }

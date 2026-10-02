@@ -14,8 +14,13 @@ export default defineConfig({
         bindings: {
           CONFIG: {
             chatwoot: { baseUrl: "https://chatwoot.example.com" },
-            routing: { accounts: { "1": { cloud: { assignee: 6, covers: "Cloud support." } } } },
-            startAfterConversationId: 10,
+            routing: {
+              accounts: {
+                "1": { cloud: { assignee: 6, covers: "Cloud support." } },
+                "2": { cloud: { assignee: 7, covers: "Cloud support." } },
+              },
+            },
+            startAfterConversationId: { "1": 10, "2": 2 },
           },
           CHATWOOT_TOKEN: "agent-token",
           CHATWOOT_WEBHOOK_SECRETS: JSON.stringify({ "1": "secret-acme", "2": "secret-globex" }),

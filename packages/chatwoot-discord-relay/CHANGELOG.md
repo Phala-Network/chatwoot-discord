@@ -13,9 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The relay no longer accepts `routing`, `TYPESAFE_API_KEY`, or `CHATWOOT_BOT_TOKENS`; configure
   `router.accounts` (and optionally `router.waitSeconds`, default 30) instead. **Deploy this relay first**,
   removing embedded routing, so the old and new routers never act together. Then take the newest Chatwoot
-  conversation id across the routed accounts at cutover, deploy `chatwoot-router` with the old `routing`
+  conversation display id in each routed account at cutover, deploy `chatwoot-router` with the old `routing`
   configuration and secrets (`CHATWOOT_TOKEN` replaces `CHATWOOT_RELAY_TOKEN` there), and set its
-  `startAfterConversationId` to that id. Add its signed Chatwoot webhook and create conversation attributes
+  `startAfterConversationId` map to those per-account ids, for example `{ "1": 1200, "2": 85 }`. Display ids are
+  account-local; include every routed account whose history must be skipped (omitted accounts default to `0`).
+  Add its signed Chatwoot webhook and create conversation attributes
   `routing_seen` and `routing_handled` (Number), and `routing_kind` (Text). Pre-cutover conversations are
   intentionally not routed by the new Worker; its Durable Object does not import the relay's decisions.
 - New relay deployments default to Worker name `chatwoot-discord-relay`. **Existing deployments must keep

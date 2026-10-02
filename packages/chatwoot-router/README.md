@@ -93,14 +93,14 @@ Its `router.attributes` must match this package's `attributes` when using custom
     "snoozeUnclear": true,
     "kinds": { "1": { "spam": { "covers": "Unsolicited advertising.", "status": "resolved" } } }
   },
-  "startAfterConversationId": 0
+  "startAfterConversationId": { "1": 0 }
 }
 ```
 
 | Setting | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `chatwoot.baseUrl` | HTTP(S) URL | required | Final Chatwoot API URL; redirects are refused. |
-| `startAfterConversationId` | integer ≥ 0 | `0` | Conversations with ids at or below this are never routed, including by the sweep. |
+| `startAfterConversationId` | object: routed account id → integer ≥ 0 | `{}` | Each account's conversation display id at cutover; omitted accounts default to `0`. Conversations at or below their account's cutoff are never routed, including by the sweep. |
 | `attributes.seen` | non-empty string | `routing_seen` | Decision watermark attribute. |
 | `attributes.handled` | non-empty string | `routing_handled` | Handled watermark attribute. |
 | `attributes.kind` | non-empty string | `routing_kind` | Kind label attribute. The three names must be distinct. |
@@ -213,15 +213,15 @@ Old completed decisions and reply-once markers remain in the Router's own Durabl
 
 When splitting an existing relay deployment, **deploy the new relay first**, removing its old `routing` setting and
 routing secrets and adding `router.accounts`. Keep its existing Worker `name` and `Hub` export to preserve state.
-Then find the newest Chatwoot conversation id across routed accounts at cutover and set it as
-`startAfterConversationId`. Deploy the router with the old routing configuration and its secrets, then add its
+Then find the newest Chatwoot conversation display id **in each routed account** at cutover and record the map in
+`startAfterConversationId`, for example `{ "1": 1200, "2": 85 }`. Deploy the router with the old routing configuration and its secrets, then add its
 Chatwoot webhook. Do not start the router while the old embedded routing is active. The cutover watermark
 intentionally leaves pre-cutover conversations to humans; old relay routing decisions are not imported.
 
-The cutoff is one numeric threshold for every routed account. Chatwoot display ids are account-local:
-when account counters differ, a maximum-across-accounts cutoff also skips new conversations in a lower-counter
-account until it passes that threshold. Confirm that scope before cutover; use separate router deployments
-when accounts need different cutoffs, and never overlap their routed accounts.
+Chatwoot conversation display ids are account-local: never use one account's id as another account's cutoff.
+The map accepts only accounts in `routing.accounts`, with non-negative integer ids. An omitted account defaults
+to `0`, so include every account whose pre-cutover history must be left alone. In the example, account 1 starts
+at conversation 1201 and account 2 at 86, independently of the other account's counter.
 
 Redaction is best effort, not anonymization: other personal information can still reach TypeSafe. Review its
 policy before enabling routing. Logs contain ids and outcomes, never message bodies or credentials.

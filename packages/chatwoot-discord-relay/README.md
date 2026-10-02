@@ -391,7 +391,8 @@ Each notification decision is recorded once, including across failed Discord pos
 by `routing_kind` when replacing the topic label.
 
 For an existing routed deployment, follow the [upgrade order](CHANGELOG.md#unreleased): deploy the relay without
-embedded routing first, then start the separate router above the cutover conversation id. Never run both routers.
+embedded routing first, then start the separate router with each account's cutover conversation display id in its
+`startAfterConversationId` map. Never run both routers.
 
 ## Triage bot hook
 

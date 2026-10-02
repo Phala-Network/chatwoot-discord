@@ -12,10 +12,10 @@ import { json, mockFetch, on } from "./helpers.ts";
 
 const stub = () => env.ROUTER.getByName(ROUTER_NAME);
 const base = "chatwoot.example.com/api/v1/accounts/1/conversations";
-const incoming = (conversationId: number) => ({
+const incoming = (conversationId: number, accountId = 1) => ({
   event: "message_created",
   id: 501,
-  account: { id: 1 },
+  account: { id: accountId },
   conversation: { id: conversationId },
   sender: { type: "contact" },
   message_type: "incoming",
@@ -144,6 +144,22 @@ describe("router worker", () => {
     expect(mock.requests.filter((request) => request.url.hostname === "api.typesafe.ai")).toHaveLength(1);
   });
 
+  it("queues the same display id only for the account past its cutover", async () => {
+    const path = "chatwoot.example.com/api/v1/accounts/2/conversations/10";
+    const mock = mockFetch(
+      on("GET", path, () => json({ id: 10, status: "open", meta: { assignee: null } })),
+      on("GET", `${path}/messages`, () => json({ payload: [] })),
+    );
+    expect((await webhook(incoming(10))).status).toBe(200);
+    expect((await webhook(incoming(2, 2), "secret-globex")).status).toBe(200);
+    expect((await webhook(incoming(10, 2), "secret-globex")).status).toBe(200);
+    await drain();
+    expect(mock.requests.map((request) => request.url.pathname)).toEqual([
+      "/api/v1/accounts/2/conversations/10",
+      "/api/v1/accounts/2/conversations/10/messages",
+    ]);
+  });
+
   it("routes relevant conversation events and sweeps open, unassigned tickets in its activity window", async () => {
     const mock = world();
     await webhook({ event: "conversation_status_changed", id: 12, account: { id: 1 } });
@@ -165,11 +181,32 @@ describe("router worker", () => {
       }),
       on("GET", `${base}/14`, () => json({ id: 14, status: "open", meta: { assignee: null } })),
       on("GET", `${base}/14/messages`, () => json({ payload: [] })),
+      on("GET", "chatwoot.example.com/api/v1/accounts/2/conversations", (request) => {
+        expect(request.url.searchParams.get("status")).toBe("open");
+        return json({
+          data: {
+            payload: [
+              { id: 9, status: "open", last_activity_at: Date.now() / 1000 },
+              { id: 2, status: "open", last_activity_at: Date.now() / 1000 },
+              { id: 1, status: "open", last_activity_at: Date.now() / 1000 - 7200 },
+            ],
+          },
+        });
+      }),
+      on("GET", "chatwoot.example.com/api/v1/accounts/2/conversations/9", () =>
+        json({ id: 9, status: "open", meta: { assignee: null } }),
+      ),
+      on("GET", "chatwoot.example.com/api/v1/accounts/2/conversations/9/messages", () => json({ payload: [] })),
     );
     const context = createExecutionContext();
     await worker.scheduled(createScheduledController(), env, context);
     await waitOnExecutionContext(context);
     await drain();
-    expect(requests.requests.filter((request) => /\/conversations\/\d+$/.test(request.url.pathname))).toHaveLength(1);
+    expect(
+      requests.requests
+        .filter((request) => /\/conversations\/\d+$/.test(request.url.pathname))
+        .map((request) => request.url.pathname)
+        .sort(),
+    ).toEqual(["/api/v1/accounts/1/conversations/14", "/api/v1/accounts/2/conversations/9"]);
   });
 });

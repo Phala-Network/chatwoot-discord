@@ -14,7 +14,7 @@ export const configSchema = z
     chatwoot: z.strictObject({ baseUrl: z.url({ protocol: /^https?$/ }) }),
     attributes: attributesSchema.prefault({}),
     reconcile: reconcileSchema,
-    startAfterConversationId: z.number().int().min(0).default(0),
+    startAfterConversationId: z.record(accountId, z.number().int().min(0)).default({}),
     subrequestBudget: z.number().int().min(20).max(1000).default(45),
     routing: z.strictObject({
       model: z.string().min(1).default("jev-1.13.0"),
@@ -81,6 +81,10 @@ export const configSchema = z
         )
         .optional(),
     }),
+  })
+  .refine((config) => Object.keys(config.startAfterConversationId).every((id) => config.routing.accounts[id]), {
+    path: ["startAfterConversationId"],
+    message: "must only name routed accounts",
   })
   .refine((config) => Object.keys(config.routing?.kinds ?? {}).every((id) => config.routing?.accounts[id]), {
     path: ["routing", "kinds"],
