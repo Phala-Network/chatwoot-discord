@@ -7,36 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-10-02
+
 ### Changed
 
-- AI routing moves to the independently deployed `chatwoot-router` package in the `chatwoot-workers` monorepo.
-  The relay no longer accepts `routing`, `TYPESAFE_API_KEY`, or `CHATWOOT_BOT_TOKENS`; configure
-  `router.accounts` (and optionally `router.waitSeconds`, default 30) instead. **Deploy this relay first**,
-  removing embedded routing, so the old and new routers never act together. Then take the newest Chatwoot
-  conversation display id in each routed account at cutover, deploy `chatwoot-router` with the old `routing`
-  configuration and secrets (`CHATWOOT_TOKEN` replaces `CHATWOOT_RELAY_TOKEN` there), and set its
-  `startAfterConversationId` map to those per-account ids, for example `{ "1": 1200, "2": 85 }`. Display ids are
-  account-local; include every routed account whose history must be skipped (omitted accounts default to `0`).
-  Add its signed Chatwoot webhook and create conversation attributes
-  `routing_seen` and `routing_handled` (Number), and `routing_kind` (Text). Pre-cutover conversations are
-  intentionally not routed by the new Worker; its Durable Object does not import the relay's decisions.
-  Set `router.keepLabels` (default `[]`), for example `["spam", "security", "beg-bounty"]`, to preserve legacy
-  kind labels in Manage even without `routing_kind`. Only lower-case Chatwoot label names are accepted.
-- New relay deployments default to Worker name `chatwoot-discord-relay`. **Existing deployments must keep
-  their current Worker `name` and `Hub` export**: renaming a Worker creates another Worker without its
-  Durable Object state. Source deployments now live in `packages/chatwoot-discord-relay`; run `npm ci`
-  at the workspace root. Both npm packages keep self-contained exports and type declarations.
+- Routing moves to [`chatwoot-router`](https://github.com/Phala-Network/chatwoot-workers/tree/main/packages/chatwoot-router), a Worker of its own in the same repository, now
+  `chatwoot-workers`. The relay no longer accepts `routing`, `TYPESAFE_API_KEY`, or `CHATWOOT_BOT_TOKENS`; with
+  `router.accounts` (and `router.waitSeconds`, default 30), a new customer message waits for the router's decision
+  (`routing_seen`) before calling the triage bot, and one a kind handled (`routing_handled`) does not call it. The
+  Manage card keeps the kind label (`routing_kind`) and the labels in `router.keepLabels`. To upgrade, deploy this
+  relay first, so the two never both route; then deploy chatwoot-router with your old `routing` configuration and
+  secrets, `startAfterConversationId` set to each routed account's newest conversation id, its Chatwoot webhook, and
+  the conversation attributes `routing_seen` and `routing_handled` (Number) and `routing_kind` (Text) (see its README).
+- New deployments name the Worker `chatwoot-discord-relay`. An existing deployment keeps its Worker `name`: a new
+  name is a new Worker, without the Hub's state. A checkout deploys from `packages/chatwoot-discord-relay`, after
+  `npm ci` at the repository root.
+- Every configured account needs a webhook secret (`/healthz` answers 503 otherwise), and `relay.linkAttribute` may
+  not be one of the routing attributes.
 
 ### Fixed
 
-- Fix coordination names to `routing_seen`, `routing_handled`, and `routing_kind`; remove `router.attributes`
-  and reject a `relay.linkAttribute` using a reserved name. Accept numeric-string watermarks as well as numbers.
-- Require a webhook secret for every configured account; incomplete configuration reports `/healthz` 503.
-- Only `routing_seen` completes the relay's wait for a live customer message; assignment or status changes no
-  longer let a partly applied routing decision call the triage bot. The timestamp deadline and missing-timestamp
-  guard remain. The router also acknowledges skipped messages, including pre-cutover tickets, without Jev.
-- Sync repairs a missing or different post URL after a concurrent Chatwoot custom-attribute save, including a
-  wrong guild with the correct thread id. The router separately restores its durable completion attributes.
+- A sync rewrites the post link attribute when it is missing or wrong (another Worker's concurrent save of the
+  conversation's attributes can drop it).
 
 ## [0.28.0] - 2026-10-02
 
@@ -599,7 +591,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-invocation subrequest budget, and a cron reconciliation sweep for missed webhooks.
 - Verification of Chatwoot webhook HMAC signatures and Discord Ed25519 interaction signatures.
 
-[Unreleased]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.28.0...HEAD
+[Unreleased]: https://github.com/Phala-Network/chatwoot-workers/compare/chatwoot-discord-relay@0.29.0...HEAD
+[0.29.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.28.0...chatwoot-discord-relay@0.29.0
 [0.28.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.25.0...v0.26.0
