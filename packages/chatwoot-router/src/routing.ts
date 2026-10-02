@@ -223,13 +223,11 @@ export async function routeConversation(
   if (current === "defer" || !current) return current;
   if (current.handoff) return handoff(current);
   if (kind?.status) {
-    const at = Date.now() / 1000;
     await bot.setStatus(accountId, conversationId, { status: kind.status });
-    expectActivity(store, accountId, conversationId, { status: kind.status, at });
+    expectActivity(store, accountId, conversationId, { status: kind.status });
   } else if (assignee !== undefined && current.raw.meta?.assignee_type === "AgentBot") {
-    const at = Date.now() / 1000;
     await bot.assign(accountId, conversationId, assignee);
-    expectActivity(store, accountId, conversationId, { status: "open", at });
+    expectActivity(store, accountId, conversationId, { status: "open" });
   } else {
     return handoff(current);
   }

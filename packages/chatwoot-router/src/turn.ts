@@ -8,6 +8,7 @@ import type { Transition } from "./webhook.ts";
 
 const guardSchema = z.object({
   boundary: z.number().optional(),
+  claimed: z.boolean().optional(),
   pending: z.boolean().optional(),
   transitionAt: z.number().optional(),
   expected: z.object({ status: z.string(), at: z.number().optional(), after: z.number().optional() }).optional(),
@@ -34,9 +35,12 @@ export function expectActivity(
   const guard = readGuard(store, accountId, conversationId);
   if (transition.at !== undefined && transition.at <= (guard.transitionAt ?? 0)) return;
   if (transition.at === undefined && guard.expected?.status === transition.status) return;
+  // An activity read before its first status webhook can claim that transition. A boundary
+  // already matched to a timestamp cannot also satisfy a different transition in the same second.
+  const claimed = guard.claimed ?? guard.transitionAt !== undefined;
   saveGuard(store, accountId, conversationId, {
     ...guard,
-    expected: { ...transition, after: guard.boundary },
+    expected: { ...transition, after: transition.at === undefined || claimed ? guard.boundary : undefined },
     transitionAt: transition.at ?? guard.transitionAt,
     handoff: false,
     failures: 0,
@@ -125,8 +129,14 @@ export async function readTurn(
     guard.handoff = false;
     guard.failures = 0;
   }
-  if (!missing && complete) guard.boundary = boundary?.id ?? 0;
-  if (expected && !late) delete guard.expected;
+  if (!missing && complete) {
+    if (guard.boundary !== (boundary?.id ?? 0)) guard.claimed = false;
+    guard.boundary = boundary?.id ?? 0;
+  }
+  if (expected && !late) {
+    guard.claimed = expected.at !== undefined;
+    delete guard.expected;
+  }
   if (deleted || missing || !complete) guard.handoff = true;
   saveGuard(store, accountId, conversationId, guard);
   return { messages: messages.toReversed(), boundary: boundary?.id ?? 0, handoff: guard.handoff };

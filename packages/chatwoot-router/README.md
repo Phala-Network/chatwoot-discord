@@ -24,9 +24,10 @@ Chatwoot owns the lifecycle: a conversation is the bot's while pending, and peop
   email subjects and reply text without quoted history; omit automatic email, deleted messages and private notes.
   Redact identifiers and contact names, then cap the input at 1,600 characters. Memoize Jev's decision by input ids.
 - Status activity is asynchronous. The queue's boundary guard remembers an observed/expected transition and the
-  last boundary needed to reject stale handoff work. A new expected transition requires an activity **after that
-  boundary id**, even when the old activity has the same status and second-level timestamp. Repeated delivery of
-  the same transition timestamp does not start another expectation. A status webhook supplies a transition time;
+  last boundary needed to reject stale handoff work. An activity read before its first status webhook can match
+  that webhook's status and time. Once matched, a different transition requires an activity **after that boundary
+  id**, even when the old activity has the same status and second-level timestamp. Repeated delivery of the same
+  transition timestamp does not start another expectation. Only a status webhook supplies a transition time;
   a read observing pending end requires a newer activity without inferring a time from `updated_at`. The last
   pending observation survives retries, so a retry confirming resolution after a lost response retains that boundary.
   Other non-pending snapshots exit: metadata updates change `updated_at` without creating a status activity.

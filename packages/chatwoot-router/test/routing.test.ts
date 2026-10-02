@@ -413,6 +413,39 @@ describe("native bot turns", () => {
     expect(mock.ticket.status).toBe("pending");
   });
 
+  it.each(["handback", "router resolution"])(
+    "merges a late %s webhook with its already-read activity without handing off a greeting",
+    async (source) => {
+      const at = Math.floor(Date.now() / 1000);
+      vi.spyOn(Date, "now").mockReturnValue(at * 1000 + 100);
+      const mock = world({ messages: [incoming(1, "Old spam")] }, { owner: ["unclear", 1], kind: ["spam", 1] });
+      const ctx = context(new MemoryStore(), KINDS);
+      if (source === "router resolution") await routeConversation(ctx, 1, 5);
+      else mock.ticket.messages?.push(activity(2, "pending"));
+      mock.ticket.status = "pending";
+      mock.ticket.messages?.push(incoming(3, "Hello"));
+      mock.answers.kind = ["none", 1];
+      mock.answers.request = ["none", 1];
+      await routeConversation(ctx, 1, 5); // Incoming webhook/sweep reads the activity first.
+      const decisions = sent(mock.requests, "POST", JEV).length;
+      const status = source === "handback" ? "pending" : "resolved";
+      expectActivity(ctx.store, 1, 5, { status, at: at + 0.8 });
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        try {
+          await routeConversation(ctx, 1, 5);
+          break;
+        } catch {
+          recordFailure(ctx.store, 1, 5);
+        }
+      }
+      expect(mock.ticket.status).toBe("pending");
+      expect(sent(mock.requests, "POST", JEV)).toHaveLength(decisions);
+      // A distinct transition in that same second still needs a distinct activity.
+      expectActivity(ctx.store, 1, 5, { status, at: at + 0.9 });
+      await expect(routeConversation(ctx, 1, 5)).rejects.toThrow("not available yet");
+    },
+  );
+
   it("hands off a permanently missing activity after the retry policy selects handoff", async () => {
     const mock = world();
     const ctx = context();
