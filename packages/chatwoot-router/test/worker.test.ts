@@ -109,7 +109,7 @@ function world(
       on("GET", "chatwoot.example.com/api/v1/accounts/2/conversations", () =>
         failures.account2 ? json({}, { status: 503 }) : json({ data: { payload: [] } }),
       ),
-      on("GET", new RegExp(`${base}/\\d+$`), (request) =>
+      on("GET", new RegExp(`^${RegExp.escape(base)}/\\d+$`), (request) =>
         json({
           id: Number(request.url.pathname.split("/").at(-1)),
           status: state.status ?? "open",
@@ -118,7 +118,7 @@ function world(
           labels,
         }),
       ),
-      on("GET", new RegExp(`${base}/\\d+/messages$`), (request) => {
+      on("GET", new RegExp(`^${RegExp.escape(base)}/\\d+/messages$`), (request) => {
         const after = request.url.searchParams.get("after");
         return json({
           payload:
@@ -127,11 +127,11 @@ function world(
               : messages.filter((message) => message.id > Number(after)).slice(0, 100),
         });
       }),
-      on("POST", new RegExp(`${base}/\\d+/assignments$`), () => {
+      on("POST", new RegExp(`^${RegExp.escape(base)}/\\d+/assignments$`), () => {
         state.assignee = { id: 6 };
         return json({});
       }),
-      on("POST", new RegExp(`${base}/\\d+/labels$`), (request) => {
+      on("POST", new RegExp(`^${RegExp.escape(base)}/\\d+/labels$`), (request) => {
         if (failures.labels > 0) {
           failures.labels -= 1;
           return json({}, { status: 503 });
@@ -142,7 +142,7 @@ function world(
       on("GET", "chatwoot.example.com/api/v1/accounts/1/canned_responses", () =>
         json([{ short_code: "startup", content: "Thanks for applying!" }]),
       ),
-      on("POST", new RegExp(`${base}/\\d+/messages$`), (request) => {
+      on("POST", new RegExp(`^${RegExp.escape(base)}/\\d+/messages$`), (request) => {
         messages.push({
           id: (messages.at(-1)?.id ?? 0) + 1,
           message_type: 1,
@@ -150,11 +150,11 @@ function world(
         });
         return json({});
       }),
-      on("POST", new RegExp(`${base}/\\d+/toggle_status$`), (request) => {
+      on("POST", new RegExp(`^${RegExp.escape(base)}/\\d+/toggle_status$`), (request) => {
         state.status = JSON.parse(request.body).status;
         return json({});
       }),
-      on("POST", new RegExp(`${base}/\\d+/custom_attributes$`), (request) => {
+      on("POST", new RegExp(`^${RegExp.escape(base)}/\\d+/custom_attributes$`), (request) => {
         if (failAttributes > 0) {
           failAttributes -= 1;
           return json({}, { status: 503 });
@@ -212,7 +212,7 @@ function sweepingWorld(options: { failSecondPage?: boolean; externalClose?: bool
       return response;
     }),
     on("GET", "chatwoot.example.com/api/v1/accounts/2/conversations", () => json({ data: { payload: [] } })),
-    on("GET", new RegExp(`${base}/\\d+$`), (request) => {
+    on("GET", new RegExp(`^${RegExp.escape(base)}/\\d+$`), (request) => {
       const id = Number(request.url.pathname.split("/").at(-1));
       return json({
         id,
@@ -222,7 +222,7 @@ function sweepingWorld(options: { failSecondPage?: boolean; externalClose?: bool
         custom_attributes: attributes.get(id) ?? {},
       });
     }),
-    on("GET", new RegExp(`${base}/\\d+/messages$`), (request) =>
+    on("GET", new RegExp(`^${RegExp.escape(base)}/\\d+/messages$`), (request) =>
       json({
         payload:
           Number(request.url.searchParams.get("after") ?? 0) < 1
@@ -230,12 +230,12 @@ function sweepingWorld(options: { failSecondPage?: boolean; externalClose?: bool
             : [],
       }),
     ),
-    on("POST", new RegExp(`${base}/\\d+/labels$`), () => json({})),
-    on("POST", new RegExp(`${base}/\\d+/toggle_status$`), (request) => {
+    on("POST", new RegExp(`^${RegExp.escape(base)}/\\d+/labels$`), () => json({})),
+    on("POST", new RegExp(`^${RegExp.escape(base)}/\\d+/toggle_status$`), (request) => {
       close(Number(request.url.pathname.split("/").at(-2)));
       return json({});
     }),
-    on("POST", new RegExp(`${base}/\\d+/custom_attributes$`), (request) => {
+    on("POST", new RegExp(`^${RegExp.escape(base)}/\\d+/custom_attributes$`), (request) => {
       attributes.set(Number(request.url.pathname.split("/").at(-2)), JSON.parse(request.body).custom_attributes);
       return json({});
     }),
@@ -759,14 +759,14 @@ describe("router worker", () => {
           },
         });
       }),
-      on("GET", new RegExp(`${base}/(9|13|14)$`), (request) =>
+      on("GET", new RegExp(`^${RegExp.escape(base)}/(9|13|14)$`), (request) =>
         json({
           id: Number(request.url.pathname.split("/").at(-1)),
           status: "open",
           meta: { assignee: request.url.pathname.endsWith("/13") ? { id: 6 } : null },
         }),
       ),
-      on("GET", new RegExp(`${base}/(9|13|14)/messages$`), () => json({ payload: [] })),
+      on("GET", new RegExp(`^${RegExp.escape(base)}/(9|13|14)/messages$`), () => json({ payload: [] })),
       on("GET", "chatwoot.example.com/api/v1/accounts/2/conversations", (request) => {
         expect(request.url.searchParams.get("status")).toBe("all");
         return json({
