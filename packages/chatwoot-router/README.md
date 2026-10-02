@@ -5,6 +5,37 @@ assign owners, add topic and kind labels, and optionally send a canned response 
 Runs independently of [chatwoot-discord-relay](https://github.com/Phala-Network/chatwoot-workers/tree/main/packages/chatwoot-discord-relay).
 Neither Worker calls the other: Chatwoot is their only coordination surface.
 
+## How it works
+
+The router is a level-triggered reconciler: triggers request a read, not a transition.
+
+- Webhooks and the all-status, newest-activity-first sweep enqueue the same deduplicated
+  `route:<account>:<conversation>` job. Every run reads Chatwoot; event payloads are not routing inputs.
+  The SQLite queue retries failed runs with backoff. Sweep pages resume within a window anchored to
+  the previous pass's start, using the same pass model as the relay.
+- Inputs are the first three customer messages with usable, redacted text, capped at 1,600 characters.
+  Their message ids form the memoization key. An unchanged key reuses Jev's answer; a new message
+  entering this window gets a new answer. There are no pending/waiting/done decisions or stale checks.
+  Internal messages are filtered out; public replies are scanned within a bounded three-page read.
+  If that read cannot fill or finish the window, no automatic status action is allowed.
+- The answer and a fresh conversation read determine desired labels, owner, reply, and status.
+  Non-open, blocked, pre-cutover, or differently assigned conversations receive no routing actions.
+  An assignment to this decision's owner is eligible on retry. Empty inputs never call Jev or snooze.
+- Labels and assignment converge by comparison with Chatwoot. Reply and status attempts are recorded
+  **before** sending, under `reply:<account>:<conversation>` and
+  `status:<account>:<conversation>:<input key>`. A reply is attempted once per conversation; a status
+  once per input window, so reopening does not repeat it. These local idempotency keys deliberately
+  favor avoiding duplicates over delivery: an uncertain or failed attempt is not sent again. Confirmed
+  kind actions carry their handled message id in the same outbox entry, not a separate completion record.
+- Coordination attributes are desired state too: `routing_seen` acknowledges the latest customer
+  message observed by the completed run; `routing_handled` identifies inputs a kind handled;
+  `routing_kind` preserves its label. Runs derive them from messages, labels, memoized answers, and
+  the outbox, retain greater existing watermarks, and write only differences after applicable actions.
+  The same run repairs missing attributes for any status, without a repair job or a second state machine.
+- A run completes after applicable actions and attribute synchronization succeed, or after acknowledging
+  an out-of-scope conversation. Errors retry; deleted conversations are dropped. Events during a run
+  keep its job queued for another read. The sweep provides the same reconciliation if a webhook is lost.
+
 ## Deploy
 
 Use Node 24 (24.15 or newer), npm 12.1.0, and the Cloudflare CLI `cf`. From this repository, run inside Docker:
