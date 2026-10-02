@@ -65,7 +65,7 @@ no unpublished shared package needs installing.
 
 | Fixed name | Type | Meaning |
 | --- | --- | --- |
-| `routing_seen` | Number | Latest customer message id processed or skipped, written only after the decision's other actions finish. The sole routing-completion signal. |
+| `routing_seen` | Number | Latest customer message id processed or skipped, written after applicable actions. The relay's sole completion signal; it does not imply a `done` decision. |
 | `routing_handled` | Number | Latest customer message id handled by a kind's successful reply or set-aside action. |
 | `routing_kind` | Text | Kind label added by the router, preserved by the relay's Manage card. |
 
@@ -150,7 +150,8 @@ of the account's owners, or `unclear`) and its topic (with `topics`), plus its k
 and whether the customer asks for anything yet (with `snoozeUnclear`), using the email subject and
 the first three customer messages. Before they leave the Worker, emails, URLs, hex and base58 addresses, long
 tokens, phone numbers, IP addresses (and four-part version numbers, which read as one), @handles, and the contact's name (each word of two characters or more) are replaced with
-`[REDACTED]`. This is best-effort redaction of common identifiers, not anonymization: other personal
+`[REDACTED]`. Identifier patterns run before contact-name replacement so a name cannot split an identifier.
+This is best-effort redaction of common identifiers, not anonymization: other personal
 details in the text still reach TypeSafe, so check that its data policy suits you. An owner at
 `minConfidence` or above is assigned, and a topic at or above it is added as a label when the ticket
 has no label other than its kinds (a ticket has one topic label, so one an automation rule set stays alone). When no owner
@@ -164,11 +165,14 @@ Any other (a request no owner covers, or Jev unsure) stays open for a person. A 
 wrote to after the messages Jev was given is not snoozed (a message in the moment between that
 check and the snooze waits for the customer's next one; the support queue lists the ticket
 meanwhile). Customer messages are looked for among the next 300 messages (notes and activity lines count
-too): one beyond them is not seen, and the ticket is then not snoozed but left for a person. A ticket assigned
+too): one beyond them is not seen. If the read window is exhausted without finding a newer customer message,
+the decision is applied without any status action (neither unclear-ticket snoozing nor a kind's status),
+finalized, and left for a person; Jev is not asked again. A ticket assigned
 before its turn (by a person or a Chatwoot automation rule) is left alone, and a routed ticket is
 never routed again, even if someone unassigns it. The decision is recorded, without expiry, before
-it is applied, so a retry applies the same one without asking Jev again. It is applied to the ticket
-as it is after Jev answered: an assignee or topic label someone set meanwhile is kept. Routing acts
+it is applied, so a retry applies the same one without asking Jev again unless a newer customer message is
+confirmed. A fresh conversation read immediately before actions must show an open, unassigned ticket;
+an assignee or topic label someone set meanwhile is kept. Routing acts
 with `CHATWOOT_TOKEN`, whose user must be an agent in the routed inboxes; Chatwoot records the
 assignment as made by that user. The sweep queues routing for open, unassigned tickets in its
 window, so a missed webhook only delays it.
@@ -184,9 +188,12 @@ sweep to decide again, not finalized or applied. If all three messages in that d
 the next text window starts after them so the new request is included. As with snoozing, a message arriving
 between the final check and an action cannot be excluded atomically by Chatwoot's API.
 
-If a person resolves or snoozes while Jev answers, the router finalizes without replying or changing the ticket,
-then writes `routing_seen`. Status intent is recorded in the decision before the router's own status action,
-so a retry can finish a status change whose response was lost without mistaking it for human intervention.
+If that fresh read shows an assigned or non-open ticket (including `pending`), the router only acknowledges
+`routing_seen`, leaving its recorded decision unchanged: `pending` stays `pending`, `waiting` stays `waiting`.
+This applies equally to human intervention and the router's own snooze. A later customer message reopens
+the conversation and routing continues from that state. Actions run in order: labels/assignment, reply
+(recorded before sending, at most once), then status. A lost status response needs no special record:
+the retry rereads the conversation and skips actions if it is no longer open and unassigned.
 
 With `kinds`, Jev is also asked which of the account's kinds the ticket is (or `none`). Kinds are
 labels of a second family: a ticket has one topic label, the category, and a kind Jev is confident
@@ -234,7 +241,7 @@ The Worker acknowledges after a SQLite job is queued. Alarms serialize decisions
 and retry with exponential backoff capped at 30 minutes. The subrequest budget reserves 19 requests for the
 worst-case route and yields to a fresh invocation before starting work it cannot finish.
 Chatwoot's conversation-not-found response (JSON HTTP 404) is logged and the job is dropped, including a deletion
-during a write. Other failures, including proxy errors and account-level API failures, keep their backoff.
+during a message read or write. Other failures, including proxy errors and account-level API failures, keep their backoff.
 A sweep every five minutes pages **all statuses**, newest activity first, using the same shared Chatwoot client
 and pass-window/cursor logic as the relay. It queues routing for open, unassigned tickets and attribute-only
 repair wherever the conversation's attributes are behind its recorded completion, regardless of status.

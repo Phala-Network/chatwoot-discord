@@ -14,14 +14,18 @@
 ### Fixed
 
 - Recheck customer activity before any kind action; stale decisions remain pending and are decided again with
-  the new messages, even beyond the previous three-message text window. Record status intent before acting so
-  retries can finish the router's own changes, while human closure finalizes without a reply or other action.
+  the new messages, even beyond the previous three-message text window. When the bounded read is incomplete
+  without a confirmed newer customer message, apply and finalize without any status action or another Jev call.
+- Act only when a fresh read immediately before actions shows an open, unassigned ticket. Otherwise acknowledge
+  `routing_seen` and preserve the decision, including after the router's own snooze or a lost status response.
+  Routing resumes from that state after reopening; remove status-intent records and special-case finalization.
 - Skip blocked contacts and wait for usable text after attachment-only or redacted-only messages, without Jev
-  or automatic actions, while acknowledging them through `routing_seen`.
+  or automatic actions, while acknowledging them through `routing_seen`. Redact identifiers before contact
+  names so a name cannot split an email address into fragments that are sent to Jev.
 - Fix coordination names to `routing_seen`, `routing_handled`, and `routing_kind`; remove attribute-name
   configuration. Read numeric-string watermarks without lowering them on a later update.
 - Require webhook secrets for every routed account. Log and drop deleted-conversation jobs on Chatwoot's JSON
-  404 response, including during writes, while retaining backoff for other errors.
+  404 response, including message reads and writes, while retaining backoff for other errors.
 - `routing_seen` acknowledges every processed customer message, including assigned, closed, pre-cutover,
   already-routed, and no-owner tickets, only after all applicable actions. Handled and kind attributes accompany
   the completion watermark; assignment/status changes alone cannot release the relay's wait.
