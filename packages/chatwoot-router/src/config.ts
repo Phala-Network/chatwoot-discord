@@ -86,14 +86,14 @@ export const configSchema = z
     },
     { path: ["routing", "botIds"], message: "must name exactly the routed accounts" },
   )
-  .refine((config) => Object.keys(config.routing?.kinds ?? {}).every((id) => config.routing?.accounts[id]), {
+  .refine((config) => Object.keys(config.routing.kinds ?? {}).every((id) => config.routing.accounts[id]), {
     path: ["routing", "kinds"],
     message: "must only name routed accounts",
   })
   .refine(
     (config) =>
-      Object.values(config.routing?.kinds ?? {}).every((kinds) =>
-        Object.keys(kinds).every((kind) => !Object.hasOwn(config.routing?.topics ?? {}, kind)),
+      Object.values(config.routing.kinds ?? {}).every((kinds) =>
+        Object.keys(kinds).every((kind) => !Object.hasOwn(config.routing.topics ?? {}, kind)),
       ),
     { path: ["routing", "kinds"], message: "a kind cannot be named as a topic: they are labels of two families" },
   );
@@ -110,7 +110,6 @@ type Secrets = z.infer<typeof secretsSchema>;
 export interface Settings {
   config: Config;
   secrets: Secrets;
-  botToken(accountId: number): string | undefined;
 }
 
 export function parseSettings(rawConfig: unknown, rawSecrets: object): Settings {
@@ -128,5 +127,5 @@ export function buildSettings(config: Config, secrets: Secrets): Settings {
       throw new ConfigError(`Invalid secrets: ${name}: needs exactly the routed accounts`);
     }
   }
-  return { config, secrets, botToken: (accountId) => secrets.CHATWOOT_AGENT_BOT_TOKENS[String(accountId)] };
+  return { config, secrets };
 }

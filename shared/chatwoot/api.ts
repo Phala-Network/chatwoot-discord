@@ -382,15 +382,13 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
       assigneeId: number,
       assigneeType: "User" | "AgentBot" = "User",
     ): Promise<void> {
+      // AssignmentService supports assignee_type; the published schema omits it.
+      const body = { assignee_id: assigneeId, assignee_type: assigneeType };
       return ensureOk(
         "assign conversation",
         client.POST("/api/v1/accounts/{account_id}/conversations/{conversation_id}/assignments", {
           params: { path: { account_id: accountId, conversation_id: conversationId } },
-          body: { assignee_id: assigneeId },
-          // AssignmentService supports assignee_type; the published schema omits it.
-          ...(assigneeType === "AgentBot"
-            ? { bodySerializer: () => JSON.stringify({ assignee_id: assigneeId, assignee_type: assigneeType }) }
-            : {}),
+          body,
         }),
       );
     },

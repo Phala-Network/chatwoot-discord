@@ -106,7 +106,7 @@ export async function routeConversation(
   const { settings, store, chatwoot } = ctx;
   const routing = settings.config.routing;
   const owners = routing.accounts[String(accountId)];
-  const token = settings.botToken(accountId);
+  const token = settings.secrets.CHATWOOT_AGENT_BOT_TOKENS[String(accountId)];
   if (!owners || !token) return;
   const bot = chatwootClient(settings.config.chatwoot.baseUrl, token, ctx.fetch);
   const kinds = routing.kinds?.[String(accountId)] ?? {};
@@ -167,9 +167,9 @@ export async function routeConversation(
     if (latest.boundary !== turn.boundary || inputs(latest.messages).key !== input.key) return "defer" as const;
     return { ...current, handoff: latest.handoff || humanReply(latest.messages) };
   };
-  const handoff = async () => {
+  const handoff = async (current?: Awaited<ReturnType<typeof fresh>>) => {
     requestHandoff(store, accountId, conversationId);
-    const current = await fresh();
+    current ??= await fresh();
     if (current === "defer") return "defer" as const;
     if (current) await bot.setStatus(accountId, conversationId, { status: "open" });
     return undefined;
@@ -187,7 +187,7 @@ export async function routeConversation(
     decision.owner && decision.ownerConfidence >= routing.minConfidence ? owners[decision.owner]?.assignee : undefined;
   let current = await fresh();
   if (current === "defer" || !current) return current;
-  if (current.handoff) return handoff();
+  if (current.handoff) return handoff(current);
   if (!kind && decision.noRequest && input.count < MAX_MESSAGES) return;
   const topic =
     !kind?.status &&
@@ -210,7 +210,7 @@ export async function routeConversation(
     if (!content?.trim()) return handoff();
     current = await fresh();
     if (current === "defer" || !current) return current;
-    if (current.handoff) return handoff();
+    if (current.handoff) return handoff(current);
     store.set(replyKey, "attempted");
     await bot.createMessage(accountId, conversationId, { content, private: false, files: [] });
   }
@@ -221,7 +221,7 @@ export async function routeConversation(
   }
   current = await fresh();
   if (current === "defer" || !current) return current;
-  if (current.handoff) return handoff();
+  if (current.handoff) return handoff(current);
   if (kind?.status) {
     const at = Date.now() / 1000;
     await bot.setStatus(accountId, conversationId, { status: kind.status });
@@ -231,7 +231,7 @@ export async function routeConversation(
     await bot.assign(accountId, conversationId, assignee);
     expectActivity(store, accountId, conversationId, { status: "open", at });
   } else {
-    return handoff();
+    return handoff(current);
   }
   // Assignment itself ends a bot-assigned turn. No reply or status action may follow it.
   return undefined;
@@ -258,14 +258,13 @@ export function sanitize(text: string, identities: Array<string | null | undefin
   return value.replace(/\s+/g, " ").trim().slice(0, MAX_TEXT);
 }
 
-type Owners = NonNullable<Settings["config"]["routing"]>["accounts"][string];
+type Owners = Settings["config"]["routing"]["accounts"][string];
 
-type Kinds = NonNullable<NonNullable<Settings["config"]["routing"]>["kinds"]>[string];
+type Kinds = NonNullable<Settings["config"]["routing"]["kinds"]>[string];
 
 async function decide(ctx: RoutingContext, owners: Owners, kinds: Kinds | undefined, text: string): Promise<Decision> {
   const routing = ctx.settings.config.routing;
   const apiKey = ctx.settings.secrets.TYPESAFE_API_KEY;
-  if (!routing || !apiKey) throw new JevError("routing is not configured");
   const ownerCriteria: Record<string, string> = Object.fromEntries(
     Object.entries(owners).map(([route, owner]) => [route, owner.covers]),
   );

@@ -164,7 +164,7 @@ describe("executeCommand", () => {
     );
     // Chatwoot shows the assignee's `name`, which is also the post's assignee tag.
     expect(await result).toBe("✅ Assigned to Bob Example.");
-    expect(JSON.parse(requests.at(-1)?.body ?? "")).toEqual({ assignee_id: 43 });
+    expect(JSON.parse(requests.at(-1)?.body ?? "")).toEqual({ assignee_id: 43, assignee_type: "User" });
   });
 
   it("refuses to assign an agent outside the account, which Chatwoot would treat as unassigning", async () => {

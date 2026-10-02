@@ -64,7 +64,7 @@ describe("router configuration", () => {
 
   it("requires TypeSafe and a bot even without canned responses", () => {
     expect(() => parseSettings(config, { ...secrets, TYPESAFE_API_KEY: undefined })).toThrow(/TYPESAFE_API_KEY/);
-    expect(parseSettings(config, secrets).botToken(1)).toBe("bot-token");
+    expect(parseSettings(config, secrets).secrets.CHATWOOT_AGENT_BOT_TOKENS["1"]).toBe("bot-token");
     expect(() => parseSettings(config, { ...secrets, CHATWOOT_AGENT_BOT_TOKENS: undefined })).toThrow(
       /CHATWOOT_AGENT_BOT_TOKENS/,
     );
