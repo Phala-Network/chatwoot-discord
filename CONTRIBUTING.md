@@ -79,9 +79,10 @@ tag, or prerelease cannot publish through this workflow. Never publish the priva
 
 Both packages use npm trusted publishing, configured separately for `Phala-Network/chatwoot-workers` and
 workflow filename `release.yml`, on GitHub-hosted runners with `id-token: write`. No stored npm token is used.
-After renaming the repository, update the relay package's existing npm trust. The new unscoped public router
-package first needs a maintainer-authorized manual publish of `0.1.0`, then its trusted publisher configured;
-that same version cannot be published again. See npm's [trusted publishing documentation](https://docs.npmjs.com/trusted-publishers/).
+After renaming the repository, update the relay package's existing npm trust. A new package's trusted publisher
+can only be configured once the package exists, so chatwoot-router's first version, `0.1.0`, was published by a
+maintainer by hand from its release commit and tagged `chatwoot-router@0.1.0` without a GitHub release (a release
+would run the workflow, and npm refuses to publish a version twice); its trusted publisher was configured after. See npm's [trusted publishing documentation](https://docs.npmjs.com/trusted-publishers/).
 
 Publishing does not deploy either Worker. Infrastructure owners separately provision secrets and custom
 attributes, configure Chatwoot webhooks, and deploy from their private configuration. Follow the relay changelog's

@@ -293,4 +293,4 @@ Redaction is best effort, not anonymization: other personal information can stil
 policy before enabling routing. Logs contain ids and outcomes, never message bodies or credentials.
 See [SECURITY.md](https://github.com/Phala-Network/chatwoot-workers/blob/main/SECURITY.md) to report vulnerabilities,
 [CONTRIBUTING.md](https://github.com/Phala-Network/chatwoot-workers/blob/main/CONTRIBUTING.md) for development,
-and [CHANGELOG.md](CHANGELOG.md) for releases. Licensed under [MIT](LICENSE).
+and [CHANGELOG.md](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-router/CHANGELOG.md) for releases. Licensed under [MIT](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-router/LICENSE).

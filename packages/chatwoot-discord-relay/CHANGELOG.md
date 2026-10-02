@@ -11,14 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Routing moves to [`chatwoot-router`](https://github.com/Phala-Network/chatwoot-workers/tree/main/packages/chatwoot-router), a Worker of its own in the same repository, now
-  `chatwoot-workers`. The relay no longer accepts `routing`, `TYPESAFE_API_KEY`, or `CHATWOOT_BOT_TOKENS`; with
-  `router.accounts` (and `router.waitSeconds`, default 30), a new customer message waits for the router's decision
-  (`routing_seen`) before calling the triage bot, and one a kind handled (`routing_handled`) does not call it. The
-  Manage card keeps the kind label (`routing_kind`) and the labels in `router.keepLabels`. To upgrade, deploy this
-  relay first, so the two never both route; then deploy chatwoot-router with your old `routing` configuration and
-  secrets, `startAfterConversationId` set to each routed account's newest conversation id, its Chatwoot webhook, and
-  the conversation attributes `routing_seen` and `routing_handled` (Number) and `routing_kind` (Text) (see its README).
+- Routing moves to
+  [`chatwoot-router`](https://github.com/Phala-Network/chatwoot-workers/tree/main/packages/chatwoot-router), a Worker
+  of its own in the same repository, now `chatwoot-workers`. The relay no longer accepts `routing`,
+  `TYPESAFE_API_KEY`, or `CHATWOOT_BOT_TOKENS`; with `router.accounts` (and `router.waitSeconds`, default 30), a new
+  customer message waits for the router's decision (`routing_seen`) before calling the triage bot, and one a kind
+  handled (`routing_handled`) does not call it. The Manage card keeps the kind label (`routing_kind`) and the labels
+  in `router.keepLabels`. To upgrade, deploy this relay first, so the two never both route; then deploy
+  chatwoot-router with your old `routing` configuration and secrets (the relay's `CHATWOOT_RELAY_TOKEN` value as its
+  `CHATWOOT_TOKEN`; the relay keeps its own), `startAfterConversationId` set to each routed account's newest
+  conversation id, its Chatwoot webhook, and the conversation attributes `routing_seen` and `routing_handled` (Number)
+  and `routing_kind` (Text) (see its README).
 - New deployments name the Worker `chatwoot-discord-relay`. An existing deployment keeps its Worker `name`: a new
   name is a new Worker, without the Hub's state. A checkout deploys from `packages/chatwoot-discord-relay`, after
   `npm ci` at the repository root.
