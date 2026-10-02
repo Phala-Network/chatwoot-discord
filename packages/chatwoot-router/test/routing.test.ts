@@ -385,6 +385,34 @@ describe("native bot turns", () => {
     expect(JSON.parse(sent(mock.requests, "POST", JEV)[0]?.body ?? "{}").state.ticket).toBe("New text");
   });
 
+  it("waits for a new resolution activity when the previous resolution was in the same second", async () => {
+    const at = Math.floor(Date.now() / 1000);
+    const mock = world(
+      { messages: [incoming(1, "Old text"), { ...activity(2), created_at: at }, incoming(3, "Earlier spam")] },
+      { owner: ["unclear", 1], request: ["none", 1] },
+    );
+    const ctx = context(new MemoryStore(), KINDS);
+    expectActivity(ctx.store, 1, 5, { status: "resolved", at: at + 0.1 });
+    await routeConversation(ctx, 1, 5);
+    mock.ticket.messages?.push(incoming(4, "New request"));
+    mock.answers.kind = ["spam", 1];
+    expectActivity(ctx.store, 1, 5, { status: "resolved", at: at + 0.8 });
+    await expect(routeConversation(ctx, 1, 5)).rejects.toThrow("not available yet");
+    expect(sent(mock.requests, "POST", JEV)).toHaveLength(1);
+    expect(mock.ticket.status).toBe("pending");
+
+    mock.ticket.messages?.push({ ...activity(5), created_at: at }, incoming(6, "Hello again"));
+    mock.answers.kind = ["none", 1];
+    await routeConversation(ctx, 1, 5);
+    expectActivity(ctx.store, 1, 5, { status: "resolved", at: at + 0.8 }); // Same transition redelivered.
+    await routeConversation(ctx, 1, 5);
+    expect(sent(mock.requests, "POST", JEV).map((request) => JSON.parse(request.body).state.ticket)).toEqual([
+      "Earlier spam",
+      "Hello again",
+    ]);
+    expect(mock.ticket.status).toBe("pending");
+  });
+
   it("hands off a permanently missing activity after the retry policy selects handoff", async () => {
     const mock = world();
     const ctx = context();

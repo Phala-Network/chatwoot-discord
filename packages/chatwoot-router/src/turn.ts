@@ -9,7 +9,7 @@ import type { Transition } from "./webhook.ts";
 const guardSchema = z.object({
   boundary: z.number().optional(),
   transitionAt: z.number().optional(),
-  expected: z.object({ status: z.string(), at: z.number() }).optional(),
+  expected: z.object({ status: z.string(), at: z.number(), after: z.number().optional() }).optional(),
   handoff: z.boolean().default(false),
   failures: z.number().int().min(0).default(0),
 });
@@ -34,7 +34,7 @@ export function expectActivity(
   if (transition.at <= (guard.transitionAt ?? 0)) return;
   saveGuard(store, accountId, conversationId, {
     ...guard,
-    expected: transition,
+    expected: { ...transition, after: guard.boundary },
     transitionAt: transition.at,
     handoff: false,
     failures: 0,
@@ -104,7 +104,10 @@ export async function readTurn(
   // Activity timestamps have second precision. The status webhook carries fractional seconds.
   const late =
     expected &&
-    (!boundary || (boundary.created_at ?? 0) < Math.floor(expected.at) || activity?.status !== expected.status);
+    (!boundary ||
+      boundary.id <= (expected.after ?? 0) ||
+      (boundary.created_at ?? 0) < Math.floor(expected.at) ||
+      activity?.status !== expected.status);
   if (late && !guard.handoff && !deleted && !missing) throw new ActivityPendingError();
   if (boundary && boundary.id !== guard.boundary && guard.boundary !== undefined && !missing && !late) {
     guard.handoff = false;
