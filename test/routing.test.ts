@@ -578,4 +578,10 @@ describe("sanitize", () => {
         "key [REDACTED], ip [REDACTED], ping [REDACTED] Thanks, [REDACTED]",
     );
   });
+
+  it("removes IPv6 addresses but keeps times", () => {
+    expect(sanitize("from 2001:db8::1 and fe80:0:0:0:200:f8ff:fe21:67cf at 10:30:00", [])).toBe(
+      "from [REDACTED] and [REDACTED] at 10:30:00",
+    );
+  });
 });

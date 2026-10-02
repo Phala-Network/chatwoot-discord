@@ -27,9 +27,9 @@ is enough).
   common identifiers are redacted before the text leaves the Worker ([Routing](#routing)).
 - **A support queue.** Every hour, the tickets waiting for a reply or an assignee, pinging their
   assignees and escalating long-unassigned ones ([Support queue](#support-queue)).
-- **Reliable and secure.** Work is queued durably, retried, and swept every 5 minutes for anything
-  missed; webhooks and interactions are signature-checked, mentions are locked down, and logs hold
-  no message bodies ([Security model](#security-model)).
+- **Reliable and secure.** Work is queued durably and retried, and a sweep every 5 minutes catches
+  up on new messages a missed webhook left out; webhooks and interactions are signature-checked,
+  mentions are locked down, and logs hold no message bodies ([Security model](#security-model)).
 - **Private configuration.** Deploy from a repository of your own with the npm package, published
   with provenance ([Deploy](#3-cloudflare)).
 
@@ -386,7 +386,7 @@ has a customer message. The Worker asks Jev multiple-choice questions, who owns 
 of the account's owners, or `unclear`) and its topic (with `topics`), plus its kind (with `kinds`)
 and whether the customer asks for anything yet (with `snoozeUnclear`), using the email subject and
 the first three customer messages. Before they leave the Worker, emails, URLs, hex and base58 addresses, long
-tokens, phone numbers, IP addresses, @handles, and the contact's name are replaced with
+tokens, phone numbers, IP addresses, @handles, and the contact's name (each word of two characters or more) are replaced with
 `[REDACTED]`. This is best-effort redaction of common identifiers, not anonymization: other personal
 details in the text still reach TypeSafe, so check that its data policy suits you. An owner at
 `minConfidence` or above is assigned, and a topic at or above it is added as a label when the ticket
@@ -494,7 +494,8 @@ messages; tickets beyond that are counted at the end.
 - Commands act only for linked users; others get an ephemeral refusal. The ticket is resolved
   from the stored post → conversation mapping, never from the post title.
 - Discord messages are sent with `allowed_mentions` locked down; only linked agents can be
-  pinged: the conversation's assignee, and agents mentioned in a private note. Customer text
+  pinged: the conversation's assignee, and agents mentioned in a private note; the support queue
+  also pings its configured escalation role or user. Customer text
   cannot call a bot either (see [Message content](docs/relay.md#message-content)).
 - Attachments are fetched only from Discord's CDN (`cdn.discordapp.com`, `media.discordapp.net`)
   over HTTPS, without following redirects, with size caps.

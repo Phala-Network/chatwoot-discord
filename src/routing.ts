@@ -75,6 +75,8 @@ const REDACTIONS = [
   /(?<![A-Za-z0-9_+/=-])[A-Za-z0-9_+/=-]{40,}(?![A-Za-z0-9_+/=-])/g, // keys and tokens
   /(?<!\w)\+?\d[\d ()-]{8,}\d(?!\w)/g, // phone numbers
   /(?<!\w)(?:\d{1,3}\.){3}\d{1,3}(?!\w)/g, // IPv4
+  // IPv6: four groups or more (a time has three at most), or a compressed address with "::".
+  /(?<![\w:])(?:(?:[0-9a-f]{1,4}:){3,7}[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*)?::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*)?)(?![\w:])/gi,
   /(?<!\w)@[A-Za-z0-9_.-]{2,}/g, // handles
 ];
 
