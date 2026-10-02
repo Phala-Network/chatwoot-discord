@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { Budget, BudgetExhaustedError } from "../../../shared/budget.ts";
 import { chatwootClient } from "../../../shared/chatwoot/api.ts";
+import { ROUTE_BUDGET } from "../src/router.ts";
 import {
   actsAutomatically,
-  awaitsRouting,
   handledAutomatically,
   type RoutingStore,
   routeConversation,
@@ -159,6 +160,53 @@ afterEach(() => {
 });
 
 describe("routeConversation", () => {
+  it.each([false, true])("fits the worst-case route at its request boundary: sufficient=%s", async (sufficient) => {
+    const store = new MapStore();
+    store.set(
+      "route:1:5",
+      JSON.stringify({
+        owner: null,
+        ownerConfidence: 0,
+        topic: null,
+        topicConfidence: 0,
+        messages: 0,
+        lastMessageId: 0,
+        state: "pending",
+      }),
+    );
+    const ticket: Ticket = {
+      messages: Array.from({ length: 403 }, (_, index) => ({
+        id: index + 1,
+        message_type: index === 200 || index === 201 ? 0 : 2,
+        content: index === 200 || index === 201 ? "Hello." : "Activity.",
+      })),
+    };
+    const { requests } = world(ticket, { owner: ["unclear", 1], topic: ["billing", 1], kind: ["startup-program", 1] });
+    const ctx = context(store, { ...KINDS, snoozeUnclear: true });
+    const budget = new Budget(ROUTE_BUDGET - (sufficient ? 0 : 1));
+    const run = routeConversation(
+      {
+        ...ctx,
+        fetch: budget.fetch,
+        chatwoot: chatwootClient(ctx.settings.config.chatwoot.baseUrl, "agent-token", budget.fetch),
+      },
+      1,
+      5,
+    );
+    if (sufficient) {
+      await run;
+      expect(ticket.attributes).toEqual({ routing_seen: 202, routing_handled: 202, routing_kind: "startup-program" });
+      expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("waiting");
+    } else {
+      await expect(run).rejects.toBeInstanceOf(BudgetExhaustedError);
+      expect(ticket.attributes).toBeUndefined();
+      expect(JSON.parse(store.get("route:1:5") ?? "{}").state).toBe("pending");
+    }
+    expect(ticket.status).toBe("snoozed");
+    expect(budget.remaining).toBe(0);
+    expect(requests).toHaveLength(budget.limit);
+  });
+
   it("assigns the owner and adds the topic label Jev is confident about, sending the text without identifiers", async () => {
     const { requests } = world({}, { owner: ["cloud", 0.93], topic: ["technical-support", 0.88] });
 
@@ -719,7 +767,6 @@ describe("per-account cutover", () => {
       routing: { ...ROUTING, accounts: { "1": ROUTING.accounts["1"], "2": ROUTING.accounts["1"] } },
       startAfterConversationId: cutover,
     });
-    expect(awaitsRouting(settings, 1, { id: 5, status: "open" })).toBe(true);
     await routeConversation({ ...context(store), settings }, 1, 5);
     expect(sent(requests, "POST", `${CW}/assignments`)).toHaveLength(eligible ? 1 : 0);
     expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(eligible ? 1 : 0);

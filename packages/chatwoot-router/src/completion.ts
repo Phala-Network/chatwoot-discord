@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { messageWatermark } from "../../../shared/attributes.ts";
+import type { ChatwootConversation } from "../../../shared/chatwoot/api.ts";
 import { parseJson } from "../../../shared/json.ts";
 import type { RoutingContext } from "./routing.ts";
 
@@ -9,17 +10,37 @@ const completionSchema = z.object({
   kind: z.string().nullable(),
 });
 
+function readCompletion(ctx: Pick<RoutingContext, "store">, accountId: number, conversationId: number) {
+  const parsed = completionSchema.safeParse(parseJson(ctx.store.get(`completion:${accountId}:${conversationId}`)));
+  return parsed.success ? parsed.data : { seen: 0, handled: 0, kind: null };
+}
+
+export function needsCompletionRepair(
+  ctx: Pick<RoutingContext, "store" | "settings">,
+  accountId: number,
+  conversation: ChatwootConversation,
+): boolean {
+  if (conversation.id === undefined) return false;
+  const recorded = readCompletion(ctx, accountId, conversation.id);
+  const current = conversation.custom_attributes ?? {};
+  const names = ctx.settings.config.attributes;
+  return (
+    recorded.seen > messageWatermark(current[names.seen]) ||
+    recorded.handled > messageWatermark(current[names.handled]) ||
+    (recorded.kind !== null && recorded.kind !== current[names.kind])
+  );
+}
+
 export async function writeCompletion(
   ctx: RoutingContext,
   accountId: number,
   conversationId: number,
-  seen: number,
-  handled: number,
-  kind: string | null,
+  seen = 0,
+  handled = 0,
+  kind: string | null = null,
 ): Promise<void> {
   const key = `completion:${accountId}:${conversationId}`;
-  const parsed = completionSchema.safeParse(parseJson(ctx.store.get(key)));
-  const previous = parsed.success ? parsed.data : { seen: 0, handled: 0, kind: null };
+  const previous = readCompletion(ctx, accountId, conversationId);
   const conversation = await ctx.chatwoot.getConversation(accountId, conversationId);
   if (!conversation) return;
   const current = conversation.custom_attributes ?? {};

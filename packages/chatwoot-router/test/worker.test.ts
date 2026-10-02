@@ -70,16 +70,21 @@ afterEach(async () => {
 function world(failAttributes = 0, state: { status?: string; assignee?: { id: number } } = {}) {
   const attributes: Record<string, unknown> = { unrelated: "kept" };
   const messages = [{ id: 501, message_type: 0, content: "Where is my invoice?" }];
+  const answers = { owner: { choice: "cloud", confidence: 1 }, kind: { choice: "none", confidence: 1 } };
+  const failures = { account2: false };
   return {
     attributes,
     messages,
     state,
+    answers,
+    failures,
     ...mockFetch(
       on("GET", base, (request) =>
         json({
           data: {
             payload:
-              Number(request.url.searchParams.get("page")) === 1
+              Number(request.url.searchParams.get("page")) === 1 &&
+              (request.url.searchParams.get("status") === "all" || (state.status ?? "open") === "open")
                 ? [
                     {
                       id: 11,
@@ -93,7 +98,9 @@ function world(failAttributes = 0, state: { status?: string; assignee?: { id: nu
           },
         }),
       ),
-      on("GET", "chatwoot.example.com/api/v1/accounts/2/conversations", () => json({ data: { payload: [] } })),
+      on("GET", "chatwoot.example.com/api/v1/accounts/2/conversations", () =>
+        failures.account2 ? json({}, { status: 503 }) : json({ data: { payload: [] } }),
+      ),
       on("GET", new RegExp(`${base}/\\d+$`), (request) =>
         json({
           id: Number(request.url.pathname.split("/").at(-1)),
@@ -112,6 +119,11 @@ function world(failAttributes = 0, state: { status?: string; assignee?: { id: nu
         state.assignee = { id: 6 };
         return json({});
       }),
+      on("POST", new RegExp(`${base}/\\d+/labels$`), () => json({})),
+      on("POST", new RegExp(`${base}/\\d+/toggle_status$`), (request) => {
+        state.status = JSON.parse(request.body).status;
+        return json({});
+      }),
       on("POST", new RegExp(`${base}/\\d+/custom_attributes$`), (request) => {
         if (failAttributes > 0) {
           failAttributes -= 1;
@@ -122,30 +134,49 @@ function world(failAttributes = 0, state: { status?: string; assignee?: { id: nu
         Object.assign(attributes, body.custom_attributes);
         return json({});
       }),
-      on("POST", "api.typesafe.ai/v1/systemone", () =>
-        json({ answers: { owner: { choice: "cloud", confidence: 1 }, kind: { choice: "none", confidence: 1 } } }),
-      ),
+      on("POST", "api.typesafe.ai/v1/systemone", () => json({ answers })),
     ),
   };
 }
 
-function sweepingWorld(failSecondPage = false) {
-  const open = new Set(Array.from({ length: 50 }, (_, index) => index + 11));
+function sweepingWorld(options: { failSecondPage?: boolean; externalClose?: boolean; ageSeconds?: number } = {}) {
+  const ids = Array.from({ length: 50 }, (_, index) => index + 11);
+  const open = new Set(ids);
+  const activity = new Map(ids.map((id) => [id, Date.now() / 1000 - (options.ageSeconds ?? 0)]));
+  const close = (id: number) => {
+    open.delete(id);
+    activity.set(id, Date.now() / 1000);
+  };
   const pages: number[] = [];
   const attributes = new Map<number, object>();
   let failed = false;
-  mockFetch(
+  let closedExternally = false;
+  const mock = mockFetch(
     on("GET", base, (request) => {
       const page = Number(request.url.searchParams.get("page"));
-      if (page === 2 && failSecondPage && !failed) {
+      if (page === 2 && options.failSecondPage && !failed) {
         failed = true;
         return json({}, { status: 503 });
       }
-      const ids = [...open].slice((page - 1) * 25, page * 25);
-      pages.push(ids.length);
-      return json({
-        data: { payload: ids.map((id) => ({ id, status: "open", last_activity_at: Date.now() / 1000 })) },
+      const visible = ids.filter((id) => request.url.searchParams.get("status") === "all" || open.has(id));
+      visible.sort((first, second) => (activity.get(second) ?? 0) - (activity.get(first) ?? 0) || first - second);
+      const listed = visible.slice((page - 1) * 25, page * 25);
+      pages.push(listed.length);
+      const response = json({
+        data: {
+          payload: listed.map((id) => ({
+            id,
+            status: open.has(id) ? "open" : "resolved",
+            last_activity_at: activity.get(id),
+            custom_attributes: attributes.get(id) ?? {},
+          })),
+        },
       });
+      if (options.externalClose && page === 1 && !closedExternally) {
+        closedExternally = true;
+        for (const id of listed) close(id);
+      }
+      return response;
     }),
     on("GET", "chatwoot.example.com/api/v1/accounts/2/conversations", () => json({ data: { payload: [] } })),
     on("GET", new RegExp(`${base}/\\d+$`), (request) => {
@@ -168,7 +199,7 @@ function sweepingWorld(failSecondPage = false) {
     ),
     on("POST", new RegExp(`${base}/\\d+/labels$`), () => json({})),
     on("POST", new RegExp(`${base}/\\d+/toggle_status$`), (request) => {
-      open.delete(Number(request.url.pathname.split("/").at(-2)));
+      close(Number(request.url.pathname.split("/").at(-2)));
       return json({});
     }),
     on("POST", new RegExp(`${base}/\\d+/custom_attributes$`), (request) => {
@@ -179,7 +210,7 @@ function sweepingWorld(failSecondPage = false) {
       json({ answers: { owner: { choice: "unclear", confidence: 1 }, kind: { choice: "spam", confidence: 1 } } }),
     ),
   );
-  return { open, pages };
+  return { ...mock, open, pages };
 }
 
 describe("router worker", () => {
@@ -199,7 +230,7 @@ describe("router worker", () => {
     },
   );
 
-  it("repairs an assigned done decision and acknowledges a missed customer webhook during a sweep", async () => {
+  it("repairs an assigned decision during a sweep without processing new messages", async () => {
     const mock = world();
     await webhook(incoming(11));
     await drain();
@@ -208,31 +239,69 @@ describe("router worker", () => {
     delete mock.attributes.routing_seen;
     mock.attributes.discord_thread = "https://discord.com/channels/100000000000000001/100000000000000002";
     mock.messages.push({ id: 601, message_type: 0, content: "Another question." });
+    const before = mock.requests.length;
     await stub().requestSweep();
     await drain();
     expect(mock.attributes).toMatchObject({
-      routing_seen: 601,
+      routing_seen: 501,
       discord_thread: "https://discord.com/channels/100000000000000001/100000000000000002",
     });
     expect(mock.requests.filter((request) => request.url.hostname === "api.typesafe.ai")).toHaveLength(1);
+    expect(mock.requests.slice(before).some((request) => request.url.pathname.endsWith("/messages"))).toBe(false);
   });
 
-  it("finishes paging all 50 open tickets before routing closes the first 25", async () => {
+  it("interleaves routing with all-status sweep pages without skipping tickets", async () => {
     const sweep = sweepingWorld();
     await stub().requestSweep();
     await drain(15000);
     expect(sweep.pages).toEqual([25, 25, 0]);
     expect(sweep.open.size).toBe(0);
+    const firstClose = sweep.requests.findIndex((request) => request.url.pathname.endsWith("/toggle_status"));
+    const secondPage = sweep.requests.findIndex((request) => request.url.searchParams.get("page") === "2");
+    expect(firstClose).toBeGreaterThan(-1);
+    expect(firstClose).toBeLessThan(secondPage);
   }, 20000);
 
-  it("keeps sweep route jobs blocked across a failed page and its retry", async () => {
-    const sweep = sweepingWorld(true);
-    await stub().requestSweep();
-    await vi.waitFor(async () => {
-      const alarm = await runInDurableObject(stub(), (_instance, state) => state.storage.getAlarm());
-      expect(alarm).toBeGreaterThan(Date.now());
+  it("does not skip old tickets when the first page closes externally", async () => {
+    const sweep = sweepingWorld({ externalClose: true, ageSeconds: 4000 });
+    await runInDurableObject(stub(), (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO cache (key, value) VALUES (?, ?)",
+        "sweep:1:last",
+        String(Date.now() - 5000 * 1000),
+      );
     });
-    expect(sweep.open.size).toBe(50);
+    await stub().requestSweep();
+    await drain(15000);
+    const firstPass = [...sweep.pages];
+    await stub().requestSweep();
+    await drain(15000);
+    expect(sweep.open.size).toBe(0);
+    expect(firstPass).toEqual([25, 25, 0]);
+  }, 20000);
+
+  it("resumes a failed sweep page without holding its routes or advancing the pass watermark", async () => {
+    const sweep = sweepingWorld({ failSecondPage: true });
+    await stub().requestSweep();
+    await vi.waitFor(
+      async () => {
+        await runInDurableObject(stub(), (_instance, state) => {
+          expect(
+            state.storage.sql.exec<{ attempts: number }>("SELECT attempts FROM jobs WHERE key = ?", "sweep:1").one()
+              .attempts,
+          ).toBe(1);
+        });
+      },
+      { timeout: 10000 },
+    );
+    const pass = await runInDurableObject(stub(), (_instance, state) => {
+      expect(state.storage.sql.exec("SELECT value FROM cache WHERE key = ?", "sweep:1:last").toArray()).toEqual([]);
+      return JSON.parse(
+        state.storage.sql.exec<{ value: string }>("SELECT value FROM cache WHERE key = ?", "sweep:1:pass").one().value,
+      );
+    });
+    expect(pass.page).toBe(2);
+    const remainingDuringBackoff = sweep.open.size;
     await runInDurableObject(stub(), async (_instance, state) => {
       state.storage.sql.exec("UPDATE jobs SET not_before = 0 WHERE key = ?", "sweep:1");
       await state.storage.setAlarm(Date.now());
@@ -240,7 +309,101 @@ describe("router worker", () => {
     await drain(15000);
     expect(sweep.pages).toEqual([25, 25, 0]);
     expect(sweep.open.size).toBe(0);
+    expect(remainingDuringBackoff).toBe(25);
+    await runInDurableObject(stub(), (_instance, state) => {
+      expect(
+        state.storage.sql.exec<{ value: string }>("SELECT value FROM cache WHERE key = ?", "sweep:1:last").one().value,
+      ).toBe(String(pass.startedAt));
+      expect(state.storage.sql.exec("SELECT value FROM cache WHERE key = ?", "sweep:1:pass").toArray()).toEqual([]);
+    });
   }, 20000);
+
+  it("runs account 1's due route while account 2's sweep is backing off", async () => {
+    const mock = world(0, { status: "resolved" });
+    mock.failures.account2 = true;
+    await stub().requestSweep();
+    await drain();
+    await runInDurableObject(stub(), (_instance, state) => {
+      expect(
+        state.storage.sql
+          .exec<{ attempts: number; not_before: number }>(
+            "SELECT attempts, not_before FROM jobs WHERE key = ?",
+            "sweep:2",
+          )
+          .one(),
+      ).toMatchObject({ attempts: 1 });
+    });
+    try {
+      await webhook(incoming(11));
+      await drain(1000);
+      expect(mock.attributes.routing_seen).toBe(501);
+      await runInDurableObject(stub(), (_instance, state) => {
+        expect(
+          state.storage.sql.exec<{ not_before: number }>("SELECT not_before FROM jobs WHERE key = ?", "sweep:2").one()
+            .not_before,
+        ).toBeGreaterThan(Date.now());
+      });
+    } finally {
+      await runInDurableObject(stub(), async (_instance, state) => {
+        state.storage.sql.exec("DELETE FROM jobs WHERE key = ?", "sweep:2");
+        await state.storage.setAlarm(Date.now());
+      });
+      await drain();
+    }
+  });
+
+  it.each(["resolved", "snoozed"])(
+    "repairs lost attributes on a %s ticket through the sweep without replaying its decision",
+    async (status) => {
+      const mock = world();
+      const kind = status === "resolved" ? "spam" : "newsletter";
+      mock.answers.owner.choice = "unclear";
+      mock.answers.kind.choice = kind;
+      await webhook(incoming(11));
+      await drain();
+      expect(mock.state.status).toBe(status);
+      expect(mock.attributes).toMatchObject({ routing_seen: 501, routing_handled: 501, routing_kind: kind });
+      expect(mock.requests.filter((request) => request.url.pathname.endsWith("/custom_attributes"))).toHaveLength(1);
+      delete mock.attributes.routing_seen;
+      delete mock.attributes.routing_handled;
+      delete mock.attributes.routing_kind;
+      mock.attributes.discord_thread = "https://discord.com/channels/100000000000000001/100000000000000002";
+      const before = mock.requests.length;
+      await stub().requestSweep();
+      await drain();
+      expect(mock.attributes).toMatchObject({
+        routing_seen: 501,
+        routing_handled: 501,
+        routing_kind: kind,
+        discord_thread: "https://discord.com/channels/100000000000000001/100000000000000002",
+      });
+      expect(
+        mock.requests
+          .slice(before)
+          .filter((request) => request.url.pathname.includes("/conversations/"))
+          .map((request) => `${request.method} ${request.url.pathname}`),
+      ).toEqual([
+        "GET /api/v1/accounts/1/conversations/11",
+        "POST /api/v1/accounts/1/conversations/11/custom_attributes",
+      ]);
+      expect(mock.requests.filter((request) => request.url.hostname === "api.typesafe.ai")).toHaveLength(1);
+      const repaired = mock.requests.length;
+      await stub().requestSweep();
+      await drain();
+      expect(mock.requests.slice(repaired).every((request) => request.url.pathname.endsWith("/conversations"))).toBe(
+        true,
+      );
+      Object.assign(mock.attributes, { routing_seen: 701, routing_handled: 401, routing_kind: "other" });
+      await stub().requestSweep();
+      await drain();
+      expect(mock.attributes).toMatchObject({ routing_seen: 701, routing_handled: 501, routing_kind: kind });
+      delete mock.attributes.routing_seen;
+      await stub().requestSweep();
+      await drain();
+      expect(mock.attributes.routing_seen).toBe(701);
+      expect(mock.requests.filter((request) => request.url.hostname === "api.typesafe.ai")).toHaveLength(1);
+    },
+  );
 
   it("acknowledges pre-cutover contact webhooks using the webhook message id", async () => {
     const mock = world();
@@ -336,7 +499,7 @@ describe("router worker", () => {
     mock.spy.mockRestore();
     const requests = mockFetch(
       on("GET", base, (request) => {
-        expect(request.url.searchParams.get("status")).toBe("open");
+        expect(request.url.searchParams.get("status")).toBe("all");
         return json({
           data: {
             payload: [
@@ -357,7 +520,7 @@ describe("router worker", () => {
       ),
       on("GET", new RegExp(`${base}/(9|13|14)/messages$`), () => json({ payload: [] })),
       on("GET", "chatwoot.example.com/api/v1/accounts/2/conversations", (request) => {
-        expect(request.url.searchParams.get("status")).toBe("open");
+        expect(request.url.searchParams.get("status")).toBe("all");
         return json({
           data: {
             payload: [
@@ -388,7 +551,6 @@ describe("router worker", () => {
         ),
       ].sort(),
     ).toEqual([
-      "/api/v1/accounts/1/conversations/13",
       "/api/v1/accounts/1/conversations/14",
       "/api/v1/accounts/1/conversations/9",
       "/api/v1/accounts/2/conversations/2",

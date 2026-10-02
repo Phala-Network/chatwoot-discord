@@ -205,15 +205,6 @@ export function routesAccount(settings: Settings, accountId: number): boolean {
   return settings.config.routing?.accounts[String(accountId)] !== undefined;
 }
 
-/** Whether a listed conversation needs routing or a completion check. */
-export function awaitsRouting(
-  settings: Settings,
-  accountId: number,
-  conversation: { id?: number; status?: string; meta?: { assignee?: unknown } | null },
-): boolean {
-  return routesAccount(settings, accountId) && conversation.id !== undefined && conversation.status === "open";
-}
-
 export async function routeConversation(
   ctx: RoutingContext,
   accountId: number,

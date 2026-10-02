@@ -2,25 +2,27 @@ import { DurableObject } from "cloudflare:workers";
 import { z } from "zod";
 import { Budget, BudgetExhaustedError } from "../../../shared/budget.ts";
 import { chatwootClient } from "../../../shared/chatwoot/api.ts";
+import { parseJson } from "../../../shared/json.ts";
 import { errorFields, log } from "../../../shared/log.ts";
 import { QueueStore, retryDelay } from "../../../shared/store.ts";
+import { readSweepPass, saveSweepPass } from "../../../shared/sweep.ts";
+import { needsCompletionRepair, writeCompletion } from "./completion.ts";
 import type { Settings } from "./config.ts";
 import type { Env } from "./env.ts";
-import { awaitsRouting, routeConversation, routesAccount } from "./routing.ts";
+import { routeConversation, routesAccount } from "./routing.ts";
 import { loadSettings } from "./settings.ts";
 
 export const ROUTER_NAME = "global";
-const ROUTE_BUDGET = 18;
+export const ROUTE_BUDGET = 19;
+const BUDGET = { route: ROUTE_BUDGET, repair: 2, sweep: 1 };
 const RUN_WALL_MS = 5 * 60 * 1000;
-const SWEEP_PASS_TTL_MS = 24 * 60 * 60 * 1000;
-const SWEEP_PRIORITY = 1;
 const id = z.number().int().positive();
 const jobSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("route"), accountId: id, conversationId: id }),
+  z.object({ type: z.literal("repair"), accountId: id, conversationId: id }),
   z.object({ type: z.literal("sweep"), accountId: id }),
 ]);
 type Payload = z.infer<typeof jobSchema>;
-const passSchema = z.object({ cutoff: z.number(), page: id, startedAt: z.number() });
 
 export class Router extends DurableObject<Env> {
   private readonly store: QueueStore;
@@ -56,27 +58,30 @@ export class Router extends DurableObject<Env> {
     const started = Date.now();
     let yielded = false;
     this.store.prune();
-    for (let job = this.store.nextDueJob(SWEEP_PRIORITY); job; job = this.store.nextDueJob(SWEEP_PRIORITY)) {
-      const payload = parse(jobSchema, job.payload);
-      if (!payload) {
+    for (let job = this.store.nextDueJob(); job; job = this.store.nextDueJob()) {
+      const parsed = jobSchema.safeParse(parseJson(job.payload));
+      if (!parsed.success) {
         log.warn("unreadable job dropped", { job: job.key });
         this.store.deleteJob(job.key);
         continue;
       }
-      if (budget.remaining < (payload.type === "route" ? ROUTE_BUDGET : 1) || Date.now() - started > RUN_WALL_MS) {
+      const payload = parsed.data;
+      if (budget.remaining < BUDGET[payload.type] || Date.now() - started > RUN_WALL_MS) {
         yielded = true;
         break;
       }
       try {
+        const ctx = { settings, chatwoot, store: this.store, fetch: budget.fetch };
         if (payload.type === "route") {
           await routeConversation(
-            { settings, chatwoot, store: this.store, fetch: budget.fetch },
+            ctx,
             payload.accountId,
             payload.conversationId,
             Number(this.store.get(customerKey(payload.accountId, payload.conversationId)) ?? 0),
           );
         } else if (routesAccount(settings, payload.accountId)) {
-          await this.sweep(settings, chatwoot, payload.accountId);
+          if (payload.type === "repair") await writeCompletion(ctx, payload.accountId, payload.conversationId);
+          else await this.sweep(settings, chatwoot, payload.accountId);
         }
         this.store.completeJob(job);
       } catch (error) {
@@ -104,42 +109,41 @@ export class Router extends DurableObject<Env> {
     chatwoot: ReturnType<typeof chatwootClient>,
     accountId: number,
   ): Promise<void> {
-    const lastKey = `sweep:${accountId}:last`;
-    const passKey = `sweep:${accountId}:pass`;
-    const now = Date.now();
-    const { lookbackSeconds, maxCatchUpSeconds } = settings.config.reconcile;
-    const last = Number(this.store.get(lastKey) ?? 0);
-    const sinceLast = last > 0 ? (now - last) / 1000 + 60 : lookbackSeconds;
-    const window = Math.min(Math.max(sinceLast, lookbackSeconds), maxCatchUpSeconds);
-    const pass = parse(passSchema, this.store.get(passKey)) ?? { cutoff: now / 1000 - window, page: 1, startedAt: now };
-    const conversations = await chatwoot.listConversations(accountId, pass.page, "open");
+    const pass = readSweepPass(this.store, accountId, settings.config.reconcile);
+    const conversations = await chatwoot.listConversations(accountId, pass.page);
     let finished = conversations.length === 0;
     for (const conversation of conversations) {
       if ((conversation.last_activity_at ?? 0) < pass.cutoff) {
         finished = true;
         break;
       }
-      if (conversation.id !== undefined && awaitsRouting(settings, accountId, conversation)) {
-        this.enqueue({ type: "route", accountId, conversationId: conversation.id });
+      const conversationId = conversation.id;
+      if (conversationId === undefined) continue;
+      if (conversation.status === "open" && !conversation.meta?.assignee) {
+        this.enqueue({ type: "route", accountId, conversationId });
+      }
+      if (needsCompletionRepair({ settings, store: this.store }, accountId, conversation)) {
+        this.enqueue({ type: "repair", accountId, conversationId });
       }
     }
     if (finished) {
-      this.store.set(lastKey, String(pass.startedAt));
-      this.store.delete(passKey);
+      saveSweepPass(this.store, accountId, pass);
     } else {
-      this.store.set(passKey, JSON.stringify({ ...pass, page: pass.page + 1 }), SWEEP_PASS_TTL_MS);
+      saveSweepPass(this.store, accountId, pass, pass.page + 1);
       this.enqueue({ type: "sweep", accountId });
     }
   }
 
   private enqueue(payload: Payload): void {
     const key =
-      payload.type === "route" ? `route:${payload.accountId}:${payload.conversationId}` : `sweep:${payload.accountId}`;
-    this.store.enqueue(key, payload.type === "route" ? 0 : SWEEP_PRIORITY, JSON.stringify(payload));
+      payload.type === "sweep"
+        ? `sweep:${payload.accountId}`
+        : `${payload.type}:${payload.accountId}:${payload.conversationId}`;
+    this.store.enqueue(key, payload.type === "sweep" ? 1 : 0, JSON.stringify(payload));
   }
 
   private async schedule(at?: number): Promise<void> {
-    const next = at ?? this.store.nextWakeup(SWEEP_PRIORITY);
+    const next = at ?? this.store.nextWakeup();
     if (next === undefined) return;
     const current = await this.ctx.storage.getAlarm();
     if (current === null || current > next) await this.ctx.storage.setAlarm(next);
@@ -148,14 +152,4 @@ export class Router extends DurableObject<Env> {
 
 function customerKey(accountId: number, conversationId: number): string {
   return `customer:${accountId}:${conversationId}`;
-}
-
-function parse<Schema extends z.ZodType>(schema: Schema, raw: string | undefined): z.infer<Schema> | undefined {
-  if (raw === undefined) return undefined;
-  try {
-    const result = schema.safeParse(JSON.parse(raw));
-    return result.success ? result.data : undefined;
-  } catch {
-    return undefined;
-  }
 }

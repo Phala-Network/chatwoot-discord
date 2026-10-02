@@ -21,6 +21,7 @@ import { Budget, BudgetExhaustedError } from "../../../shared/budget.ts";
 import { chatwootClient, toRelayConversation } from "../../../shared/chatwoot/api.ts";
 import { errorFields, log } from "../../../shared/log.ts";
 import { retryDelay } from "../../../shared/store.ts";
+import { readSweepPass, saveSweepPass } from "../../../shared/sweep.ts";
 import { executeCommand } from "./commands/actions.ts";
 import { text } from "./commands/components.ts";
 import { type CommandJob, commandJobSchema } from "./commands/job.ts";
@@ -72,12 +73,9 @@ const SWEEP_PAGES = 1;
 const READ_ONLY_ACTIONS: ReadonlySet<string> = new Set(["panel", "pick-assignee"]);
 /** A job that takes longer than this is logged, to tell a slow upstream from a busy queue. */
 const SLOW_JOB_MS = 5000;
-/** A sweep pass left unfinished this long (e.g. its account was removed) is started over. */
-const SWEEP_PASS_TTL_MS = 24 * 60 * 60 * 1000;
 /** Posts without a card a sweep queues at most, and how long before one is queued again. */
 const CARD_BACKFILL_PER_SWEEP = 10;
 const CARD_BACKFILL_RETRY_MS = 24 * 60 * 60 * 1000;
-const sweepPassSchema = z.object({ cutoff: z.number(), page: z.number().int().positive(), startedAt: z.number() });
 /** Stop draining and continue in a new invocation after this long (alarms may run 15 minutes). */
 const RUN_WALL_MS = 5 * 60 * 1000;
 /**
@@ -319,9 +317,7 @@ export class Hub extends DurableObject<Env> {
    * (backfillCards).
    */
   private async sweep(accountId: number, { settings, chatwoot, relay }: ProcessorContext): Promise<void> {
-    const lastKey = `sweep:${accountId}:last`;
-    const passKey = `sweep:${accountId}:pass`;
-    const pass = this.sweepPass(passKey) ?? this.newSweepPass(lastKey, settings);
+    const pass = readSweepPass(this.store, accountId, settings.config.reconcile);
 
     const account = settings.account(accountId);
     let seen = 0;
@@ -362,11 +358,10 @@ export class Hub extends DurableObject<Env> {
     if (reachedCutoff) {
       // The next pass covers everything active since this one started, so activity while it ran
       // (which reorders the list) is read again.
-      this.store.set(lastKey, String(pass.startedAt));
-      this.store.delete(passKey);
+      saveSweepPass(this.store, accountId, pass);
       log.info("sweep done", { accountId, pages: page - 1, seen, queued });
     } else {
-      this.store.set(passKey, JSON.stringify({ ...pass, page }), SWEEP_PASS_TTL_MS);
+      saveSweepPass(this.store, accountId, pass, page);
       this.enqueue({ type: "sweep", accountId }); // Continues in the next job.
       log.info("sweep continues", { accountId, nextPage: page, seen, queued });
     }
@@ -380,26 +375,6 @@ export class Hub extends DurableObject<Env> {
     const ids = this.store.takePostsWithoutCard(accountId, CARD_BACKFILL_PER_SWEEP, CARD_BACKFILL_RETRY_MS);
     for (const conversationId of ids) this.enqueue({ type: "conversation", accountId, conversationId });
     return ids.length;
-  }
-
-  private sweepPass(key: string): z.infer<typeof sweepPassSchema> | undefined {
-    const stored = this.store.get(key);
-    if (stored === undefined) return undefined;
-    try {
-      const parsed = sweepPassSchema.safeParse(JSON.parse(stored));
-      return parsed.success ? parsed.data : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
-  private newSweepPass(lastKey: string, settings: Settings): z.infer<typeof sweepPassSchema> {
-    const last = Number(this.store.get(lastKey) ?? 0);
-    const now = Date.now();
-    const { lookbackSeconds, maxCatchUpSeconds } = settings.config.reconcile;
-    const sinceLast = last > 0 ? (now - last) / 1000 + 60 : lookbackSeconds;
-    const window = Math.min(Math.max(sinceLast, lookbackSeconds), maxCatchUpSeconds);
-    return { cutoff: now / 1000 - window, page: 1, startedAt: now };
   }
 
   private services(settings: Settings, budget: Budget): ProcessorContext {
