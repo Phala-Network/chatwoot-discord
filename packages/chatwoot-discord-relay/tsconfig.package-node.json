@@ -1,0 +1,14 @@
+// Type declarations for the package's Node entries (see "build:package").
+{
+  "extends": "./tsconfig.node.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "rewriteRelativeImportExtensions": true,
+    "rootDir": "../..",
+    "outDir": "lib"
+  },
+  "include": [],
+  "files": ["scripts/stored-config.ts"]
+}

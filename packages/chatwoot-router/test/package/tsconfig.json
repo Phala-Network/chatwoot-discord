@@ -1,0 +1,13 @@
+// The README's cloudflare.config.ts usage, with Node's types; declarations checked too.
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["config.ts"]
+}

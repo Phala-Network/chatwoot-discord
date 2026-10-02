@@ -16,6 +16,7 @@ jobs:
     if: ${{ !github.event.release.prerelease }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    container: node:24
     permissions:
       contents: read
       id-token: write
@@ -34,10 +35,11 @@ jobs:
       # Trusted publishing needs npm 11.5.1 or later; use the version pinned in `packageManager`.
       - run: npm install --global "$(node -p 'require("./package.json").packageManager')"
       - name: The release tag names the package version
+        id: package
         env:
           TAG: ${{ github.event.release.tag_name }}
-        run: test "$TAG" = "v$(node -p 'require("./package.json").version')"
+        run: node scripts/release-package.ts >> "$GITHUB_OUTPUT"
       - run: npm ci
-      - run: npm test
+      - run: npm test -w "${{ steps.package.outputs.workspace }}"
       # Builds the package (prepack) and publishes it.
-      - run: npm publish
+      - run: npm publish -w "${{ steps.package.outputs.workspace }}"

@@ -1,0 +1,100 @@
+{
+  "name": "chatwoot-discord-relay",
+  "version": "0.28.0",
+  "description": "Run Chatwoot support from a Discord forum with humans and AI agents: a post per conversation, slash commands, AI drafts, and AI triage.",
+  "keywords": [
+    "chatwoot",
+    "discord",
+    "cloudflare-workers",
+    "durable-objects",
+    "helpdesk",
+    "customer-support",
+    "ai-agents",
+    "triage"
+  ],
+  "homepage": "https://github.com/Phala-Network/chatwoot-workers/tree/main/packages/chatwoot-discord-relay#readme",
+  "bugs": {
+    "url": "https://github.com/Phala-Network/chatwoot-workers/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Phala-Network/chatwoot-workers.git",
+    "directory": "packages/chatwoot-discord-relay"
+  },
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./lib/packages/chatwoot-discord-relay/src/index.d.ts",
+      "default": "./lib/packages/chatwoot-discord-relay/src/index.js"
+    },
+    "./stored-config": {
+      "types": "./lib/packages/chatwoot-discord-relay/scripts/stored-config.d.ts",
+      "default": "./lib/packages/chatwoot-discord-relay/scripts/stored-config.js"
+    }
+  },
+  "bin": {
+    "chatwoot-discord-store-config": "lib/packages/chatwoot-discord-relay/scripts/store-config.js"
+  },
+  "files": [
+    "lib/packages/chatwoot-discord-relay/src",
+    "lib/packages/chatwoot-discord-relay/scripts",
+    "lib/shared",
+    "CHANGELOG.md",
+    "LICENSE",
+    "docs/assets"
+  ],
+  "packageManager": "npm@12.1.0",
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "scripts": {
+    "dev": "cf dev",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "types": "cf workers types",
+    "typecheck": "cf workers types && tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
+    "test": "vitest run",
+    "build": "cf build",
+    "deploy": "cf deploy",
+    "gen:chatwoot": "npx --yes --package=openapi-typescript@7.13.0 --package=typescript@5.9.3 -- openapi-typescript https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/swagger/swagger.json --empty-objects-unknown -o ../../shared/chatwoot/schema.d.ts",
+    "register-commands": "node scripts/register-commands.ts",
+    "forum-tags": "node scripts/forum-tags.ts",
+    "store-config": "node scripts/store-config.ts",
+    "build:package": "node ../../scripts/build-package.ts",
+    "prepack": "npm run build:package"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "2.0.0-beta.sha-805ec1ff3"
+  },
+  "dependencies": {
+    "discord-api-types": "^0.38.56",
+    "discord-interactions": "^4.4.0",
+    "hono": "^4.13.10",
+    "jsonc-parser": "^3.3.1",
+    "openapi-fetch": "^0.17.0",
+    "zod": "^4.6.5"
+  },
+  "cloudflare": {
+    "bindings": {
+      "CONFIG": {
+        "description": "Non-secret settings (JSON): Chatwoot URL, accounts and their forum channels, linked agents, and the optional triage bot. The committed values are placeholders; see the [configuration reference](https://github.com/Phala-Network/chatwoot-workers/tree/main/packages/chatwoot-discord-relay#configuration-reference)."
+      },
+      "DISCORD_BOT_TOKEN": {
+        "description": "Bot token of your Discord application (Developer Portal > your application > **Bot**)."
+      },
+      "DISCORD_PUBLIC_KEY": {
+        "description": "**Public Key** of your Discord application (Developer Portal > your application > **General Information**), 64 hex characters."
+      },
+      "CHATWOOT_RELAY_TOKEN": {
+        "description": "Access token (Profile > Access Token) of a Chatwoot user that is an agent in every relayed inbox, or an administrator."
+      },
+      "CHATWOOT_WEBHOOK_SECRETS": {
+        "description": "JSON object of Chatwoot webhook secrets by account id, e.g. `{\"1\":\"<secret>\"}` (Settings > Integrations > Webhooks)."
+      },
+      "CHATWOOT_AGENT_TOKENS": {
+        "description": "JSON object of each linked agent's own Chatwoot access token by Discord user id, e.g. `{\"<Discord user id>\":\"<token>\"}`. Use `{}` until agents are linked."
+      }
+    }
+  }
+}

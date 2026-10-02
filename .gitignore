@@ -8,6 +8,7 @@ coverage/
 *.log
 .DS_Store
 .cloudflare/
-test/package/*.tgz
-test/package/node_modules/
-test/package/package-lock.json
+.package-check.*/
+**/test/package/*.tgz
+**/test/package/node_modules/
+**/test/package/package-lock.json

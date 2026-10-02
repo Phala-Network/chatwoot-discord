@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["ES2023", "DOM"],
+    // Scripts run with Node's type stripping (https://nodejs.org/api/typescript.html#type-stripping):
+    // import the .ts files themselves and use only erasable syntax.
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true
+  },
+  "include": ["vitest.config.ts", "vite.config.ts", "scripts"]
+}

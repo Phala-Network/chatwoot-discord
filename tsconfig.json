@@ -1,23 +1,8 @@
 {
+  "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "target": "ES2023",
-    "lib": ["ES2023"],
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
-    "types": ["./.cloudflare/types/index.d.ts", "@cloudflare/vitest-pool-workers/types"],
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "exactOptionalPropertyTypes": true,
-    "noImplicitOverride": true,
-    "noFallthroughCasesInSwitch": true,
-    "isolatedModules": true,
-    "verbatimModuleSyntax": true,
-    "skipLibCheck": true,
-    "noEmit": true,
-    // Relative imports name the .ts file: bundlers accept it, and scripts run with Node's type stripping.
-    "allowImportingTsExtensions": true
+    "types": ["node"],
+    "erasableSyntaxOnly": true
   },
-  "include": ["src", "test", "cloudflare.config.ts"],
-  // A consumer of the packed package (CI installs it there).
-  "exclude": ["test/package"]
+  "include": ["scripts"]
 }
