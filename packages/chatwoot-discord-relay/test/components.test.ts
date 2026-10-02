@@ -20,8 +20,9 @@ const agents = Array.from({ length: 30 }, (_, index) => ({ id: index + 1, name: 
 
 describe("ticket menus", () => {
   it("keep the current assignee in a menu of more agents than it holds", () => {
-    const [row] = assigneeMenu(agents, 29) as unknown as Row[];
-    const options = row?.components[0]?.options ?? [];
+    const [row] = assigneeMenu(agents, 29);
+    const menu = row?.type === ComponentType.ActionRow ? row.components[0] : undefined;
+    const options = menu?.type === ComponentType.StringSelect ? menu.options : [];
     expect(options).toHaveLength(25);
     expect(options.slice(0, 2)).toEqual([
       expect.objectContaining({ value: ":none" }),
