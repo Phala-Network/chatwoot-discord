@@ -1,5 +1,5 @@
-// Reconcile observations against a memoized decision; publish attributes after actions.
-// Irreversible actions are recorded before sending. See README.md, "How it works".
+// Apply each input version's effects once; people own the fields afterward.
+// Check the input version before effects, then checkpoint and project. See README.md, "How it works".
 
 import ipRegex from "ip-regex";
 import { z } from "zod";
@@ -57,7 +57,7 @@ const REDACTIONS = [
 
 export interface RoutingStore {
   get(key: string): string | undefined;
-  list(prefix: string): string[];
+  list(start: string, end: string): string[];
   set(key: string, value: string): void;
 }
 
@@ -103,7 +103,11 @@ export function routesAccount(settings: Settings, accountId: number): boolean {
   return settings.config.routing.accounts[String(accountId)] !== undefined;
 }
 
-export async function routeConversation(ctx: RoutingContext, accountId: number, conversationId: number): Promise<void> {
+export async function routeConversation(
+  ctx: RoutingContext,
+  accountId: number,
+  conversationId: number,
+): Promise<"defer" | undefined> {
   const { settings, store, chatwoot } = ctx;
   const routing = settings.config.routing;
   const owners = routing.accounts[String(accountId)];
@@ -113,11 +117,9 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
   if (!raw) return;
   const conversation = toRelayConversation(conversationId, raw);
   const latest = await chatwoot.listMessages(accountId, conversationId, { filter_internal_messages: true });
-  const inputs = await customerInputs(ctx, accountId, conversationId, [
-    conversation.contact?.name,
-    conversation.contact?.email,
-  ]);
-  const seen = Math.max(inputs.seen, ...latest.filter(isCustomer).map((message) => message.id));
+  const identities = [conversation.contact?.name, conversation.contact?.email];
+  const inputs = await customerInputs(ctx, accountId, conversationId, identities);
+  let seen = Math.max(inputs.seen, ...latest.filter(isCustomer).map((message) => message.id));
   const key = inputs.ids.join(",");
   const memoKey = `decision:${accountId}:${conversationId}:${key}`;
   const cached = inputs.ids.map((_, index) =>
@@ -140,6 +142,9 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
       decision = await decide(ctx, owners, routing.kinds?.[String(accountId)], inputs.text);
       store.set(memoKey, JSON.stringify(decision));
     }
+    const freshInputs = await customerInputs(ctx, accountId, conversationId, identities);
+    if (freshInputs.ids.join(",") !== key) return "defer";
+    seen = Math.max(seen, freshInputs.seen);
     const fresh = await chatwoot.getConversation(accountId, conversationId);
     if (!fresh) return;
     observed = fresh;
@@ -148,7 +153,18 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
       const kind = kindFor(decision);
       const kindName = kind ? decision.kind : null;
       const assignee = kind?.status ? undefined : assigneeFor(decision);
-      if (assignee !== undefined && !current.assignee) await chatwoot.assign(accountId, conversationId, assignee);
+      const inputId = inputs.ids.at(-1) ?? 0;
+      if (assignee !== undefined) {
+        await actOnce(
+          ctx,
+          `assign:${accountId}:${conversationId}:${key}`,
+          { inputId, kind: null, handled: 0 },
+          "after",
+          async () => {
+            if (!current.assignee) await chatwoot.assign(accountId, conversationId, assignee);
+          },
+        );
+      }
       const topic =
         !kind?.status &&
         decision.topic !== null &&
@@ -158,44 +174,39 @@ export async function routeConversation(ctx: RoutingContext, accountId: number, 
           ? decision.topic
           : null;
       const labels = [...new Set([...current.labels, ...[topic, kindName].filter((label) => label !== null)])];
-      if (labels.length !== current.labels.length) await chatwoot.setLabels(accountId, conversationId, labels);
-      observed = { ...fresh, labels };
-      const lastInput = inputs.ids.at(-1) ?? 0;
+      await actOnce(
+        ctx,
+        `labels:${accountId}:${conversationId}:${key}`,
+        { inputId, kind: kindName, handled: 0 },
+        "after",
+        async () => {
+          if (labels.length !== current.labels.length) await chatwoot.setLabels(accountId, conversationId, labels);
+        },
+      );
       const replyKey = `reply:${accountId}:${conversationId}`;
       const botToken = settings.botToken(accountId);
       if (kind?.cannedResponse && botToken && store.get(replyKey) === undefined) {
         const content = await chatwoot.cannedResponse(accountId, kind.cannedResponse);
         if (content === undefined) throw new Error("Chatwoot canned response is missing");
         const bot = chatwootClient(settings.config.chatwoot.baseUrl, botToken, ctx.fetch);
-        await actOnce(ctx, replyKey, kindName, lastInput, () =>
+        await actOnce(ctx, replyKey, { inputId, kind: kindName, handled: inputId }, "before", () =>
           bot.createMessage(accountId, conversationId, { content, private: false, files: [] }),
         );
       }
       const snooze = !assignee && inputs.ids.length < MAX_MESSAGES && routing.snoozeUnclear && decision.noRequest;
-      const status = inputs.complete ? (kind?.status ?? (snooze ? "snoozed" : undefined)) : undefined;
+      const status = freshInputs.complete ? (kind?.status ?? (snooze ? "snoozed" : undefined)) : undefined;
       if (status) {
-        await actOnce(ctx, `status:${accountId}:${conversationId}:${key}`, kindName, kind?.status ? lastInput : 0, () =>
-          chatwoot.setStatus(accountId, conversationId, { status }),
+        await actOnce(
+          ctx,
+          `status:${accountId}:${conversationId}:${key}`,
+          { inputId, kind: kindName, handled: kind?.status ? inputId : 0 },
+          "before",
+          () => chatwoot.setStatus(accountId, conversationId, { status }),
         );
       }
     }
   }
-  const effects = readEffects(store, accountId, conversationId);
-  const labels = observed.labels ?? [];
-  const kind =
-    [decision, ...cached.toReversed()].find((answer) => answer?.kind && kindFor(answer) && labels.includes(answer.kind))
-      ?.kind ??
-    effects.findLast((effect) => effect.kind !== null)?.kind ??
-    null;
-  await syncAttributes(
-    ctx,
-    accountId,
-    conversationId,
-    observed,
-    seen,
-    Math.max(0, ...effects.map((effect) => effect.handled)),
-    kind,
-  );
+  await syncAttributes(ctx, accountId, conversationId, observed, seen);
 }
 
 async function syncAttributes(
@@ -204,13 +215,17 @@ async function syncAttributes(
   conversationId: number,
   observed: ChatwootConversation,
   seen: number,
-  handled: number,
-  kind: string | null,
 ): Promise<void> {
   const current = observed.custom_attributes ?? {};
   const names = ROUTING_ATTRIBUTES;
+  const key = `seen:${accountId}:${conversationId}`;
+  const checkpoint = Math.max(messageWatermark(ctx.store.get(key)), seen, messageWatermark(current[names.seen]));
+  ctx.store.set(key, String(checkpoint));
+  const effects = readEffects(ctx.store, accountId, conversationId);
+  const handled = Math.max(0, ...effects.map((effect) => effect.handled));
+  const kind = effects.findLast((effect) => effect.kind !== null)?.kind ?? null;
   const attributes = {
-    [names.seen]: Math.max(seen, messageWatermark(current[names.seen])),
+    [names.seen]: checkpoint,
     ...(handled > 0 ? { [names.handled]: Math.max(handled, messageWatermark(current[names.handled])) } : {}),
     ...(kind === null ? {} : { [names.kind]: kind }),
   };

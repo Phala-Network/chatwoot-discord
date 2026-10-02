@@ -12,7 +12,7 @@ import { routeConversation, routesAccount } from "./routing.ts";
 import { loadSettings } from "./settings.ts";
 
 export const ROUTER_NAME = "global";
-export const ROUTE_BUDGET = 12;
+export const ROUTE_BUDGET = 15;
 const BUDGET = { route: ROUTE_BUDGET, sweep: 1 };
 const RUN_WALL_MS = 5 * 60 * 1000;
 const id = z.number().int().positive();
@@ -67,7 +67,11 @@ export class Router extends DurableObject<Env> {
       try {
         const ctx = { settings, chatwoot, store: this.store, fetch: budget.fetch };
         if (payload.type === "route") {
-          await routeConversation(ctx, payload.accountId, payload.conversationId);
+          if ((await routeConversation(ctx, payload.accountId, payload.conversationId)) === "defer") {
+            this.store.deferJob(job);
+            yielded = true;
+            break;
+          }
         } else if (routesAccount(settings, payload.accountId)) {
           await this.sweep(settings, chatwoot, payload.accountId);
         }

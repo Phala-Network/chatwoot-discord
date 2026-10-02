@@ -8,6 +8,7 @@ import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index.ts";
 import { ROUTER_NAME } from "../src/router.ts";
+import { eventTarget } from "../src/webhook.ts";
 import { json, mockFetch, on } from "./helpers.ts";
 
 const stub = () => env.ROUTER.getByName(ROUTER_NAME);
@@ -246,6 +247,57 @@ function sweepingWorld(options: { failSecondPage?: boolean; externalClose?: bool
 }
 
 describe("router worker", () => {
+  it("repairs a persisted checkpoint through the sweep after its message leaves the read window", async () => {
+    const mock = world(0, { status: "resolved" });
+    mock.messages.splice(
+      0,
+      mock.messages.length,
+      { id: 1, message_type: 0, content: "Hello" },
+      ...Array.from({ length: 400 }, (_, index) => ({ id: index + 2, message_type: 1, content: "Public reply" })),
+      { id: 402, message_type: 0, content: "My service is down" },
+    );
+    await webhook({ ...incoming(11), id: 402 });
+    await drain();
+    expect(mock.attributes.routing_seen).toBe(402);
+    mock.messages.push(
+      ...Array.from({ length: 25 }, (_, index) => ({ id: index + 403, message_type: 1, content: "Public reply" })),
+    );
+    delete mock.attributes.routing_seen;
+    await stub().requestSweep();
+    await drain();
+    expect(mock.attributes.routing_seen).toBe(402);
+    expect(mock.requests.filter((request) => request.url.hostname === "api.typesafe.ai")).toEqual([]);
+  });
+
+  it("reruns a changed input version without another webhook or old-plan effects", async () => {
+    let decisions = 0;
+    const mock = world(0, {}, false, () => {
+      decisions += 1;
+      if (decisions === 1) mock.messages.push({ id: 502, message_type: 0, content: "My service is down" });
+      else {
+        mock.answers.owner.choice = "cloud";
+        mock.answers.kind.choice = "none";
+      }
+    });
+    mock.messages[0] = { id: 501, content: "Hello", message_type: 0 };
+    mock.answers.owner.choice = "unclear";
+    mock.answers.kind.choice = "newsletter";
+    await webhook(incoming(11));
+    await drain();
+    expect(decisions).toBe(2);
+    expect(mock.state.assignee).toEqual({ id: 6 });
+    expect(mock.attributes).toEqual({ unrelated: "kept", routing_seen: 502 });
+    expect(mock.labels).toEqual([]);
+    expect(mock.requests.filter((request) => request.url.pathname.endsWith("/toggle_status"))).toEqual([]);
+    await runInDurableObject(stub(), (_instance, state) => {
+      expect(state.storage.sql.exec("SELECT key FROM jobs").toArray()).toEqual([]);
+    });
+  });
+
+  it("returns only the conversation identity from a message webhook", () => {
+    expect(eventTarget(incoming(11))).toEqual({ accountId: 1, conversationId: 11 });
+  });
+
   it("retains an event arriving during reconciliation for another current read", async () => {
     let decisions = 0;
     const mock = world(0, {}, false, async () => {
@@ -267,7 +319,7 @@ describe("router worker", () => {
 
   it.each([
     { scenario: "a full window despite later messages", duringDecision: false, arrivals: 4 },
-    { scenario: "a partial window followed by a sweep without another webhook", duringDecision: true, arrivals: 1 },
+    { scenario: "a partial window requeued without another webhook", duringDecision: true, arrivals: 1 },
   ])("finishes an assigned retry with $scenario", async ({ duringDecision, arrivals }) => {
     let decisions = 0;
     const mock = world(0, {}, false, () => {
@@ -313,7 +365,7 @@ describe("router worker", () => {
     expect(mock.attributes).toEqual({
       unrelated: "kept",
       routing_seen: duringDecision ? 3 : 5,
-      routing_handled: duringDecision ? 2 : 3,
+      routing_handled: 3,
       routing_kind: "startup-program",
     });
     expect(decisions).toBe(duringDecision ? 3 : 2);
@@ -323,7 +375,7 @@ describe("router worker", () => {
       assignments: 1,
       labels: 2,
       messages: 1,
-      custom_attributes: duringDecision ? 2 : 1,
+      custom_attributes: 1,
     })) {
       expect(
         mock.requests.filter((request) => request.method === "POST" && request.url.pathname.endsWith(`/${action}`)),
@@ -540,7 +592,7 @@ describe("router worker", () => {
       delete mock.attributes.routing_seen;
       await stub().requestSweep();
       await drain();
-      expect(mock.attributes.routing_seen).toBe(501);
+      expect(mock.attributes.routing_seen).toBe(701);
       expect(mock.requests.filter((request) => request.url.hostname === "api.typesafe.ai")).toHaveLength(1);
     },
   );

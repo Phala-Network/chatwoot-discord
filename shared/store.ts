@@ -50,12 +50,12 @@ export class QueueStore {
     this.sql.exec("DELETE FROM cache WHERE key = ?", key);
   }
 
-  list(prefix: string): string[] {
+  list(start: string, end: string): string[] {
     return this.sql
       .exec<{ value: string }>(
-        "SELECT value FROM cache WHERE substr(key, 1, ?) = ? AND (expires_at IS NULL OR expires_at > ?)",
-        prefix.length,
-        prefix,
+        "SELECT value FROM cache WHERE key >= ? AND key < ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY key",
+        start,
+        end,
         this.now(),
       )
       .toArray()

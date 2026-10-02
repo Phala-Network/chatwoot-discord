@@ -30,7 +30,7 @@ People own assignment, labels, and status after those effects, just as with a Ch
   clears labels. Assignment and labels are recorded after confirmed success, or without a request when
   already satisfied. Failed idempotent actions retry. Reply and status attempts are recorded before
   sending; failed or uncertain attempts are not repeated. Confirmed kind actions carry their handled
-  input id in that ledger entry. This is an attempt ledger, not an outbox with a dispatcher.
+  input id in that ledger entry. There is no dispatcher.
 - `routing_seen` projects a durable, monotonic per-conversation checkpoint: the highest customer
   message id observed after applicable effects complete. Persist it before synchronizing attributes,
   retaining greater existing values. Later bounded reads cannot lower it. `routing_handled` and
@@ -112,10 +112,11 @@ and `routing_kind` are included in the same update as `routing_seen`, after its 
 
 Attributes are updated through Chatwoot's `custom_attributes` API with `merge: true`. Chatwoot v4.18 implements
 this as read-merge-save, not an atomic merge: concurrent relay/router writes can still lose keys. Every run
-derives the desired attributes again from Chatwoot, memoized inputs, and its durable outbox. This repairs
-assigned, resolved, and snoozed tickets too, without a separate repair job. Greater existing watermarks are
-retained; unchanged attributes are not written again. A lost, externally edited watermark can only be restored
-to what messages and confirmed actions establish, not to an arbitrary value no longer present in Chatwoot.
+projects its durable `routing_seen` checkpoint and effects ledger again. This repairs assigned, resolved, and
+snoozed tickets too, without a separate repair job. The checkpoint retains the greatest observed customer id
+and existing `routing_seen` value, even after that message leaves the bounded read window. The handled id and
+kind label come from ledger history, independently of current labels or visible inputs. Greater existing
+watermarks are retained in Chatwoot; unchanged attributes are not written again.
 The relay similarly repairs its missing or different post URL on sync. Recovery is eventual, not a cross-Worker
 transaction. Failed reads and writes retry without reclassifying unchanged inputs or repeating irreversible actions.
 With the relay, set `router.accounts` there; its default wait is 30 seconds from each customer's message time.
@@ -196,8 +197,10 @@ New messages entering the three-text-message window get a new memoized answer, e
 assignment; later messages outside that window do not change it. When no owner fits, the ticket is left for
 a person. With `snoozeUnclear`, a confident `no request` answer can snooze an unassigned ticket until a
 customer writes again, but not once all three inputs have been used. Reopening with the same inputs never
-repeats that status action. A new window can apply a new status action. Messages arriving during a run are
-read on the next queued run or sweep; there is no second freshness protocol or atomic snapshot across APIs.
+repeats that status action. A new window can apply a new status action. Before effects, the run re-reads the
+input window and compares its key. If a new message entered, the existing queue job is deferred immediately,
+without actions or acknowledgment of the old plan. The next run decides the new inputs. Messages outside a
+full window do not change the key. Chatwoot provides no atomic snapshot across message reads and actions.
 
 Router message reads set `filter_internal_messages=true`: Chatwoot v4.18's controller passes it to
 `MessageFinder`, which filters private notes and activity lines before paging. The generated OpenAPI schema
@@ -207,9 +210,11 @@ assignment, and a kind reply can still apply, but no status action does; the tic
 
 Immediately before actions a fresh read must show an open ticket, with an unblocked contact, unassigned or
 assigned to this answer's owner. Otherwise only coordination attributes are synchronized. Routing resumes
-after reopening or unassignment by reconciling the same observations and memoized inputs, not by advancing
-a saved decision state. Actions run in order: assignment/labels, reply, status, then attributes. Successful
-assignment and label changes are not repeated when their responses are lost. Routing uses `CHATWOOT_TOKEN`,
+after reopening using memoized inputs and the effects ledger, not a saved decision state. Recorded assignment,
+label, and status effects are never repeated for that input version: a person unassigning or clearing labels
+via Manage has the final say. A new input version permits new effects. Actions run in order: assignment/labels,
+reply, status, then the checkpoint and attributes. Lost assignment/label responses are recovered by observing
+Chatwoot and recording an already-satisfied effect without another request. Routing uses `CHATWOOT_TOKEN`,
 whose user must be an agent in the routed inboxes; Chatwoot records the assignment as made by that user.
 
 
@@ -256,7 +261,7 @@ subject) are Chatwoot's automation rules.
 ## Reliability and cutover
 
 The Worker acknowledges after a SQLite job is queued. Alarms serialize decisions, preserve work across failures,
-and retry with exponential backoff capped at 30 minutes. The subrequest budget reserves 12 requests for the
+and retry with exponential backoff capped at 30 minutes. The subrequest budget reserves 15 requests for the
 worst-case route and yields to a fresh invocation before starting work it cannot finish.
 Chatwoot's conversation-not-found response (JSON HTTP 404) is logged and the job is dropped, including a deletion
 during a message read or write. Other failures, including proxy errors and account-level API failures, keep their backoff.
@@ -268,7 +273,7 @@ the next window starts from the previous pass's **start**, with a 60-second over
 `reconcile.lookbackSeconds` and `reconcile.maxCatchUpSeconds`.
 The persisted page cursor survives budget yields and failed-page backoff. Route jobs run between
 pages; a failed sweep does not hold due jobs in its own account or any other account.
-Memoized answers and idempotency keys remain in the Router's own Durable Object without expiry.
+Memoized answers, effects-ledger entries, and checkpoints remain in the Router's own Durable Object without expiry.
 
 When splitting an existing relay deployment, **deploy the new relay first**, removing its old `routing` setting and
 routing secrets and adding `router.accounts`. Keep its existing Worker `name` and `Hub` export to preserve state.

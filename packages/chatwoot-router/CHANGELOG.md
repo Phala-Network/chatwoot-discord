@@ -11,22 +11,27 @@
 - Conversation custom attributes coordinate routing completion and handled messages with chatwoot-discord-relay.
 - Standalone npm package, Worker exports, and `chatwoot-router-store-config` for immutable KV configuration.
 
-
 ### Changed
 
 - Use a level-triggered reconciler: webhooks and sweeps enqueue the same conversation key, and each run
   derives desired actions and coordination attributes from current Chatwoot observations. Document the model
   in the README's "How it works" section.
-- Memoize Jev answers by the ids of the first three customer messages with usable redacted text. Remove
-  decision states, freshness scans, event evidence watermarks, moving text windows, and state-specific deferrals.
-- Compare desired assignment and labels with Chatwoot on every run. Use durable, record-before-send outbox
-  keys for a reply per conversation and a status per input window. Reopening with unchanged inputs never
-  repeats a status change; failed or uncertain irreversible attempts are not repeated. Only confirmed kind
-  actions contribute to `routing_handled`.
-- Remove completion records and repair jobs. Attribute synchronization is ordinary reconciliation for every
-  listed conversation, including assigned, resolved, and snoozed tickets. Compare numeric or numeric-string
-  watermarks without lowering existing values; only write changed attributes, retaining unrelated keys.
-- Reserve the actual worst-case 12 subrequests before starting a route, including attribute synchronization.
+- Memoize Jev answers by the ids of the first three customer messages with usable redacted text. Before
+  effects, re-read that input key; a different key defers the existing job without applying the old plan.
+  Remove decision states, event evidence watermarks, moving text windows, and state-specific deferrals.
+- Run one-time automation per input version, not continuous ownership of assignment or labels. Record every
+  action in one effects ledger: assignment and labels after confirmed success or an already-satisfied read;
+  reply and status before the request. Recorded effects never run again for the same input key, so Manage
+  unassignment and cleared labels remain final. The reply key stays per conversation. Failed or uncertain
+  irreversible attempts are not repeated; only confirmed kind actions contribute to `routing_handled`.
+- Project a durable, monotonic `routing_seen` checkpoint and ledger-derived handled/kind attributes. Attribute
+  synchronization repairs every status without repair jobs, even after messages leave the bounded read window
+  or labels are cleared. Compare numeric or numeric-string watermarks without lowering existing values;
+  only write changed attributes, retaining unrelated keys.
+- Use indexed cache key ranges for ledger reads and exact keys for memo lookups, without whole-cache scans.
+  Remove the unused webhook message id; events identify conversations, not decision inputs.
+- Reserve the actual worst-case 15 subrequests before starting a route, including the version check and
+  attribute synchronization.
 
 ### Fixed
 

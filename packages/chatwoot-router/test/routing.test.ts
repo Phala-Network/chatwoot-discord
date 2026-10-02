@@ -35,8 +35,8 @@ class MapStore implements RoutingStore {
   set(key: string, value: string) {
     this.values.set(key, value);
   }
-  list(prefix: string) {
-    return [...this.values].flatMap(([key, value]) => (key.startsWith(prefix) ? [value] : []));
+  list(start: string, end: string) {
+    return [...this.values].flatMap(([key, value]) => (key >= start && key < end ? [value] : []));
   }
 }
 
@@ -235,6 +235,157 @@ afterEach(() => {
 });
 
 describe("level-triggered reconciliation", () => {
+  it("records already-satisfied assignment and labels for a new version without repeating requests", async () => {
+    const ticket: Ticket = {};
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1] });
+    const ctx = context();
+    await routeConversation(ctx, 1, 5);
+    ticket.messages?.push({ id: 3, content: "Another billing question", message_type: 0 });
+    await routeConversation(ctx, 1, 5);
+    ticket.assignee = null;
+    ticket.labels = [];
+    await routeConversation(ctx, 1, 5);
+    expect(ticket.assignee).toBeNull();
+    expect(ticket.labels).toEqual([]);
+    expect(ticket.attributes).toEqual({ routing_seen: 3 });
+    expect(sent(requests, "POST", `${CW}/assignments`)).toHaveLength(1);
+    expect(sent(requests, "POST", `${CW}/labels`)).toHaveLength(1);
+    expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(2);
+  });
+
+  it.each(["assignment", "labels"])(
+    "records observed success after a lost %s response and respects later edits",
+    async (action) => {
+      const ticket: Ticket = action === "assignment" ? { loseAssignAnswer: 1 } : { loseLabelsAnswer: 1 };
+      const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1] });
+      const ctx = context();
+      await expect(routeConversation(ctx, 1, 5)).rejects.toThrow("503");
+      await routeConversation(ctx, 1, 5);
+      ticket.assignee = null;
+      ticket.labels = [];
+      await routeConversation(ctx, 1, 5);
+      expect(ticket.assignee).toBeNull();
+      expect(ticket.labels).toEqual([]);
+      expect(ticket.attributes).toEqual({ routing_seen: 1 });
+      expect(sent(requests, "POST", `${CW}/assignments`)).toHaveLength(1);
+      expect(sent(requests, "POST", `${CW}/labels`)).toHaveLength(1);
+      expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
+    },
+  );
+
+  it("does not reassign after labels fail and a person unassigns during backoff", async () => {
+    const ticket: Ticket = { failLabels: 1 };
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["startup-program", 1] });
+    const ctx = context(new MapStore(), KINDS);
+    await expect(routeConversation(ctx, 1, 5)).rejects.toThrow("503");
+    ticket.assignee = null;
+    await routeConversation(ctx, 1, 5);
+    expect(ticket.assignee).toBeNull();
+    expect(ticket.labels).toEqual(["billing", "startup-program"]);
+    expect(ticket.attributes).toEqual({ routing_seen: 1, routing_handled: 1, routing_kind: "startup-program" });
+    expect(sent(requests, "POST", `${CW}/assignments`)).toHaveLength(1);
+    expect(sent(requests, "POST", `${CW}/labels`)).toHaveLength(2);
+    expect(sent(requests, "POST", `${CW}/messages`)).toHaveLength(1);
+  });
+
+  it("leaves Manage unassignment and cleared labels final for the same input version", async () => {
+    const ticket: Ticket = {};
+    const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["startup-program", 1] });
+    const ctx = context(new MapStore(), KINDS);
+    await routeConversation(ctx, 1, 5);
+    expect(ticket.assignee?.id).toBe(6);
+    expect(ticket.labels).toEqual(["billing", "startup-program"]);
+    ticket.assignee = null;
+    ticket.labels = [];
+    ticket.attributes = {};
+    await routeConversation(ctx, 1, 5);
+    await routeConversation(ctx, 1, 5);
+    expect(ticket.assignee).toBeNull();
+    expect(ticket.labels).toEqual([]);
+    expect(ticket.attributes).toEqual({ routing_seen: 1, routing_handled: 1, routing_kind: "startup-program" });
+    for (const action of ["assignments", "labels", "messages"])
+      expect(sent(requests, "POST", `${CW}/${action}`)).toHaveLength(1);
+    expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
+  });
+
+  it("does not snooze Hello when a service request enters the input window during Jev", async () => {
+    const ticket: Ticket = { messages: [{ id: 1, content: "Hello", message_type: 0 }] };
+    const answers: { owner: [string, number]; topic: [string, number] } = {
+      owner: ["unclear", 1],
+      topic: ["billing", 0],
+    };
+    let calls = 0;
+    const { requests } = world(ticket, answers, 0, () => {
+      calls += 1;
+      if (calls === 1) ticket.messages?.push({ id: 2, content: "My service is down", message_type: 0 });
+    });
+    const ctx = context(new MapStore(), { ...ROUTING, snoozeUnclear: true });
+    expect(await routeConversation(ctx, 1, 5)).toBe("defer");
+    expect(ticket.attributes).toBeUndefined();
+    expect(sent(requests, "POST", `${CW}/toggle_status`)).toEqual([]);
+    answers.owner = ["cloud", 1];
+    await routeConversation(ctx, 1, 5);
+    expect(ticket.assignee?.id).toBe(6);
+    expect(ticket.attributes).toEqual({ routing_seen: 2 });
+    const asked = sent(requests, "POST", "api.typesafe.ai/v1/systemone");
+    expect(asked).toHaveLength(2);
+    expect(JSON.parse(asked.at(-1)?.body ?? "{}").state.ticket).toBe("Hello My service is down");
+  });
+
+  it.each([false, true])(
+    "repairs checkpoint 402 after public replies hide it from both bounded reads: projection failed=%s",
+    async (failed) => {
+      const ticket: Ticket = {
+        failAttributes: failed ? 1 : 0,
+        messages: [
+          { id: 1, content: "Application", message_type: 0 },
+          ...Array.from({ length: 400 }, (_, index) => ({ id: index + 2, content: "Public reply", message_type: 1 })),
+          { id: 402, content: "Any update?", message_type: 0 },
+        ],
+      };
+      const { requests } = world(ticket, {
+        owner: ["unclear", 1],
+        topic: ["billing", 0],
+        kind: ["startup-program", 1],
+      });
+      const ctx = context(new MapStore(), KINDS);
+      if (failed) await expect(routeConversation(ctx, 1, 5)).rejects.toThrow("503");
+      else {
+        await routeConversation(ctx, 1, 5);
+        expect(ticket.attributes).toEqual({ routing_seen: 402, routing_handled: 1, routing_kind: "startup-program" });
+      }
+      for (let messageId = 404; messageId <= 430; messageId += 1)
+        ticket.messages?.push({ id: messageId, content: "Public reply", message_type: 1 });
+      ticket.labels = [];
+      ticket.attributes = { discord_thread: "https://discord.com/channels/1/2" };
+      await routeConversation(ctx, 1, 5);
+      expect(ticket.attributes).toEqual({
+        discord_thread: "https://discord.com/channels/1/2",
+        routing_seen: 402,
+        routing_handled: 1,
+        routing_kind: "startup-program",
+      });
+      expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
+      expect(sent(requests, "POST", `${CW}/messages`)).toHaveLength(1);
+    },
+  );
+
+  it("projects handled and kind from the ledger even when no decision inputs are visible", async () => {
+    const ticket: Ticket = {};
+    const { requests } = world(ticket, { owner: ["unclear", 1], topic: ["billing", 0], kind: ["spam", 1] });
+    const ctx = context(new MapStore(), KINDS);
+    await routeConversation(ctx, 1, 5);
+    ticket.messages = [];
+    ticket.labels = [];
+    ticket.attributes = {};
+    await routeConversation(ctx, 1, 5);
+    expect(ticket.attributes).toEqual({ routing_seen: 1, routing_handled: 1, routing_kind: "spam" });
+    expect(ticket.labels).toEqual([]);
+    expect(sent(requests, "POST", `${CW}/labels`)).toHaveLength(1);
+    expect(sent(requests, "POST", `${CW}/toggle_status`)).toHaveLength(1);
+    expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
+  });
+
   it("memoizes each input window even after assignment and completion", async () => {
     const ticket: Ticket = { messages: [{ id: 1, content: "My invoice is wrong", message_type: 0 }] };
     const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1] });
@@ -248,7 +399,7 @@ describe("level-triggered reconciliation", () => {
     expect(ticket.attributes?.routing_seen).toBe(2);
   });
 
-  it("reconciles lost labels and attributes from observations without replaying a reply", async () => {
+  it("repairs attributes without restoring labels cleared after routing or replaying a reply", async () => {
     const ticket: Ticket = {};
     const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["startup-program", 1] });
     const ctx = context(new MapStore(), KINDS);
@@ -256,7 +407,7 @@ describe("level-triggered reconciliation", () => {
     ticket.labels = [];
     ticket.attributes = { discord_thread: "https://discord.com/channels/1/2" };
     await routeConversation(ctx, 1, 5);
-    expect(ticket.labels).toEqual(["billing", "startup-program"]);
+    expect(ticket.labels).toEqual([]);
     expect(ticket.attributes).toMatchObject({ routing_seen: 1, routing_handled: 1, routing_kind: "startup-program" });
     expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
     expect(sent(requests, "POST", `${CW}/messages`)).toHaveLength(1);
@@ -291,7 +442,7 @@ describe("level-triggered reconciliation", () => {
 });
 
 describe("reconciliation scenarios", () => {
-  it.each(Array.from({ length: 12 }, (_, index) => index + 1))(
+  it.each(Array.from({ length: 15 }, (_, index) => index + 1))(
     "recovers a 503 at request %s of a maximal run, including every read and write",
     async (failedRequest) => {
       const ticket: Ticket = {
@@ -321,10 +472,10 @@ describe("reconciliation scenarios", () => {
       expect(ticket.attributes).toEqual({
         routing_seen: 201,
         routing_kind: "startup-program",
-        ...(failedRequest === 11 ? {} : { routing_handled: 201 }),
+        ...(failedRequest === 14 ? {} : { routing_handled: 201 }),
       });
       expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
-      expect(sent(requests, "POST", `${CW}/messages`)).toHaveLength(failedRequest === 11 ? 0 : 1);
+      expect(sent(requests, "POST", `${CW}/messages`)).toHaveLength(failedRequest === 14 ? 0 : 1);
     },
   );
 
@@ -371,7 +522,7 @@ describe("reconciliation scenarios", () => {
     expect(ticket.attributes).toEqual({ routing_seen: 1 });
   });
 
-  it("preserves a human topic while adding the kind and repairs only the kind later", async () => {
+  it("preserves a human topic while adding the kind and respects later label changes", async () => {
     const ticket: Ticket = { labels: ["automation"] };
     const { requests } = world(ticket, { owner: ["cloud", 1], topic: ["billing", 1], kind: ["startup-program", 1] });
     const ctx = context(new MapStore(), KINDS);
@@ -379,7 +530,7 @@ describe("reconciliation scenarios", () => {
     expect(ticket.labels).toEqual(["automation", "startup-program"]);
     ticket.labels = ["manual"];
     await routeConversation(ctx, 1, 5);
-    expect(ticket.labels).toEqual(["manual", "startup-program"]);
+    expect(ticket.labels).toEqual(["manual"]);
     expect(sent(requests, "POST", `${CW}/messages`)).toHaveLength(1);
     expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
   });
@@ -597,7 +748,7 @@ describe("reconciliation scenarios", () => {
       expect(sent(requests, "POST", `${CW}/toggle_status`)).toEqual([]);
       expect(sent(requests, "POST", "api.typesafe.ai/v1/systemone")).toHaveLength(1);
       const scans = sent(requests, "GET", `${CW}/messages`).filter((request) => request.url.searchParams.has("after"));
-      expect(scans).toHaveLength(6);
+      expect(scans).toHaveLength(12);
     },
   );
 
@@ -620,7 +771,7 @@ describe("reconciliation scenarios", () => {
   );
 
   it.each(["assigned", "resolved", "snoozed"])(
-    "repairs lost attributes on %s tickets from memoized inputs and the outbox",
+    "repairs lost attributes on %s tickets from the checkpoint and effects ledger",
     async (status) => {
       const ticket: Ticket = {};
       const kind = status === "assigned" ? "startup-program" : "spam";

@@ -13,9 +13,7 @@ const eventSchema = z.object({
 
 const CONVERSATION_EVENTS = new Set(["conversation_created", "conversation_updated", "conversation_status_changed"]);
 
-export function eventTarget(
-  payload: unknown,
-): { accountId: number; conversationId: number; messageId?: number } | undefined {
+export function eventTarget(payload: unknown): { accountId: number; conversationId: number } | undefined {
   const parsed = eventSchema.safeParse(payload);
   if (!parsed.success) return undefined;
   const event = parsed.data;
@@ -30,7 +28,7 @@ export function eventTarget(
     event.id !== undefined &&
     event.conversation
   ) {
-    return { accountId: event.account.id, conversationId: event.conversation.id, messageId: event.id };
+    return { accountId: event.account.id, conversationId: event.conversation.id };
   }
   return undefined;
 }
