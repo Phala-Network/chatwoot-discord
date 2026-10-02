@@ -91,16 +91,26 @@ Cron (every 5 min) ─▶ Worker ──▶ Hub Durable Object ──▶ sweep: r
   an optional Discord triage bot is mentioned when no qualifying public reply follows that customer's message.
   A reply must be outgoing, public, undeleted, not failed, not a template (greeting/out-of-office), and not an
   automatic email. Bot and human replies both count, including replies after a message outside Jev's input window.
-  Resolved/snoozed messages get no triage mention. Decisions and hourly budgets are recorded once per message,
-  so Discord retries keep the same notification/source association. History and automatic customer email stay
-  silent. A later delivery failure produces the existing notice without retrospective triage.
+  Resolved/snoozed messages get no triage mention. Answer scans persist only their pagination cursor across alarm
+  budgets; the final page or the page containing an answer is re-read on resume. An answer arriving or failing
+  before the first notification decision therefore changes that decision. Once decided, notification eligibility
+  and hourly budgets are recorded per message, so Discord retries keep the same notification/source association.
+  History and automatic customer email stay silent. A later delivery failure produces the existing notice without
+  retrospective triage after the notification decision.
 - A human sends the proposed draft with **Reply with draft** or **Apps → Reply with this**. `/pending` assigns
   the current inbox's account bot with `assignee_type: AgentBot`, clearing the person and starting a pending turn;
   in an unlinked inbox it uses ordinary pending status. Manage preserves labels in `router.keepLabels`.
 - Optionally, every hour a message lists the tickets waiting for a reply or without an assignee,
-  pings their assignees, and escalates long-unassigned ones to a role ([support queue](#support-queue)).
+  pings their assignees, and escalates long-unassigned ones to a role ([support queue](#support-queue)). Pending
+  tickets show 🤖 without pings/escalation, using the existing wait-age calculation; there is no pending timeout.
 - Optionally, the separate [chatwoot-router](https://github.com/Phala-Network/chatwoot-workers/tree/main/packages/chatwoot-router)
   Worker assigns a new ticket's owner and topic with TypeSafe Jev ([routing](#routing)).
+
+These contracts use Chatwoot v4.18.0's
+[typed assignment](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/services/conversations/assignment_service.rb),
+[assignee presenter](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/presenters/conversations/event_data_presenter.rb),
+[message types/reopen behavior](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/models/message.rb), and
+[message paging](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/finders/message_finder.rb).
 
 Design choices:
 

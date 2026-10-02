@@ -9,8 +9,11 @@ of [chatwoot-discord-relay](https://github.com/Phala-Network/chatwoot-workers/tr
 Chatwoot owns the lifecycle: a conversation is the bot's while pending, and people's otherwise.
 
 - Each routed account has a configured brand bot. Routing is limited to inboxes linked to that exact account's
-  bot, discovered through `GET inboxes/{id}/agent_bot`. The user token must see every routed inbox. Disconnecting
-  an inbox stops routing. The API does not expose whether the association is inactive; disconnect to disable it.
+  bot, discovered through `GET inboxes/{id}/agent_bot`. The wrapped `agent_bot.id` and `account_id` must match;
+  `agent_bot: null` or `agent_bot: {}` means unlinked. Foreign-account and system bots are rejected. The user token
+  must see every routed inbox. Disconnecting an inbox stops routing. The API does not expose whether the
+  association is inactive; disconnect to disable it. `routing.botIds` and both bot credential maps require
+  exactly the routed account keys (see [Configuration reference](#configuration-reference)).
 - Signed bot webhooks at `/chatwoot/agent-bot` enqueue a deduplicated conversation job. The five-minute sweep
   lists **pending** conversations without an age cutoff. Inbox discovery and page cursors persist across alarms
   within the request budget. Failed pages retry. An empty page ends a pass; the next starts at page 1 and catches
@@ -21,10 +24,17 @@ Chatwoot owns the lifecycle: a conversation is the bot's while pending, and peop
   email subjects and reply text without quoted history; omit automatic email, deleted messages and private notes.
   Redact identifiers and contact names, then cap the input at 1,600 characters. Memoize Jev's decision by input ids.
 - Status activity is asynchronous. The queue's boundary guard remembers an observed/expected transition and the
-  last boundary needed to reject stale handoff work. An expected activity not yet present retries normally; an
-  incomplete read or a deleted known boundary hands off. Permanently missing activity uses the same three-attempt
-  limit. Chatwoot exposes no turn API: a lost webhook plus permanently removed, never-observed activity cannot be
-  reconstructed. A late activity ordered after new text does not license reading old text across the boundary.
+  last boundary needed to reject stale handoff work. A new expected transition requires an activity **after that
+  boundary id**, even when the old activity has the same status and second-level timestamp. Repeated delivery of
+  the same transition timestamp does not start another expectation. A status webhook supplies a transition time;
+  an action read observing pending end requires a newer activity without inferring a time from `updated_at`.
+  Ordinary non-pending snapshots exit: metadata updates change `updated_at` without creating a status activity.
+  An expected activity not yet present retries normally; an incomplete read or a deleted known boundary hands off.
+  Permanently missing activity uses the same three-attempt limit. A new boundary clears the previous turn's failure
+  count and handoff. Chatwoot exposes no turn API: a lost webhook plus permanently removed, never-observed activity
+  cannot be reconstructed. Chatwoot writes activity only for a changed status with activity content; no-op status
+  changes create none. Activities use job execution time, and customer/scheduled reopen usually creates none.
+  A late activity ordered after new text does not license reading old text across the boundary; empty input hands off.
 - Jev chooses owner, topic, kind and whether there is a request. A confident kind takes precedence; otherwise a
   confident greeting/no-request stays pending while fewer than three texts exist. Empty or identifier-only input,
   three greetings, an unclear owner with an actual request, or a public human reply hands off. Blocked contacts
@@ -32,8 +42,9 @@ Chatwoot owns the lifecycle: a conversation is the bot's while pending, and peop
 - Before **each** action, re-read the inbox link, pending status, assignee, turn boundary, inputs and public human
   replies. A changed input defers the job to decide again. Apply topic/kind labels, then the kind's canned reply,
   then exactly one ending action: the kind's resolved/snoozed status, a confident owner's assignment, or explicit
-  bot `status=open` handoff. Preserve human topic labels. Successful person assignment ends the turn; nothing
-  follows it. Reopened resolved conversations can lack a bot assignee, in which case assignment would not open
+  bot `status=open` handoff. Preserve human topic labels and validate that an owner still belongs to the account.
+  Successful person assignment ends the turn without a bot-handoff reporting event; nothing follows it.
+  Reopened resolved conversations can lack a bot assignee, in which case assignment would not open
   pending: use native handoff instead. Chatwoot has no atomic compare-and-write API for a change racing a mutation.
 - Only canned replies have an action record, `reply:<account>:<conversation>`, kept across turns and upgrades.
   Record it **before sending**: a failure or unknown outcome is never resent. Labels, assignment and status use
@@ -42,13 +53,26 @@ Chatwoot owns the lifecycle: a conversation is the bot's while pending, and peop
   only revalidate the turn and hand off, with backoff capped at 30 minutes. Handoff failures keep the job; deleted
   conversations and disconnected inboxes end it. Credentials/service failures need repair before handoff can succeed.
 - A Worker 2xx means the job is durable, not that routing succeeded. Chatwoot's own webhook failure fallback cannot
-  cover later alarm failures. Its fallback opens pending on message-event delivery failure unless
+  cover later alarm failures. Its fallback opens pending on failed `message_created`/`message_updated` delivery unless
   `keep_pending_on_bot_failure` is enabled; it may leave a bot assignee on open. The relay shows that as unassigned.
-  Irrelevant valid bot events are acknowledged. There is no router account-webhook endpoint.
+  Chatwoot makes three delivery attempts for 429/500 responses. Irrelevant valid bot events are acknowledged.
+  There is no router account-webhook endpoint.
 
 After handoff, later customer messages belong to people. Resolved tickets reopen pending in an active bot inbox
 and are decided on their **new turn's** messages. Snoozed tickets reopen open and go to people. A canned reply
 following a customer message counts as answering it in the relay, even if that message was outside Jev's window.
+
+The API contracts were checked against Chatwoot v4.18.0:
+[assignment](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/services/conversations/assignment_service.rb),
+[status changes](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/controllers/api/v1/accounts/conversations_controller.rb),
+[activity creation](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/models/concerns/activity_message_handler.rb)
+and its [job](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/jobs/conversations/activity_message_job.rb),
+[message paging](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/finders/message_finder.rb),
+[inbox bot response](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/views/api/v1/accounts/inboxes/agent_bot.json.jbuilder),
+[assignees/timestamps](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/presenters/conversations/event_data_presenter.rb),
+[token permissions](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/controllers/concerns/access_token_auth_helper.rb),
+[bot events](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/listeners/agent_bot_listener.rb), and
+[webhook fallback](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/lib/webhooks/trigger.rb).
 
 ## Deploy
 
@@ -110,9 +134,6 @@ no unpublished shared package needs installing.
    are read at send time; customers see the brand bot's name. Chatwoot expands its normal message variables.
 4. After deploying both Workers, connect each bot to the inboxes it routes. No `routing_*` custom attributes or
    definitions are needed. For the relay's Manage card, list every kind name in `router.keepLabels`.
-
-These contracts were checked against [Chatwoot v4.18.0 source](https://github.com/Phala-Network/chatwoot-workers/blob/main/docs/design/agent-bot.md): assignment service,
-conversation/message models, activity job, inbox/bot presenters, message finder and agent-bot listener.
 
 ## Configuration reference
 
