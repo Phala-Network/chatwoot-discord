@@ -8,17 +8,44 @@ const eventSchema = z.object({
   conversation: z.object({ id }).optional(),
   message_type: z.union([z.string(), z.number()]).optional(),
   private: z.boolean().optional(),
+  updated_at: z.number().optional(),
+  changed_attributes: z
+    .array(z.object({ status: z.object({ previous_value: z.string(), current_value: z.string() }).optional() }))
+    .optional(),
   sender: z.object({ type: z.string().optional() }).nullish(),
 });
 
-const CONVERSATION_EVENTS = new Set(["conversation_created", "conversation_updated", "conversation_status_changed"]);
+const CONVERSATION_EVENTS = new Set([
+  "conversation_opened",
+  "conversation_resolved",
+  "conversation_updated",
+  "conversation_status_changed",
+]);
 
-export function eventTarget(payload: unknown): { accountId: number; conversationId: number } | undefined {
+export interface Transition {
+  status: string;
+  at: number;
+}
+
+export function eventTarget(
+  payload: unknown,
+): { accountId: number; conversationId: number; transition?: Transition } | undefined {
   const parsed = eventSchema.safeParse(payload);
   if (!parsed.success) return undefined;
   const event = parsed.data;
   if (CONVERSATION_EVENTS.has(event.event) && event.id !== undefined) {
-    return { accountId: event.account.id, conversationId: event.id };
+    const change = event.changed_attributes?.find((entry) => entry.status)?.status;
+    return {
+      accountId: event.account.id,
+      conversationId: event.id,
+      ...(change &&
+      (change.previous_value === "pending" ||
+        change.current_value === "resolved" ||
+        (change.current_value === "pending" && change.previous_value !== "resolved")) &&
+      event.updated_at !== undefined
+        ? { transition: { status: change.current_value, at: event.updated_at } }
+        : {}),
+    };
   }
   if (
     event.event === "message_created" &&

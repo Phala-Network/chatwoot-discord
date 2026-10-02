@@ -1,5 +1,4 @@
-CHATWOOT_TOKEN=replace-with-agent-token
-CHATWOOT_WEBHOOK_SECRETS={"1":"replace-with-webhook-secret"}
+CHATWOOT_TOKEN=replace-with-user-token
+CHATWOOT_AGENT_BOT_SECRETS={"1":"replace-with-bot-webhook-secret"}
+CHATWOOT_AGENT_BOT_TOKENS={"1":"replace-with-bot-token"}
 TYPESAFE_API_KEY=replace-with-typesafe-key
-# Required only for accounts with kinds that send canned responses.
-# CHATWOOT_BOT_TOKENS={"1":"replace-with-bot-token"}

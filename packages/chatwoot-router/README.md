@@ -1,45 +1,54 @@
 # chatwoot-router
 
-Route Chatwoot support tickets with [TypeSafe Jev](https://docs.typesafe.ai) on Cloudflare Workers:
-assign owners, add topic and kind labels, and optionally send a canned response or resolve/snooze tickets.
-Runs independently of [chatwoot-discord-relay](https://github.com/Phala-Network/chatwoot-workers/tree/main/packages/chatwoot-discord-relay).
-Neither Worker calls the other: Chatwoot is their only coordination surface.
+A native Chatwoot agent bot that uses [TypeSafe Jev](https://docs.typesafe.ai) to assign owners, add topic and
+kind labels, send canned responses, and resolve or snooze tickets. Runs on Cloudflare Workers independently
+of [chatwoot-discord-relay](../chatwoot-discord-relay/README.md). The Workers coordinate through Chatwoot status.
 
 ## How it works
 
-The router is a level-triggered reconciler running one-time automation per input version.
-People own assignment, labels, and status after those effects, just as with a Chatwoot automation rule.
+Chatwoot owns the lifecycle: a conversation is the bot's while pending, and people's otherwise.
 
-- Webhooks and the all-status, newest-activity-first sweep enqueue the same deduplicated
-  `route:<account>:<conversation>` job. Every run reads Chatwoot; event payloads are not routing inputs.
-  The SQLite queue retries failed runs with backoff. Sweep pages resume within a window anchored to
-  the previous pass's start, using the same pass model as the relay.
-- Inputs are the first three customer messages with usable, redacted text, capped at 1,600 characters.
-  Their message ids form the memoization key. An unchanged key reuses Jev's answer; a new message
-  entering this window gets a new answer. There are no pending/waiting/done decision states.
-  Internal messages are filtered out; public replies are scanned within a bounded three-page read.
-  If that read cannot fill or finish the window, no automatic status action is allowed.
-- Immediately before effects, a fresh read recomputes the input key. If it changed during Jev,
-  nothing from the old plan is applied or acknowledged; the existing queue reruns the job.
-  The answer and the fresh conversation determine applicable labels, owner, reply, and status.
-  Non-open, blocked, pre-cutover, or differently assigned conversations receive no routing actions.
-  An assignment to this decision's owner is eligible on retry. Empty inputs never call Jev or snooze.
-- Every action has an effects-ledger key: `<effect>:<account>:<conversation>:<input key>` for
-  `assign`, `labels` (topic and kind together), and `status`; `reply:<account>:<conversation>` remains
-  once per ticket. Recorded effects never run again for that version, even if a person unassigns or
-  clears labels. Assignment and labels are recorded after confirmed success, or without a request when
-  already satisfied. Failed idempotent actions retry. Reply and status attempts are recorded before
-  sending; failed or uncertain attempts are not repeated. Confirmed kind actions carry their handled
-  input id in that ledger entry. There is no dispatcher.
-- `routing_seen` projects a durable, monotonic per-conversation checkpoint: the highest customer
-  message id observed after applicable effects complete. Persist it before synchronizing attributes,
-  retaining greater existing values. Later bounded reads cannot lower it. `routing_handled` and
-  `routing_kind` derive from the effects ledger, not current labels or the bounded message view.
-  Each run writes only differences; this repairs lost attributes for any status without a repair job.
-  Memo lookups use exact keys; ledger history uses indexed key ranges, never a whole-cache scan.
-- A run completes after applicable actions and attribute synchronization succeed, or after acknowledging
-  an out-of-scope conversation. Errors retry; deleted conversations are dropped. Events during a run
-  keep its job queued for another read. The sweep provides the same reconciliation if a webhook is lost.
+- Each routed account has a configured brand bot. Routing is limited to inboxes linked to that exact account's
+  bot, discovered through `GET inboxes/{id}/agent_bot`. The user token must see every routed inbox. Disconnecting
+  an inbox stops routing. The API does not expose whether the association is inactive; disconnect to disable it.
+- Signed bot webhooks at `/chatwoot/agent-bot` enqueue a deduplicated conversation job. The five-minute sweep
+  lists **pending** conversations without an age cutoff. Inbox discovery and page cursors persist across alarms
+  within the request budget. Failed pages retry. An empty page ends a pass; the next starts at page 1 and catches
+  conversations skipped by changing pages. Neither event payloads nor sweep rows are decision inputs.
+- Read messages newest-first, unfiltered (including activities), with `before` paging, at most five pages of 20.
+  The latest `conversation_status_changed` activity begins the turn; without one or evidence it is missing, use
+  the conversation's start. Take the first three usable customer texts after the boundary, oldest first. Include
+  email subjects and reply text without quoted history; omit automatic email, deleted messages and private notes.
+  Redact identifiers and contact names, then cap the input at 1,600 characters. Memoize Jev's decision by input ids.
+- Status activity is asynchronous. The queue's boundary guard remembers an observed/expected transition and the
+  last boundary needed to reject stale handoff work. An expected activity not yet present retries normally; an
+  incomplete read or a deleted known boundary hands off. Permanently missing activity uses the same three-attempt
+  limit. Chatwoot exposes no turn API: a lost webhook plus permanently removed, never-observed activity cannot be
+  reconstructed. A late activity ordered after new text does not license reading old text across the boundary.
+- Jev chooses owner, topic, kind and whether there is a request. A confident kind takes precedence; otherwise a
+  confident greeting/no-request stays pending while fewer than three texts exist. Empty or identifier-only input,
+  three greetings, an unclear owner with an actual request, or a public human reply hands off. Blocked contacts
+  and person-assigned conversations are untouched. Bot and user assignees are distinguished by `assignee_type`.
+- Before **each** action, re-read the inbox link, pending status, assignee, turn boundary, inputs and public human
+  replies. A changed input defers the job to decide again. Apply topic/kind labels, then the kind's canned reply,
+  then exactly one ending action: the kind's resolved/snoozed status, a confident owner's assignment, or explicit
+  bot `status=open` handoff. Preserve human topic labels. Successful person assignment ends the turn; nothing
+  follows it. Reopened resolved conversations can lack a bot assignee, in which case assignment would not open
+  pending: use native handoff instead. Chatwoot has no atomic compare-and-write API for a change racing a mutation.
+- Only canned replies have an action record, `reply:<account>:<conversation>`, kept across turns and upgrades.
+  Record it **before sending**: a failure or unknown outcome is never resent. Labels, assignment and status use
+  current Chatwoot state, without an effects ledger or custom coordination attributes. A missing canned response
+  hands off immediately. After three processing failures (initial, +5s, +10s), persist handoff mode. Further retries
+  only revalidate the turn and hand off, with backoff capped at 30 minutes. Handoff failures keep the job; deleted
+  conversations and disconnected inboxes end it. Credentials/service failures need repair before handoff can succeed.
+- A Worker 2xx means the job is durable, not that routing succeeded. Chatwoot's own webhook failure fallback cannot
+  cover later alarm failures. Its fallback opens pending on message-event delivery failure unless
+  `keep_pending_on_bot_failure` is enabled; it may leave a bot assignee on open. The relay shows that as unassigned.
+  Irrelevant valid bot events are acknowledged. There is no router account-webhook endpoint.
+
+After handoff, later customer messages belong to people. Resolved tickets reopen pending in an active bot inbox
+and are decided on their **new turn's** messages. Snoozed tickets reopen open and go to people. A canned reply
+following a customer message counts as answering it in the relay, even if that message was outside Jev's window.
 
 ## Deploy
 
@@ -91,38 +100,19 @@ no unpublished shared package needs installing.
 
 ## Chatwoot setup
 
-- `CHATWOOT_TOKEN` belongs to an agent in every routed inbox or an administrator.
-- In each routed account, add a signed webhook pointing to `POST /chatwoot/webhook`. Subscribe to
-  `message_created`, `conversation_created`, `conversation_updated`, and `conversation_status_changed`.
-- Put that webhook's secret in `CHATWOOT_WEBHOOK_SECRETS`, keyed by account id. Webhooks use HMAC-SHA256 of
-  `<timestamp>.<raw body>`, a ±5-minute timestamp window, and account matching. Only public incoming messages
-  whose sender is a contact, and the relevant conversation events, queue routing; the API is re-read before acting.
-- Create the topic and kind labels in Chatwoot. Create the following **conversation** custom attribute definitions:
+1. Give `CHATWOOT_TOKEN`'s user access to every routed inbox (membership or account administrator).
+2. Create a brand agent bot in each account. Set its webhook URL to `https://<router>/chatwoot/agent-bot` and put its
+   id in `routing.botIds`, access token in `CHATWOOT_AGENT_BOT_TOKENS`, and bot webhook secret in
+   `CHATWOOT_AGENT_BOT_SECRETS`. All three maps must name exactly the routed accounts. Account webhook secrets
+   are different credentials. Bot signatures use HMAC-SHA256 of `<timestamp>.<raw body>`, a ±5-minute window,
+   and account matching. Valid irrelevant events are acknowledged without actions.
+3. Create topic and kind labels and any canned responses in Chatwoot. Canned responses use their short codes and
+   are read at send time; customers see the brand bot's name. Chatwoot expands its normal message variables.
+4. After deploying both Workers, connect each bot to the inboxes it routes. No `routing_*` custom attributes or
+   definitions are needed. For the relay's Manage card, list every kind name in `router.keepLabels`.
 
-| Fixed name | Type | Meaning |
-| --- | --- | --- |
-| `routing_seen` | Number | Latest customer message id observed by a completed run, including skipped tickets, written after applicable actions. The relay's sole completion signal. |
-| `routing_handled` | Number | Latest customer message id handled by a kind's successful reply or set-aside action. |
-| `routing_kind` | Text | Kind label added by the router, preserved by the relay's Manage card. |
-
-Every public incoming contact `message_created` in a routed account queues reconciliation, even for an
-assigned, closed, pre-cutover, or already-routed ticket. Skipped messages and no-owner decisions also advance
-`routing_seen`; only eligible tickets ask Jev. When a kind handles messages, `routing_handled`
-and `routing_kind` are included in the same update as `routing_seen`, after its reply/status/label actions.
-
-Attributes are updated through Chatwoot's `custom_attributes` API with `merge: true`. Chatwoot v4.18 implements
-this as read-merge-save, not an atomic merge: concurrent relay/router writes can still lose keys. Every run
-projects its durable `routing_seen` checkpoint and effects ledger again. This repairs assigned, resolved, and
-snoozed tickets too, without a separate repair job. The checkpoint retains the greatest observed customer id
-and existing `routing_seen` value, even after that message leaves the bounded read window. The handled id and
-kind label come from ledger history, independently of current labels or visible inputs. Greater existing
-watermarks are retained in Chatwoot; unchanged attributes are not written again.
-The relay similarly repairs its missing or different post URL on sync. Recovery is eventual, not a cross-Worker
-transaction. Failed reads and writes retry without reclassifying unchanged inputs or repeating irreversible actions.
-With the relay, set `router.accounts` there; its default wait is 30 seconds from each customer's message time.
-Assignment and status changes never release that wait; only `routing_seen` or the timeout does.
-The three attribute names are fixed. The relay's link attribute must not use any of them.
-Watermarks accept non-negative safe integers stored as numbers or numeric strings; other values count as absent.
+These contracts were checked against [Chatwoot v4.18.0 source](../../docs/design/agent-bot.md): assignment service,
+conversation/message models, activity job, inbox/bot presenters, message finder and agent-bot listener.
 
 ## Configuration reference
 
@@ -132,6 +122,7 @@ Watermarks accept non-negative safe integers stored as numbers or numeric string
 {
   "chatwoot": { "baseUrl": "https://chatwoot.example.com" },
   "routing": {
+    "botIds": { "1": 1 },
     "accounts": {
       "1": {
         "support": { "assignee": 6, "covers": "Product support, billing, and account access." },
@@ -140,157 +131,57 @@ Watermarks accept non-negative safe integers stored as numbers or numeric string
     },
     "topics": { "billing": "Invoices and payments.", "technical": "Product troubleshooting." },
     "minConfidence": 0.7,
-    "snoozeUnclear": true,
     "kinds": { "1": { "spam": { "covers": "Unsolicited advertising.", "status": "resolved" } } }
-  },
-  "startAfterConversationId": { "1": 0 }
+  }
 }
 ```
 
 | Setting | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `chatwoot.baseUrl` | HTTP(S) URL | required | Final Chatwoot API URL; redirects are refused. |
-| `startAfterConversationId` | object: routed account id → integer ≥ 0 | `{}` | Each account's conversation display id at cutover; omitted accounts default to `0`. At or below it, routing actions and Jev are skipped, but customer messages still advance `routing_seen`. |
-| `reconcile.lookbackSeconds` | integer ≥ 60 | `3600` | Minimum activity window for the five-minute sweep. |
-| `reconcile.maxCatchUpSeconds` | integer ≥ 60 | `604800` | Maximum activity window after downtime. |
-| `subrequestBudget` | integer 20–1000 | `45` | Per-alarm outbound budget; keep under your Workers plan's limit. |
-| `routing` | object | required | TypeSafe Jev owner, topic, and kind configuration. |
+| `subrequestBudget` | integer 45–1000 | `45` | Per-alarm outbound budget; reserve 45 for a bounded turn read and all actions. |
 | `routing.model` | non-empty string | `jev-1.13.0` | TypeSafe model. |
 | `routing.minConfidence` | number 0.5–1 | `0.7` | Probability an answer needs before it is applied. |
-| `routing.snoozeUnclear` | boolean | `false` | Snooze a ticket with no clear owner in which the customer asked for nothing yet (a greeting, a test) until their next message. |
+| `routing.botIds` | object: account id → positive safe integer | required | Brand bot id for every routed account, and no others. |
 | `routing.accounts` | object: account id → (owner name → owner) | required | Routed accounts and the owners Jev chooses from. Owner names are 1–40 lower-case letters, digits, or `_`; `unclear` is reserved. |
 | `routing.accounts.<id>.<name>.assignee` | integer > 0 | required | Chatwoot user id to assign. |
 | `routing.accounts.<id>.<name>.covers` | 1–1000 characters | required | What the owner handles: Jev's criterion for choosing them. |
 | `routing.topics` | object: label → what it covers | unset | Topic labels (Chatwoot label names, lower case) Jev chooses from; one is added when a ticket has no label other than its kinds (an automation rule's label is kept alone). The separate relay can display them using its `forumTags` configuration. Unset: no topic. |
-| `routing.kinds` | object: account id → (kind name → kind) | unset | Kinds of ticket Jev recognizes in routed accounts, added as labels beside the topic, and what is done once when it does ([Routing behavior](#routing-behavior)). Kind names are the account's label names (1–40 lower-case letters, digits, `_`, or `-`); `none` is reserved. Unset: none. |
+| `routing.kinds` | object: account id → (kind name → kind) | unset | Kinds of ticket Jev recognizes in routed accounts, added as labels beside the topic, and what is done once when it does ([How it works](#how-it-works)). Kind names are the account's label names (1–40 lower-case letters, digits, `_`, or `-`); `none` is reserved. Unset: none. |
 | `routing.kinds.<id>.<name>.covers` | 1–1000 characters | required | What the kind is: Jev's criterion for recognizing it. |
-| `routing.kinds.<id>.<name>.cannedResponse` | short code | unset | The account's Chatwoot canned response sent to the customer once, by the account's agent bot (`CHATWOOT_BOT_TOKENS`); none while it does not exist. |
+| `routing.kinds.<id>.<name>.cannedResponse` | short code | unset | The account's Chatwoot canned response sent to the customer once, by the account's agent bot (`CHATWOOT_AGENT_BOT_TOKENS`); handoff if it is missing. |
 | `routing.kinds.<id>.<name>.status` | `resolved` or `snoozed` | unset | Set instead of routing the ticket (`snoozed`: until the customer's next message), after the reply of a `cannedResponse`; a new customer message reopens it. |
 
 ### Secrets
 
 | Secret | Required | Meaning |
 | --- | --- | --- |
-| `CHATWOOT_TOKEN` | Yes | Chatwoot agent/admin access token for reading and applying decisions. |
-| `CHATWOOT_WEBHOOK_SECRETS` | Yes | JSON object with a webhook secret for every routed account id. Missing entries fail configuration validation and `/healthz` returns 503. |
+| `CHATWOOT_TOKEN` | Yes | User token for messages, canned responses, inbox discovery and sweep. Must see every routed inbox. |
+| `CHATWOOT_AGENT_BOT_TOKENS` | Yes | JSON object of bot access tokens by account id, e.g. `{"1":"<token>"}`. All mutations use the bot token. |
+| `CHATWOOT_AGENT_BOT_SECRETS` | Yes | JSON object of bot webhook secrets by account id, e.g. `{"1":"<secret>"}`. |
 | `TYPESAFE_API_KEY` | Yes | TypeSafe Jev API key. |
-| `CHATWOOT_BOT_TOKENS` | For kinds that reply | JSON object of Chatwoot agent bot tokens by account id; default `{}`. |
 
-Required secrets are declared with `bindings.secret()`. Optional bot tokens are declared only in development
-so deployment without canned replies does not require one. Do not connect a reply-only agent bot to an inbox.
+Both bot-secret maps require nonempty values and exactly the `routing.accounts` keys. Missing/invalid entries
+fail startup; `/healthz` returns 503 without credentials in its response. All secrets use `bindings.secret()`.
 
-## Routing behavior
+## Upgrade and rollback
 
-The [reconciliation model](#how-it-works) defines the flow. Jev answers multiple-choice questions about the
-account's owner (or `unclear`), topic (with `topics`), kind (with `kinds`), and whether the customer asks for
-anything yet (with `snoozeUnclear`). Inputs include email subjects and the first three customer messages with
-usable text. Before they leave the Worker, emails, URLs, hex and base58 addresses, long tokens, phone numbers,
-IP addresses (and four-part version numbers, which read as one), @handles, and the contact's name (each word
-of two characters or more) are replaced with `[REDACTED]`. Identifier patterns run before name replacement
-so a name cannot split an identifier. This is best-effort redaction, not anonymization: other personal details
-can still reach TypeSafe. Attachment-only and redacted-only messages are acknowledged but do not consume
-the text window, call Jev, or cause snoozing.
+1. Verify user-token inbox visibility and count existing pending tickets. Keep both existing Worker names,
+   Durable Object namespaces and reply records. Existing pending tickets will be routed; open tickets stay human-owned.
+2. Deploy the new relay first. Remove its `router.accounts` and `router.waitSeconds`; keep every kind name in
+   `router.keepLabels`. During the transition existing open tickets can go directly to triage.
+3. Stop the old router's account webhook and cron; replace it in place. Never run both routers. Remove
+   `startAfterConversationId`, `reconcile`, `routing.snoozeUnclear`, `CHATWOOT_WEBHOOK_SECRETS` and
+   `CHATWOOT_BOT_TOKENS` from its configuration. Add `routing.botIds` and the two new required bot secrets.
+   The one-time storage migration removes old jobs/checkpoints/non-reply effects and decision memos. Reply records
+   survive; the pending sweep reconstructs jobs. The Worker never deletes Chatwoot attributes.
+4. Connect the bots one account at a time after both Workers are ready. Keep existing `routing_*` attributes and
+   definitions until the owner's rollback window ends, then remove them manually.
+5. To roll back, **disconnect bots first**, stop the new router/cron, then restore old code, config and account
+   webhook if needed. Do not run old and new routing together. Choose old cutover ids deliberately; retained
+   reply records prevent resends, but lifecycle changes already made are not reversible automatically.
+   Relay sweeps wake held jobs after disconnect; people can open ordinary pending conversations.
 
-An owner at `minConfidence` or above is assigned unless the kind sets the ticket aside. A confident topic is
-added when there are no labels other than kinds; labels set by an automation rule or a person are kept.
-New messages entering the three-text-message window get a new memoized answer, even after an earlier
-assignment; later messages outside that window do not change it. When no owner fits, the ticket is left for
-a person. With `snoozeUnclear`, a confident `no request` answer can snooze an unassigned ticket until a
-customer writes again, but not once all three inputs have been used. Reopening with the same inputs never
-repeats that status action. A new window can apply a new status action. Before effects, the run re-reads the
-input window and compares its key. If a new message entered, the existing queue job is deferred immediately,
-without actions or acknowledgment of the old plan. The next run decides the new inputs. Messages outside a
-full window do not change the key. Chatwoot provides no atomic snapshot across message reads and actions.
-
-Router message reads set `filter_internal_messages=true`: Chatwoot v4.18's controller passes it to
-`MessageFinder`, which filters private notes and activity lines before paging. The generated OpenAPI schema
-omits it, so the shared typed client extends the query type; relay reads are unchanged. The forward scan is
-bounded to 300 public messages, including agent replies. If it cannot fill or finish the input window, labels,
-assignment, and a kind reply can still apply, but no status action does; the ticket stays for a person.
-
-Immediately before actions a fresh read must show an open ticket, with an unblocked contact, unassigned or
-assigned to this answer's owner. Otherwise only coordination attributes are synchronized. Routing resumes
-after reopening using memoized inputs and the effects ledger, not a saved decision state. Recorded assignment,
-label, and status effects are never repeated for that input version: a person unassigning or clearing labels
-via Manage has the final say. A new input version permits new effects. Actions run in order: assignment/labels,
-reply, status, then the checkpoint and attributes. Lost assignment/label responses are recovered by observing
-Chatwoot and recording an already-satisfied effect without another request. Routing uses `CHATWOOT_TOKEN`,
-whose user must be an agent in the routed inboxes; Chatwoot records the assignment as made by that user.
-
-
-With `kinds`, Jev is also asked which of the account's kinds the ticket is (or `none`). Kinds are
-labels of a second family: a ticket has one topic label, the category, and a kind Jev is confident
-about is added beside it (create each kind as a label in its account; it needs no forum tag, and
-the card shows it). It also acts with the decision: a kind with a `status` (spam, for example) sets the
-ticket aside, resolved or snoozed until the customer's next message, instead of routing it; the
-contact is not blocked, so a new message reopens the ticket as usual. A kind with a `cannedResponse` sends that
-Chatwoot canned response (Settings → Canned Responses, by its short code) to the customer, for
-example to acknowledge an application or point a security report to its process; a kind with both
-replies, then sets the ticket aside (a templated security report: acknowledged, then resolved). It is read when
-it is sent, so it is edited in Chatwoot, can use Chatwoot's variables such as `{{contact.name}}`,
-and a missing response leaves the job retrying without recording a send attempt. It is sent as the account's
-Chatwoot agent bot (`CHATWOOT_BOT_TOKENS`): customers see the bot's name, such as "Acme Support"; a
-bot's message assigns nobody and is no human first reply, and Chatwoot then counts the customer as
-answered (no longer waiting) until they write again. Create the bot in the account (Settings →
-Bots), without connecting it to an inbox. A reply goes out at most once per ticket: it is recorded
-before it is sent, so a failed send is not retried. Once a kind replied or set the ticket aside, the
-customer messages it handled (those Jev was given) are relayed without calling the triage bot, with a
-note, through the coordination attributes below. The relay waits up to its configured deadline;
-if routing is unavailable or slower than that, the message proceeds with its usual mention. Rules that need no judgement of the text (by inbox, sender, or
-subject) are Chatwoot's automation rules.
-
-```jsonc
-"routing": {
-  "accounts": {
-    "1": {
-      "cloud": { "assignee": 6, "covers": "Cloud support and billing: deployments, invoices, account access." },
-      "sales": { "assignee": 7, "covers": "Sales and partnerships: pricing, capacity, volume deals." }
-    }
-  },
-  "topics": { "technical-support": "Something does not work.", "billing": "Payments, invoices, refunds." },
-  "kinds": {
-    "1": {
-      "spam": { "covers": "Unsolicited promotion or scams.", "status": "resolved" },
-      "startup-program": { "covers": "A Startup Program application.", "cannedResponse": "startup-program" }
-    }
-  }
-}
-```
-
-
-## Reliability and cutover
-
-The Worker acknowledges after a SQLite job is queued. Alarms serialize decisions, preserve work across failures,
-and retry with exponential backoff capped at 30 minutes. The subrequest budget reserves 15 requests for the
-worst-case route and yields to a fresh invocation before starting work it cannot finish.
-Chatwoot's conversation-not-found response (JSON HTTP 404) is logged and the job is dropped, including a deletion
-during a message read or write. Other failures, including proxy errors and account-level API failures, keep their backoff.
-A sweep every five minutes pages **all statuses**, newest activity first, using the same shared Chatwoot client
-and pass-window/cursor logic as the relay. It queues the same route job for every listed conversation,
-regardless of status or assignment; reconciliation includes attribute repair.
-Closing a ticket does not remove it from this list. Activity can move it to the front, so it may be seen again;
-the next window starts from the previous pass's **start**, with a 60-second overlap, bounded by
-`reconcile.lookbackSeconds` and `reconcile.maxCatchUpSeconds`.
-The persisted page cursor survives budget yields and failed-page backoff. Route jobs run between
-pages; a failed sweep does not hold due jobs in its own account or any other account.
-Memoized answers, effects-ledger entries, and checkpoints remain in the Router's own Durable Object without expiry.
-
-When splitting an existing relay deployment, **deploy the new relay first**, removing its old `routing` setting and
-routing secrets and adding `router.accounts`. Keep its existing Worker `name` and `Hub` export to preserve state.
-Then find the newest Chatwoot conversation display id **in each routed account** at cutover and record the map in
-`startAfterConversationId`, for example `{ "1": 1200, "2": 85 }`. Deploy the router with the old routing configuration and its secrets, then add its
-Chatwoot webhook. Do not start the router while the old embedded routing is active. The cutover watermark
-intentionally leaves pre-cutover conversations to humans; old relay routing decisions are not imported. New
-customer messages on those tickets are still acknowledged with `routing_seen`. Set the relay's `router.keepLabels`
-(for example `["spam", "security", "beg-bounty"]`) to keep legacy kind labels even without `routing_kind`.
-
-Chatwoot conversation display ids are account-local: never use one account's id as another account's cutoff.
-The map accepts only accounts in `routing.accounts`, with non-negative integer ids. An omitted account defaults
-to `0`, so include every account whose pre-cutover history must be left alone. In the example, account 1 starts
-at conversation 1201 and account 2 at 86, independently of the other account's counter.
-
-Redaction is best effort, not anonymization: other personal information can still reach TypeSafe. Review its
-policy before enabling routing. Logs contain ids and outcomes, never message bodies or credentials.
-See [SECURITY.md](https://github.com/Phala-Network/chatwoot-workers/blob/main/SECURITY.md) to report vulnerabilities,
-[CONTRIBUTING.md](https://github.com/Phala-Network/chatwoot-workers/blob/main/CONTRIBUTING.md) for development,
-and [CHANGELOG.md](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-router/CHANGELOG.md) for releases. Licensed under [MIT](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-router/LICENSE).
+Redaction is best effort, not anonymization: other personal information can still reach TypeSafe. Logs contain
+ids and outcomes, never message bodies or credentials. See [SECURITY.md](../../SECURITY.md),
+[CONTRIBUTING.md](../../CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md). Licensed under [MIT](LICENSE).

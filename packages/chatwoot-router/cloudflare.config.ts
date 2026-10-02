@@ -8,7 +8,7 @@ const router = defineWorker({
   exports: { Router: exports.durableObject({ storage: "sqlite" }) },
 });
 
-export default defineConfig(({ mode }) => ({
+export default defineConfig({
   worker: {
     ...router,
     observability: { enabled: true },
@@ -16,14 +16,16 @@ export default defineConfig(({ mode }) => ({
     env: {
       ROUTER: bindings.durableObject({ worker: router, exportName: "Router" }),
       CHATWOOT_TOKEN: bindings.secret(),
-      CHATWOOT_WEBHOOK_SECRETS: bindings.secret(),
+      CHATWOOT_AGENT_BOT_SECRETS: bindings.secret(),
       TYPESAFE_API_KEY: bindings.secret(),
-      ...(mode === "development" && { CHATWOOT_BOT_TOKENS: bindings.secret() }),
+      CHATWOOT_AGENT_BOT_TOKENS: bindings.secret(),
       CONFIG: bindings.json({
         chatwoot: { baseUrl: "https://chatwoot.example.com" },
-        routing: { accounts: { "1": { support: { assignee: 6, covers: "Product support and billing." } } } },
-        startAfterConversationId: { "1": 0 },
+        routing: {
+          botIds: { "1": 1 },
+          accounts: { "1": { support: { assignee: 6, covers: "Product support and billing." } } },
+        },
       }),
     },
   },
-}));
+});

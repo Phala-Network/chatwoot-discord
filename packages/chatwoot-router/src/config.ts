@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ConfigError, describe, jsonRecord, reconcileSchema } from "../../../shared/config.ts";
+import { ConfigError, describe, jsonRecord } from "../../../shared/config.ts";
 
 export { ConfigError } from "../../../shared/config.ts";
 
@@ -11,18 +11,13 @@ const accountId = z
 export const configSchema = z
   .strictObject({
     chatwoot: z.strictObject({ baseUrl: z.url({ protocol: /^https?$/ }) }),
-    reconcile: reconcileSchema,
-    startAfterConversationId: z.record(accountId, z.number().int().min(0)).default({}),
-    subrequestBudget: z.number().int().min(20).max(1000).default(45),
+    subrequestBudget: z.number().int().min(45).max(1000).default(45),
     routing: z.strictObject({
       model: z.string().min(1).default("jev-1.13.0"),
       /** Jev's probability an answer needs before it is applied. */
       minConfidence: z.number().min(0.5).max(1).default(0.7),
-      /**
-       * Snooze a ticket Jev cannot assign yet, and in which the customer asked for nothing yet, until
-       * their next message (see src/routing.ts).
-       */
-      snoozeUnclear: z.boolean().default(false),
+      /** The account's native Chatwoot agent bot. */
+      botIds: z.record(accountId, z.number().int().positive()),
       /** Per Chatwoot account id: the owners Jev chooses from, by a short name. */
       accounts: z.record(
         accountId,
@@ -65,7 +60,7 @@ export const configSchema = z
               covers: z.string().min(1).max(1000),
               /**
                * Short code of the account's Chatwoot canned response sent to the customer once, as
-               * the account's agent bot (CHATWOOT_BOT_TOKENS). None is sent while it does not exist.
+               * the account's agent bot (CHATWOOT_AGENT_BOT_TOKENS). Missing responses hand off to people.
                */
               cannedResponse: z.string().trim().min(1).max(255).optional(),
               /**
@@ -80,10 +75,17 @@ export const configSchema = z
         .optional(),
     }),
   })
-  .refine((config) => Object.keys(config.startAfterConversationId).every((id) => config.routing.accounts[id]), {
-    path: ["startAfterConversationId"],
-    message: "must only name routed accounts",
-  })
+  .refine(
+    (config) => {
+      const accounts = Object.keys(config.routing.accounts);
+      return (
+        accounts.length > 0 &&
+        accounts.length === Object.keys(config.routing.botIds).length &&
+        accounts.every((id) => config.routing.botIds[id] !== undefined)
+      );
+    },
+    { path: ["routing", "botIds"], message: "must name exactly the routed accounts" },
+  )
   .refine((config) => Object.keys(config.routing?.kinds ?? {}).every((id) => config.routing?.accounts[id]), {
     path: ["routing", "kinds"],
     message: "must only name routed accounts",
@@ -97,9 +99,9 @@ export const configSchema = z
   );
 export const secretsSchema = z.object({
   CHATWOOT_TOKEN: z.string().min(1),
-  CHATWOOT_WEBHOOK_SECRETS: jsonRecord,
+  CHATWOOT_AGENT_BOT_SECRETS: jsonRecord,
   TYPESAFE_API_KEY: z.string().min(1),
-  CHATWOOT_BOT_TOKENS: jsonRecord.default({}),
+  CHATWOOT_AGENT_BOT_TOKENS: jsonRecord,
 });
 
 type Config = z.infer<typeof configSchema>;
@@ -120,15 +122,11 @@ export function parseSettings(rawConfig: unknown, rawSecrets: object): Settings 
 }
 
 export function buildSettings(config: Config, secrets: Secrets): Settings {
-  for (const accountId of Object.keys(config.routing.accounts)) {
-    if (!secrets.CHATWOOT_WEBHOOK_SECRETS[accountId]) {
-      throw new ConfigError(`Invalid secrets: CHATWOOT_WEBHOOK_SECRETS: account ${accountId} needs a webhook secret`);
+  const accounts = Object.keys(config.routing.accounts);
+  for (const name of ["CHATWOOT_AGENT_BOT_SECRETS", "CHATWOOT_AGENT_BOT_TOKENS"] as const) {
+    if (Object.keys(secrets[name]).length !== accounts.length || accounts.some((id) => !secrets[name][id]?.trim())) {
+      throw new ConfigError(`Invalid secrets: ${name}: needs exactly the routed accounts`);
     }
   }
-  for (const [accountId, kinds] of Object.entries(config.routing.kinds ?? {})) {
-    if (Object.values(kinds).some((kind) => kind.cannedResponse) && !secrets.CHATWOOT_BOT_TOKENS[accountId]) {
-      throw new ConfigError(`Invalid secrets: CHATWOOT_BOT_TOKENS: account ${accountId} has kinds that reply`);
-    }
-  }
-  return { config, secrets, botToken: (accountId) => secrets.CHATWOOT_BOT_TOKENS[String(accountId)] };
+  return { config, secrets, botToken: (accountId) => secrets.CHATWOOT_AGENT_BOT_TOKENS[String(accountId)] };
 }
