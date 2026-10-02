@@ -157,7 +157,13 @@ export async function routeConversation(
   // A fresh read before every effect. A new input/boundary is work for a new queue run.
   const fresh = async () => {
     const current = await chatwoot.getConversation(accountId, conversationId);
-    if (current?.status !== "pending" || current.inbox_id !== raw.inbox_id) return;
+    if (!current || current.inbox_id !== raw.inbox_id) return;
+    if (current.status !== "pending") {
+      if (current.updated_at !== undefined) {
+        expectActivity(store, accountId, conversationId, { status: current.status ?? "open", at: current.updated_at });
+      }
+      return;
+    }
     const conversation = toRelayConversation(conversationId, current);
     if (conversation.contact.blocked || conversation.assignee) return;
     if (current.meta?.assignee && (current.meta.assignee_type !== "AgentBot" || current.meta.assignee.id !== linked.id))

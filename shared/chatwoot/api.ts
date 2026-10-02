@@ -140,7 +140,7 @@ export const MESSAGE_HISTORY_PAGE_SIZE = 20;
 const inboxBotSchema = z.object({
   agent_bot: z
     .object({ id: z.number().int().positive().optional(), account_id: z.number().int().positive().nullish() })
-    .nullish(),
+    .nullable(),
 });
 
 type MultipartMessage =
@@ -193,7 +193,7 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
   ): Promise<T | undefined> {
     const { data, response } = await pending;
     if (notFound(response)) {
-      log.info("conversation deleted", { operation });
+      log.info("Chatwoot resource deleted", { operation });
       return undefined;
     }
     if (!response.ok || data === undefined) throw new ChatwootError(response.status, operation);
@@ -281,12 +281,13 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
     },
 
     async inboxBot(accountId: number, inboxId: number): Promise<{ id: number } | undefined> {
-      const value = await data(
+      const value = await dataUnlessNotFound(
         "get inbox agent bot",
         client.GET("/api/v1/accounts/{account_id}/inboxes/{id}/agent_bot", {
           params: { path: { account_id: accountId, id: inboxId } },
         }),
       );
+      if (value === undefined) return undefined;
       const parsed = inboxBotSchema.safeParse(value);
       if (!parsed.success) throw new Error("Chatwoot returned an invalid inbox bot");
       const bot = parsed.data.agent_bot;

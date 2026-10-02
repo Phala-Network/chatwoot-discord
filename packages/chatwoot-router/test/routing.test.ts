@@ -288,6 +288,20 @@ describe("native bot turns", () => {
     expect(sent(mock.requests, "POST", `${CW}/assignments`)).toHaveLength(2);
   });
 
+  it.each(["read", "messages-read", "jev", "canned", "toggle_status"])(
+    "recovers a transient %s failure and completes the turn with one reply",
+    async (operation) => {
+      const mock = world({ fail: { [operation]: 1 } }, { owner: ["cloud", 1], kind: ["bounty", 1] });
+      const ctx = context(new MemoryStore(), KINDS);
+      await expect(routeConversation(ctx, 1, 5)).rejects.toThrow("503");
+      await routeConversation(ctx, 1, 5);
+      expect(mock.ticket.status).toBe("resolved");
+      expect(mock.ticket.labels).toEqual(["bounty"]);
+      expect(sent(mock.requests, "POST", `${CW}/messages`)).toHaveLength(1);
+      expect(sent(mock.requests, "POST", JEV)).toHaveLength(operation === "jev" ? 2 : 1);
+    },
+  );
+
   it("does not resend a failed or unknown canned reply, even when it never arrived", async () => {
     const mock = world({ fail: { messages: 1 } }, { owner: ["cloud", 1], kind: ["bounty", 1] });
     const ctx = context(new MemoryStore(), KINDS);
@@ -436,6 +450,71 @@ describe("native bot turns", () => {
     expect(JSON.parse(sent(mock.requests, "POST", JEV)[0]?.body ?? "{}").state.ticket).toBe(
       "First request Second request",
     );
+  });
+
+  it("preserves a status webhook that arrives while the boundary reader awaits a page", async () => {
+    const ctx = context();
+    const mock = world({
+      during: (operation) => {
+        if (operation === "read-messages")
+          expectActivity(ctx.store, 1, 5, { status: "pending", at: Date.now() / 1000 });
+      },
+    });
+    await expect(routeConversation(ctx, 1, 5)).rejects.toThrow("not available yet");
+    expect(sent(mock.requests, "POST", JEV)).toEqual([]);
+  });
+
+  it("fits a complete five-page turn with labels, reply and assignment into the configured budget", async () => {
+    const mock = world(
+      {
+        messages: [
+          activity(1, "pending"),
+          incoming(2),
+          ...Array.from({ length: 79 }, (_, i) => ({ id: i + 3, message_type: 2 })),
+        ],
+      },
+      { owner: ["cloud", 1], kind: ["startup", 1] },
+    );
+    const ctx = context(new MemoryStore(), KINDS);
+    const budget = new Budget(ROUTE_BUDGET, ctx.fetch);
+    await routeConversation(
+      {
+        ...ctx,
+        fetch: budget.fetch,
+        chatwoot: chatwootClient(ctx.settings.config.chatwoot.baseUrl, "user-token", budget.fetch),
+      },
+      1,
+      5,
+    );
+    expect(mock.ticket.assignee).toMatchObject({ id: 6 });
+    expect(sent(mock.requests, "POST", `${CW}/messages`)).toHaveLength(1);
+    expect(budget.remaining).toBeGreaterThanOrEqual(0);
+  });
+
+  it("rejects unknown Jev choices before any Chatwoot mutation", async () => {
+    const mock = world({}, { owner: ["invented-owner", 1] });
+    await expect(routeConversation(context(), 1, 5)).rejects.toThrow("no valid owner");
+    expect(
+      mock.requests.filter((request) => request.method === "POST" && request.url.hostname === "chatwoot.example.com"),
+    ).toEqual([]);
+  });
+
+  it("waits for the resolution activity when a fresh action read observed a human end the turn", async () => {
+    const mock = world({
+      during: (operation) => {
+        if (operation === "jev") {
+          mock.ticket.status = "resolved";
+          mock.ticket.updatedAt = Date.now() / 1000;
+        }
+      },
+    });
+    const ctx = context();
+    await routeConversation(ctx, 1, 5);
+    mock.ticket.status = "pending";
+    delete mock.ticket.during;
+    mock.ticket.messages?.push(incoming(2, "Reopened before activity"));
+    await expect(routeConversation(ctx, 1, 5)).rejects.toThrow("not available yet");
+    expect(sent(mock.requests, "POST", JEV)).toHaveLength(1);
   });
 
   it("honors an old release's reply record across a new turn", async () => {

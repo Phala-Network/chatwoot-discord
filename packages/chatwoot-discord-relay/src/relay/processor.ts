@@ -138,7 +138,15 @@ export async function processConversation(
         ) {
           return "pending";
         }
-        if (fresh.status === "open" && !message.content_attributes?.email?.auto_reply) {
+        const live =
+          message.created_at == null ||
+          Date.now() - message.created_at * 1000 <= settings.config.reconcile.lookbackSeconds * 1000;
+        if (
+          fresh.status === "open" &&
+          settings.config.triage.userId &&
+          live &&
+          !message.content_attributes?.email?.auto_reply
+        ) {
           const reply = await answeringReply(context, accountId, conversationId, message.id);
           if (reply === "yield") return "yield";
           answered = reply;

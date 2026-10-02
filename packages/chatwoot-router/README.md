@@ -2,7 +2,7 @@
 
 A native Chatwoot agent bot that uses [TypeSafe Jev](https://docs.typesafe.ai) to assign owners, add topic and
 kind labels, send canned responses, and resolve or snooze tickets. Runs on Cloudflare Workers independently
-of [chatwoot-discord-relay](../chatwoot-discord-relay/README.md). The Workers coordinate through Chatwoot status.
+of [chatwoot-discord-relay](https://github.com/Phala-Network/chatwoot-workers/tree/main/packages/chatwoot-discord-relay). The Workers coordinate through Chatwoot status.
 
 ## How it works
 
@@ -111,7 +111,7 @@ no unpublished shared package needs installing.
 4. After deploying both Workers, connect each bot to the inboxes it routes. No `routing_*` custom attributes or
    definitions are needed. For the relay's Manage card, list every kind name in `router.keepLabels`.
 
-These contracts were checked against [Chatwoot v4.18.0 source](../../docs/design/agent-bot.md): assignment service,
+These contracts were checked against [Chatwoot v4.18.0 source](https://github.com/Phala-Network/chatwoot-workers/blob/main/docs/design/agent-bot.md): assignment service,
 conversation/message models, activity job, inbox/bot presenters, message finder and agent-bot listener.
 
 ## Configuration reference
@@ -183,5 +183,5 @@ fail startup; `/healthz` returns 503 without credentials in its response. All se
    Relay sweeps wake held jobs after disconnect; people can open ordinary pending conversations.
 
 Redaction is best effort, not anonymization: other personal information can still reach TypeSafe. Logs contain
-ids and outcomes, never message bodies or credentials. See [SECURITY.md](../../SECURITY.md),
-[CONTRIBUTING.md](../../CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md). Licensed under [MIT](LICENSE).
+ids and outcomes, never message bodies or credentials. See [SECURITY.md](https://github.com/Phala-Network/chatwoot-workers/blob/main/SECURITY.md),
+[CONTRIBUTING.md](https://github.com/Phala-Network/chatwoot-workers/blob/main/CONTRIBUTING.md) and [CHANGELOG.md](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-router/CHANGELOG.md). Licensed under [MIT](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-router/LICENSE).

@@ -383,7 +383,7 @@ Worker secrets, never in the configuration, also validated at startup:
 
 ## Routing
 
-[chatwoot-router](../chatwoot-router/README.md) runs as each account's native Chatwoot brand bot. The relay
+[chatwoot-router](https://github.com/Phala-Network/chatwoot-workers/tree/main/packages/chatwoot-router) runs as each account's native Chatwoot brand bot. The relay
 uses Chatwoot's inbox-bot association and pending status automatically; it needs neither bot credentials nor
 custom routing attributes. `GET inboxes/{id}/agent_bot` is scoped to the account/inbox and validated for that
 account. An unlinked inbox has no bot; the endpoint does not expose the association's active flag, so disconnect
@@ -406,7 +406,7 @@ During the relay-first transition, open messages can go straight to triage.
 Keep existing `routing_*` attributes/definitions through the owner's rollback window. For rollback, **disconnect
 the bot first**, stop the new router, then restore old versions/config and the old account webhook if required.
 The relay sweep releases held jobs after disconnect. There are no pending-message timers to remove. See the
-router's [upgrade and rollback instructions](../chatwoot-router/README.md#upgrade-and-rollback).
+router's [upgrade and rollback instructions](https://github.com/Phala-Network/chatwoot-workers/tree/main/packages/chatwoot-router#upgrade-and-rollback).
 
 ## Triage bot hook
 

@@ -55,6 +55,7 @@ export const sent = (requests: Recorded[], method: string, path: string) =>
 
 export interface Ticket {
   status?: string;
+  updatedAt?: number;
   assignee?: { id: number; name?: string } | null;
   assigneeType?: string | null;
   blocked?: boolean;
@@ -107,6 +108,7 @@ export function world(ticket: Ticket = {}, answers: Answers = { owner: ["cloud",
               id: 5,
               inbox_id: 2,
               status: ticket.status,
+              updated_at: ticket.updatedAt,
               labels: ticket.labels,
               meta: {
                 assignee: ticket.assignee,
@@ -119,6 +121,7 @@ export function world(ticket: Ticket = {}, answers: Answers = { owner: ["cloud",
         json({ agent_bot: ticket.bot === undefined ? { id: 1, account_id: 1 } : ticket.bot }),
       ),
       on("GET", `${CW}/messages`, (request) => {
+        ticket.during?.("read-messages");
         if (fail("messages-read")) return json({}, { status: 503 });
         const before = Number(request.url.searchParams.get("before") ?? Number.MAX_SAFE_INTEGER);
         return json({ payload: (ticket.messages ?? []).filter((message) => message.id < before).slice(-20) });

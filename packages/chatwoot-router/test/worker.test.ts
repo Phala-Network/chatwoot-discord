@@ -116,6 +116,45 @@ describe("bot webhook and durable recovery", () => {
     expect(await failed.json()).toEqual({ ok: false });
   });
 
+  it("keeps equal conversation ids and credentials separate while another account backs off", async () => {
+    const statuses = new Map([
+      [1, "pending"],
+      [2, "pending"],
+    ]);
+    let unavailable = true;
+    const accountId = (request: { url: URL }) => Number(request.url.pathname.split("/")[4]);
+    const mock = mockFetch(
+      on("GET", /^chatwoot\.example\.com\/api\/v1\/accounts\/[12]\/conversations\/5$/, (request) => {
+        const id = accountId(request);
+        if (id === 2 && unavailable) return json({}, { status: 503 });
+        return json({ id: 5, inbox_id: 2, status: statuses.get(id) });
+      }),
+      on("GET", /^chatwoot\.example\.com\/api\/v1\/accounts\/[12]\/inboxes\/2\/agent_bot$/, (request) => {
+        const id = accountId(request);
+        return json({ agent_bot: { id, account_id: id } });
+      }),
+      on("GET", /^chatwoot\.example\.com\/api\/v1\/accounts\/[12]\/conversations\/5\/messages$/, () =>
+        json({ payload: [] }),
+      ),
+      on("POST", /^chatwoot\.example\.com\/api\/v1\/accounts\/[12]\/conversations\/5\/toggle_status$/, (request) => {
+        const id = accountId(request);
+        expect(request.headers.get("api_access_token")).toBe(id === 1 ? "bot-token" : "other-bot-token");
+        expect(JSON.parse(request.body)).toEqual({ status: "open" });
+        statuses.set(id, "open");
+        return json({});
+      }),
+    );
+    expect((await webhook(incoming(5, 2), "secret-globex")).status).toBe(200);
+    await drain();
+    expect((await webhook(incoming(5))).status).toBe(200);
+    await drain();
+    expect([...statuses.values()]).toEqual(["open", "pending"]);
+    unavailable = false;
+    await retryNow();
+    expect([...statuses.values()]).toEqual(["open", "open"]);
+    expect(mock.requests.filter((request) => request.method === "POST")).toHaveLength(2);
+  });
+
   it("returns 2xx before processing, then hands off after three Jev failures and retries the handoff", async () => {
     const mock = world({ fail: { jev: 3, toggle_status: 1 } });
     expect((await webhook(incoming(5))).status).toBe(200);

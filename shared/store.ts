@@ -54,18 +54,6 @@ export class QueueStore {
     this.sql.exec("DELETE FROM cache WHERE key = ?", key);
   }
 
-  list(start: string, end: string): string[] {
-    return this.sql
-      .exec<{ value: string }>(
-        "SELECT value FROM cache WHERE key >= ? AND key < ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY key",
-        start,
-        end,
-        this.now(),
-      )
-      .toArray()
-      .map((row) => row.value);
-  }
-
   // Jobs
 
   /**

@@ -54,7 +54,7 @@ signal between the router and the relay.
 
 - **Scope.** Each routed account's brand bot (configured by id) is the agent bot of the inboxes it routes, with the
   router's webhook URL; the router reads which inboxes those are from Chatwoot (`inboxes/{id}/agent_bot`). It acts only
-  on `pending` conversations of those inboxes with no person as assignee.
+  on `pending` conversations of those inboxes with no person or different bot as assignee.
 - **Triggers.** Bot webhooks and a sweep enqueue the same deduplicated conversation job. Each sweep pass lists the
   account's `pending` conversations (`status=pending`, every page, with a user token that sees every routed inbox) and
   keeps those of the routed inboxes (no time window): a conversation a page shift skips is listed by the next pass.
@@ -96,7 +96,7 @@ signal between the router and the relay.
   boundary, including its id and creation time; select customer texts strictly after it, oldest first, at most three.
   Exhausting history without a boundary means the conversation's start only when no previously observed boundary
   or expected transition contradicts that. An incomplete scan hands off without a Jev call.
-- The queue retains a small boundary guard (last observed boundary and any expected status activity) needed to
+- The queue retains a small boundary guard (last observed boundary, processing failure count and any expected status activity) needed to
   prevent a stale handoff from acting on a later turn; this is not a history or an effects ledger. Status webhooks
   supply transition status/time; observing the conversation leave pending also requires the next activity. Re-read
   a missing expected activity on the normal failure schedule: three processing attempts, initially, +5s, +10s.
@@ -193,5 +193,7 @@ Source contracts above were checked against the v4.18.0 raw sources: `app/models
 `app/views/api/v1/models/_agent_bot.json.jbuilder`, `app/presenters/conversations/event_data_presenter.rb`,
 `app/finders/message_finder.rb`, `app/finders/conversation_finder.rb`, `app/services/conversations/sort_service.rb`,
 `app/controllers/concerns/access_token_auth_helper.rb`, `app/listeners/agent_bot_listener.rb`,
-`app/jobs/agent_bots/webhook_job.rb`, and `lib/webhooks/trigger.rb` under
+`app/jobs/agent_bots/webhook_job.rb`, `app/listeners/base_listener.rb`, `app/policies/inbox_policy.rb`,
+`app/controllers/api/v1/accounts/conversations/messages_controller.rb`, `app/views/api/v1/models/_message.json.jbuilder`,
+and `lib/webhooks/trigger.rb` under
 <https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/>.
