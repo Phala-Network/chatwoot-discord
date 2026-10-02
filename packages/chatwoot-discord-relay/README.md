@@ -167,6 +167,8 @@ The secrets are described in [`.dev.vars.example`](.dev.vars.example) and the
 `CHATWOOT_WEBHOOK_SECRETS` until step 4 and `{"<discord user id>":"<chatwoot token>"}` for
 `CHATWOOT_AGENT_TOKENS`, then pass it to the first deploy with `--secrets-file`. Later deploys keep
 the secrets; to change some, deploy again with a file that holds only those (the others are kept).
+Every configured account needs a webhook secret: until step 4 supplies them, configuration is not ready and
+`/healthz` returns 503.
 Do not leave the file lying around: it holds every credential.
 
 **From a checkout.** Install dependencies at the workspace root, then deploy the package.
@@ -350,9 +352,6 @@ a larger configuration goes in a [KV namespace](https://developers.cloudflare.co
 | `router.accounts` | array of account ids | required | Relayed accounts whose live customer messages wait for routing completion, regardless of assignee or status. |
 | `router.waitSeconds` | integer ≥ 0 | `30` | Maximum wait measured from the customer's message timestamp, not queue arrival. |
 | `router.keepLabels` | array of lower-case label names | `[]` | Labels Manage always keeps when replacing or clearing a topic, alongside `routing_kind`; use for pre-cutover kinds. |
-| `router.attributes.seen` | non-empty string | `routing_seen` | Numeric latest customer message id processed or skipped, after all routing actions finish. |
-| `router.attributes.handled` | non-empty string | `routing_handled` | Numeric latest customer message id handled automatically. |
-| `router.attributes.kind` | non-empty string | `routing_kind` | Kind label kept when Manage replaces the topic label. |
 | `reconcile.lookbackSeconds` | integer ≥ 60 | `3600` | Minimum sweep window (conversations with activity within it are checked). Messages older than this are relayed without notifications. |
 | `reconcile.maxCatchUpSeconds` | integer ≥ 60 | `604800` (7 days) | Maximum sweep window after downtime. |
 | `attachments.maxFiles` | integer 0–10 | `10` | Files per `/reply` or `/note` (0 hides the editor's upload field). |
@@ -368,7 +367,7 @@ Worker secrets, never in the configuration, also validated at startup:
 | `DISCORD_BOT_TOKEN` | non-empty | The Discord application's bot token. |
 | `DISCORD_PUBLIC_KEY` | 64 hex characters | The Discord application's public key (verifies interactions). |
 | `CHATWOOT_RELAY_TOKEN` | non-empty | Access token of the Chatwoot user the relay reads as (an agent in every relayed inbox, or an administrator). |
-| `CHATWOOT_WEBHOOK_SECRETS` | JSON object, `{"<account id>":"<secret>"}` | Each account's webhook secret. |
+| `CHATWOOT_WEBHOOK_SECRETS` | JSON object, `{"<account id>":"<secret>"}` | Required for every configured account; missing entries fail configuration validation. |
 | `CHATWOOT_AGENT_TOKENS` | JSON object, `{"<Discord user id>":"<token>"}`; optional, default `{}` | Each linked agent's own Chatwoot access token; commands act with it. |
 | `TRIAGE_HOOK_SECRET` | 32+ characters; optional | Signs the triage bot's hook ([triage bot hook](#triage-bot-hook)). Unset: the route is off. |
 
@@ -380,8 +379,8 @@ not in the relay. Deploy it with its own Chatwoot webhook and secrets. Configure
 
 The Workers coordinate only through the Chatwoot conversation the relay already fetches. Create conversation
 custom attribute definitions for `routing_seen` (**Number**), `routing_handled` (**Number**), and `routing_kind`
-(**Text**) in each routed account. If you rename them, set the router's `attributes` and the relay's
-`router.attributes` to the same names (`seen`, `handled`, `kind`). Keep them distinct from existing attributes.
+(**Text**) in each routed account. These names are fixed and reserved: `relay.linkAttribute` cannot use them.
+Watermarks accept non-negative safe integers stored as numbers or numeric strings; other values count as absent.
 
 A customer message waits while `routing_seen` is absent or below its id, even when assigned, resolved, or snoozed.
 It proceeds only once that watermark reaches its id or the message reaches `router.waitSeconds` old: assignment

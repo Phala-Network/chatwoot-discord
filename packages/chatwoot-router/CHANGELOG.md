@@ -13,6 +13,15 @@
 
 ### Fixed
 
+- Recheck customer activity before any kind action; stale decisions remain pending and are decided again with
+  the new messages, even beyond the previous three-message text window. Record status intent before acting so
+  retries can finish the router's own changes, while human closure finalizes without a reply or other action.
+- Skip blocked contacts and wait for usable text after attachment-only or redacted-only messages, without Jev
+  or automatic actions, while acknowledging them through `routing_seen`.
+- Fix coordination names to `routing_seen`, `routing_handled`, and `routing_kind`; remove attribute-name
+  configuration. Read numeric-string watermarks without lowering them on a later update.
+- Require webhook secrets for every routed account. Log and drop deleted-conversation jobs on Chatwoot's JSON
+  404 response, including during writes, while retaining backoff for other errors.
 - `routing_seen` acknowledges every processed customer message, including assigned, closed, pre-cutover,
   already-routed, and no-owner tickets, only after all applicable actions. Handled and kind attributes accompany
   the completion watermark; assignment/status changes alone cannot release the relay's wait.

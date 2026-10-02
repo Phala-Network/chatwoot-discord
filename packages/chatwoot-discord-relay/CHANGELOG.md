@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix coordination names to `routing_seen`, `routing_handled`, and `routing_kind`; remove `router.attributes`
+  and reject a `relay.linkAttribute` using a reserved name. Accept numeric-string watermarks as well as numbers.
+- Require a webhook secret for every configured account; incomplete configuration reports `/healthz` 503.
 - Only `routing_seen` completes the relay's wait for a live customer message; assignment or status changes no
   longer let a partly applied routing decision call the triage bot. The timestamp deadline and missing-timestamp
   guard remain. The router also acknowledges skipped messages, including pre-cutover tickets, without Jev.

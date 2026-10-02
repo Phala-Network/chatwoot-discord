@@ -63,7 +63,7 @@ no unpublished shared package needs installing.
   whose sender is a contact, and the relevant conversation events, queue routing; the API is re-read before acting.
 - Create the topic and kind labels in Chatwoot. Create the following **conversation** custom attribute definitions:
 
-| Default name | Type | Meaning |
+| Fixed name | Type | Meaning |
 | --- | --- | --- |
 | `routing_seen` | Number | Latest customer message id processed or skipped, written only after the decision's other actions finish. The sole routing-completion signal. |
 | `routing_handled` | Number | Latest customer message id handled by a kind's successful reply or set-aside action. |
@@ -84,7 +84,8 @@ unchanged attributes are not written again. The relay similarly repairs its miss
 Recovery is eventual, not a cross-Worker transaction. Failed writes retry rather than prematurely finishing the job.
 With the relay, set `router.accounts` there; its default wait is 30 seconds from each customer's message time.
 Assignment and status changes never release that wait; only `routing_seen` or the timeout does.
-Its `router.attributes` must match this package's `attributes` when using custom names.
+The three attribute names are fixed. The relay's link attribute must not use any of them.
+Watermarks accept non-negative safe integers stored as numbers or numeric strings; other values count as absent.
 
 ## Configuration reference
 
@@ -113,9 +114,6 @@ Its `router.attributes` must match this package's `attributes` when using custom
 | --- | --- | --- | --- |
 | `chatwoot.baseUrl` | HTTP(S) URL | required | Final Chatwoot API URL; redirects are refused. |
 | `startAfterConversationId` | object: routed account id → integer ≥ 0 | `{}` | Each account's conversation display id at cutover; omitted accounts default to `0`. At or below it, routing actions and Jev are skipped, but customer messages still advance `routing_seen`. |
-| `attributes.seen` | non-empty string | `routing_seen` | Completion watermark for processed or skipped customer messages. |
-| `attributes.handled` | non-empty string | `routing_handled` | Handled watermark attribute. |
-| `attributes.kind` | non-empty string | `routing_kind` | Kind label attribute. The three names must be distinct. |
 | `reconcile.lookbackSeconds` | integer ≥ 60 | `3600` | Minimum activity window for the five-minute sweep. |
 | `reconcile.maxCatchUpSeconds` | integer ≥ 60 | `604800` | Maximum activity window after downtime. |
 | `subrequestBudget` | integer 20–1000 | `45` | Per-alarm outbound budget; keep under your Workers plan's limit. |
@@ -137,7 +135,7 @@ Its `router.attributes` must match this package's `attributes` when using custom
 | Secret | Required | Meaning |
 | --- | --- | --- |
 | `CHATWOOT_TOKEN` | Yes | Chatwoot agent/admin access token for reading and applying decisions. |
-| `CHATWOOT_WEBHOOK_SECRETS` | Yes | JSON object of webhook secrets by routed account id. |
+| `CHATWOOT_WEBHOOK_SECRETS` | Yes | JSON object with a webhook secret for every routed account id. Missing entries fail configuration validation and `/healthz` returns 503. |
 | `TYPESAFE_API_KEY` | Yes | TypeSafe Jev API key. |
 | `CHATWOOT_BOT_TOKENS` | For kinds that reply | JSON object of Chatwoot agent bot tokens by account id; default `{}`. |
 
@@ -174,6 +172,21 @@ as it is after Jev answered: an assignee or topic label someone set meanwhile is
 with `CHATWOOT_TOKEN`, whose user must be an agent in the routed inboxes; Chatwoot records the
 assignment as made by that user. The sweep queues routing for open, unassigned tickets in its
 window, so a missed webhook only delays it.
+
+Blocked contacts are skipped without Jev, assignment, or replies, including if blocked while Jev answers;
+their messages still advance `routing_seen`. Attachment-only messages and text containing only redacted
+identifiers likewise advance `routing_seen`, but wait for text in a later customer message without Jev,
+a kind, or snoozing. The text window starts after those empty messages.
+
+Before any kind action, the router checks for customer messages arriving during the decision, using the same
+bounded freshness check as unclear-ticket snoozing. A stale decision stays pending for the next webhook or
+sweep to decide again, not finalized or applied. If all three messages in that decision were consumed,
+the next text window starts after them so the new request is included. As with snoozing, a message arriving
+between the final check and an action cannot be excluded atomically by Chatwoot's API.
+
+If a person resolves or snoozes while Jev answers, the router finalizes without replying or changing the ticket,
+then writes `routing_seen`. Status intent is recorded in the decision before the router's own status action,
+so a retry can finish a status change whose response was lost without mistaking it for human intervention.
 
 With `kinds`, Jev is also asked which of the account's kinds the ticket is (or `none`). Kinds are
 labels of a second family: a ticket has one topic label, the category, and a kind Jev is confident
@@ -220,6 +233,8 @@ subject) are Chatwoot's automation rules.
 The Worker acknowledges after a SQLite job is queued. Alarms serialize decisions, preserve work across failures,
 and retry with exponential backoff capped at 30 minutes. The subrequest budget reserves 19 requests for the
 worst-case route and yields to a fresh invocation before starting work it cannot finish.
+Chatwoot's conversation-not-found response (JSON HTTP 404) is logged and the job is dropped, including a deletion
+during a write. Other failures, including proxy errors and account-level API failures, keep their backoff.
 A sweep every five minutes pages **all statuses**, newest activity first, using the same shared Chatwoot client
 and pass-window/cursor logic as the relay. It queues routing for open, unassigned tickets and attribute-only
 repair wherever the conversation's attributes are behind its recorded completion, regardless of status.
