@@ -68,7 +68,7 @@ with fictional data.*
 ```
 Chatwoot ──webhook──▶ Worker ──▶ Hub Durable Object ──▶ Discord forum post (via webhook)
 Discord ─/command───▶ Worker ──▶ Hub Durable Object ──▶ Chatwoot REST API (as that agent)
-Cron (every 5 min) ─▶ Worker ──▶ Hub Durable Object ──▶ sweep: repair anything missed
+Cron (every 5 min) ─▶ Worker ──▶ Hub Durable Object ──▶ sweep: catch up messages and conversation state
 ```
 
 - Each conversation gets one forum post, titled `[<Account> #<id>] <customer> — <subject or first message>`.
@@ -99,6 +99,14 @@ Cron (every 5 min) ─▶ Worker ──▶ Hub Durable Object ──▶ sweep: r
   and hourly budgets are recorded per message, so Discord retries keep the same notification/source association.
   History and automatic customer email stay silent. A later delivery failure produces the existing notice without
   retrospective triage after the notification decision.
+- Answer detection is best effort if an update webhook is lost. Chatwoot sends account webhooks once without
+  retry. If a failed reply on an already-scanned page becomes sent and its `message_updated` is lost, the unfinished
+  scan can miss that answer. The sweep retains the scan cursor, so requeuing the conversation does not recover
+  the skipped update, even before the first Discord post. Chatwoot's messages API exposes current state by message
+  ID, not changes since the last read: the retry keeps the same ID, and there is no update cursor for skipped pages.
+  Rereading the reply would show its new status, but the resumed scan has no signal to do so. The customer message
+  is still relayed; the impact is at most one extra triage call per affected customer message, within the existing
+  notification budgets. Its recorded notification decision is not revised retrospectively.
 - A human sends the proposed draft with **Reply with draft** or **Apps → Reply with this**. `/pending` assigns
   the current inbox's account bot with `assignee_type: AgentBot`, clearing the person and starting a pending turn;
   in an unlinked inbox it uses ordinary pending status. Manage preserves labels in `router.keepLabels`.
@@ -113,7 +121,8 @@ These contracts use Chatwoot v4.18.0's
 [assignee presenter](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/presenters/conversations/event_data_presenter.rb),
 [message types/reopen behavior](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/models/message.rb),
 [reply retries](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/controllers/api/v1/accounts/conversations/messages_controller.rb),
-[update webhooks](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/listeners/webhook_listener.rb), and
+[update webhooks](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/listeners/webhook_listener.rb),
+[webhook delivery](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/lib/webhooks/trigger.rb), and
 [message paging](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/finders/message_finder.rb).
 
 Design choices:
@@ -139,7 +148,7 @@ Design choices:
   already answered. Messages from blocked contacts are never relayed.
 - **Reliable by construction.** Chatwoot sends each webhook once, without retry, so webhooks are
   only triggers: the Worker queues the work durably in one Durable Object, which reads Chatwoot's
-  API, retries failed work until it succeeds, and sweeps every 5 minutes for anything missed
+  API, retries failed work until it succeeds, and sweeps every 5 minutes for missed messages and conversation state
   ([Internals](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/docs/internals.md) says what the sweep does not cover).
 
 ## Deploy

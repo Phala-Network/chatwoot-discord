@@ -62,7 +62,12 @@ continuing where it stopped, and queues any conversation whose post is behind or
 state differ. Activity means a new message. A change without one (for example only the topic
 attribute) relies on its webhook, and so do deletions, responses, and delivery failures of
 messages already relayed: the sweep does not re-read relayed messages, so a missed webhook for
-one is not repaired. Neither does it read the post back from Discord: a title, tag, or archived
+one is not repaired. The sweep also retains unfinished answer-scan cursors: a lost update webhook for a failed
+reply retried as sent on a skipped page is not recovered, even before the customer's first post. Chatwoot's
+message API pages by ID without an update cursor; the retry keeps its ID. This can cause at most one extra
+triage call per affected customer message, within notification budgets, without losing the message. See the
+README's [How it works](../README.md#how-it-works) for the notification contract.
+Neither does it read the post back from Discord: a title, tag, or archived
 flag changed by hand in Discord stays until the conversation changes.
 
 ## Message order
