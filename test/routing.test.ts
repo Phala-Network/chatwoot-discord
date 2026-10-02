@@ -583,11 +583,11 @@ describe("sanitize", () => {
     const text =
       "from 2001:db8::1, 2001:db8:1234::192.0.2.1, ::ffff:198.51.100.7, and fe80::1%eth0 at 10:30:00 " +
       "(MAC aa:bb:cc:dd:ee:ff, v1.2.3.4, build 1.2.3.4.5, std::vec). My IP is 10.1.2.3. " +
-      "remote_addr:203.0.113.8 ip:2001:db8::1 upstream 198.51.100.7:443";
+      "remote_addr:203.0.113.8 ip:2001:db8::1 upstream 198.51.100.7:443 client:198.51.100.9:http fe80::1:abcd";
     expect(sanitize(text, [])).toBe(
       "from [REDACTED], [REDACTED], [REDACTED], and [REDACTED] at 10:30:00 " +
         "(MAC aa:bb:cc:dd:ee:ff, v1.2.3.4, build 1.2.3.4.5, std::vec). My IP is [REDACTED]. " +
-        "remote_addr:[REDACTED] ip:[REDACTED] upstream [REDACTED]:443",
+        "remote_addr:[REDACTED] ip:[REDACTED] upstream [REDACTED]:443 client:[REDACTED]:http [REDACTED]",
     );
   });
 });
