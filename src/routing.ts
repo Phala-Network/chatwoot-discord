@@ -75,9 +75,12 @@ const REDACTIONS = [
   /(?<![1-9A-HJ-NP-Za-km-z])[1-9A-HJ-NP-Za-km-z]{32,64}(?![1-9A-HJ-NP-Za-km-z])/g, // base58 addresses
   /(?<![A-Za-z0-9_+/=-])[A-Za-z0-9_+/=-]{40,}(?![A-Za-z0-9_+/=-])/g, // keys and tokens
   /(?<!\w)\+?\d[\d ()-]{8,}\d(?!\w)/g, // phone numbers
-  // IPv4 and IPv6 (with a zone id), also after `key:` and before `:port`, but not inside a word, a
-  // version number, or a path such as std::io.
-  new RegExp(`(?<!\\w|\\d\\.)(?:${ipRegex().source})(?!\\w|\\.\\d|:(?!\\d))`, "g"),
+  // IPv6 (with a zone id), whole: not inside a word or a path such as std::io, and not followed by a
+  // colon (an address with a port is bracketed). Before IPv4, which an IPv6 address may end with.
+  new RegExp(`(?<!\\w)(?:${ipRegex.v6().source})(?![\\w:])`, "g"),
+  // IPv4, also after `key:` and before `:port`, but not inside a word or a longer dotted number (a
+  // four-part version number reads as an address and is redacted too).
+  new RegExp(`(?<!\\w|\\d\\.)(?:${ipRegex.v4().source})(?!\\w|\\.\\d)`, "g"),
   /(?<!\w)@[A-Za-z0-9_.-]{2,}/g, // handles
 ];
 

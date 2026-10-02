@@ -386,7 +386,7 @@ has a customer message. The Worker asks Jev multiple-choice questions, who owns 
 of the account's owners, or `unclear`) and its topic (with `topics`), plus its kind (with `kinds`)
 and whether the customer asks for anything yet (with `snoozeUnclear`), using the email subject and
 the first three customer messages. Before they leave the Worker, emails, URLs, hex and base58 addresses, long
-tokens, phone numbers, IP addresses, @handles, and the contact's name (each word of two characters or more) are replaced with
+tokens, phone numbers, IP addresses (and four-part version numbers, which read as one), @handles, and the contact's name (each word of two characters or more) are replaced with
 `[REDACTED]`. This is best-effort redaction of common identifiers, not anonymization: other personal
 details in the text still reach TypeSafe, so check that its data policy suits you. An owner at
 `minConfidence` or above is assigned, and a topic at or above it is added as a label when the ticket
