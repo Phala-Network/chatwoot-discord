@@ -42,7 +42,8 @@
     "lib/shared",
     "CHANGELOG.md",
     "LICENSE",
-    "docs/assets"
+    "docs/assets",
+    "docs/adoption.md"
   ],
   "packageManager": "npm@12.1.0",
   "engines": {

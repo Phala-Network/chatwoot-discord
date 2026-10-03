@@ -50,6 +50,11 @@ export class Budget {
     this.used += 1;
   }
 
+  require(requests: number): void {
+    this.checkpoint();
+    if (this.remaining < requests) throw new BudgetExhaustedError();
+  }
+
   controlSignal(ms: number): AbortSignal {
     return AbortSignal.any([AbortSignal.timeout(ms), ...(this.slice ? [this.slice] : [])]);
   }

@@ -4,10 +4,15 @@ import { ComponentType, MessageFlags } from "discord-api-types/v10";
 import { afterEach, expect, it, vi } from "vitest";
 import { Budget } from "../../../shared/budget.ts";
 import { chatwootClient } from "../../../shared/chatwoot/api.ts";
-import { type AdoptionCut, cleanLegacyCards, validateCut, verifyLinks } from "../src/adoption.ts";
+import { type AdoptionCut, cleanLegacyCards, stageAdoption, validateCut, verifyLinks } from "../src/adoption.ts";
 import { ticketCard } from "../src/commands/components.ts";
+import { configSchema } from "../src/config.ts";
+import { Conversation } from "../src/conversation.ts";
+import { DiscordForum } from "../src/discord/forum.ts";
 import { DiscordRest } from "../src/discord/rest.ts";
+import { legacyInventory } from "../src/legacy.ts";
 import { Store } from "../src/store.ts";
+import legacySchema from "./fixtures/legacy-027.ts";
 import { FORUM, json, mockFetch, on } from "./helpers.ts";
 
 const GUILD = "100000000000000044";
@@ -46,6 +51,205 @@ const cut = (): AdoptionCut => ({
   ],
 });
 afterEach(() => vi.restoreAllMocks());
+
+it("retries interrupted staging with its complete response baseline instead of an empty idempotent receipt", async () => {
+  await runInDurableObject(env.CONVERSATION.getByName(`stage-fault:${crypto.randomUUID()}`), (_instance, state) => {
+    const owner = { accountId: 3, conversationId: 12, guildId: GUILD, forumId: FORUM, generation: 2 };
+    const responses = [{ messageId: 99, digest: "a".repeat(64) }];
+    const executor = new Conversation(state, env);
+    // Fail after the stage marker's write, at the next meaningful durable baseline write.
+    state.storage.sql.exec(
+      "CREATE TRIGGER interrupted_stage BEFORE INSERT ON submitted_responses BEGIN SELECT RAISE(ABORT, 'interrupted baseline'); END",
+    );
+    expect(() => executor.stage(owner, THREAD, "fault-cut", 101, responses)).toThrow();
+    state.storage.sql.exec("DROP TRIGGER interrupted_stage");
+    new Conversation(state, env).stage(owner, THREAD, "fault-cut", 101, responses);
+    expect(new Store(state.storage.sql).postedResponse(3, 12, 99)).toBe(responses[0]?.digest);
+  });
+});
+
+it("never recreates an accepted thread when its local receipt and mapping transaction fails", async () => {
+  let posts = 0;
+  mockFetch(
+    on("POST", "discord.com/api/v10/webhooks/1/tok", () => {
+      posts++;
+      return json({ id: "100000000000070000", channel_id: "100000000000070001" });
+    }),
+  );
+  await runInDurableObject(env.CONVERSATION.getByName(`receipt:${crypto.randomUUID()}`), async (_instance, state) => {
+    const store = new Store(state.storage.sql, Date.now, (write) => state.storage.transactionSync(write));
+    const rest = new DiscordRest("test", (request) => fetch(request));
+    const access = {
+      lookup: async () => ({ id: "1", token: "tok", guildId: GUILD, version: 1 }),
+      invalidate: async () => {},
+    };
+    let forum = new DiscordForum(rest, store, access);
+    const result = await forum.execute(
+      FORUM,
+      { content: "Header", thread_name: "Ticket" },
+      undefined,
+      "post:receipt",
+      (receipt) => {
+        store.adoptThread(3, 12, receipt.channelId);
+        throw new Error("local commit interrupted");
+      },
+    );
+    expect(result.state).toBe("unknown");
+    expect(store.conversation(3, 12)?.threadId).toBeUndefined();
+    forum = new DiscordForum(rest, new Store(state.storage.sql), access);
+    expect(
+      (await forum.execute(FORUM, { content: "Header", thread_name: "Ticket" }, undefined, "post:receipt")).state,
+    ).toBe("unknown");
+  });
+  expect(posts).toBe(1);
+});
+
+it("inventories the actual 0.27 schema, silent posts, orphan partial work and numeric interaction fence", async () => {
+  await runInDurableObject(env.THREAD_DIRECTORY.getByName(`inventory:${crypto.randomUUID()}`), (_instance, state) => {
+    state.storage.sql.exec(legacySchema);
+    for (let id = 1; id <= 101; id++)
+      state.storage.sql.exec(
+        "INSERT INTO conversations (account_id,conversation_id,thread_id,cursor) VALUES (3,?,?,100)",
+        id,
+        String(100000000000040000n + BigInt(id)),
+      );
+    state.storage.sql.exec("INSERT INTO interactions VALUES ('99',0), ('100',0)");
+    state.storage.sql.exec("INSERT INTO posted_messages VALUES (3,999,101,0,'100000000000000101')");
+    const page = legacyInventory(state.storage.sql);
+    expect(page.mappings).toHaveLength(100);
+    expect(page.complete).toBe(false);
+    expect(page.interactionFence).toBe("100");
+    expect(page.partial).toBe(1);
+    const end = legacyInventory(state.storage.sql, page.next);
+    expect(end.mappings.map((mapping) => mapping.conversationId)).toEqual([101]);
+    expect(end.complete).toBe(true);
+  });
+});
+
+it("prebuilds a silent thread directory and resumes the same cut after a lost staging receipt", async () => {
+  const manifest = cut();
+  manifest.epoch = crypto.randomUUID();
+  manifest.mappings[0] = {
+    ...manifest.mappings[0],
+    accountId: 3,
+    conversationId: 123456,
+    threadId: "100000000000045678",
+    guildId: GUILD,
+    forumId: FORUM,
+    generation: 1,
+    cursor: 101,
+    latestEligibleId: 101,
+    responses: [],
+  };
+  const settings = {
+    ...configSchema.parse(env.CONFIG),
+    relay: { ...configSchema.parse(env.CONFIG).relay, startAfterMessageId: 101 },
+    cutover: {
+      phase: "maintenance" as const,
+      epoch: manifest.epoch,
+      interactionFence: manifest.interactionFence,
+      notificationsAfter: Date.now() + 3600000,
+      legacyWebhooks: { [FORUM]: ["100000000000000001"] },
+    },
+  };
+  const namespace = new Proxy(env.CONVERSATION, {
+    get(target, property, receiver) {
+      if (property === "getByName")
+        return (name: string) =>
+          new Proxy(target.getByName(name), {
+            get(stub, key, stubReceiver) {
+              if (key === "stage")
+                return async (...args: Parameters<Conversation["stage"]>) => {
+                  await stub.stage(...args);
+                  throw new Error("lost staging receipt");
+                };
+              return Reflect.get(stub, key, stubReceiver);
+            },
+          });
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  await expect(stageAdoption({ ...env, CONFIG: settings, CONVERSATION: namespace }, manifest)).rejects.toThrow();
+  await stageAdoption({ ...env, CONFIG: settings }, manifest);
+  const owner = await env.THREAD_DIRECTORY.getByName(`thread:v1:${manifest.mappings[0]?.threadId}`).get();
+  expect(owner?.conversationId).toBe(123456);
+  expect(owner?.generation).toBe(1);
+  await expect(
+    stageAdoption({ ...env, CONFIG: { ...settings, cutover: { ...settings.cutover, phase: "active" } } }, manifest),
+  ).rejects.toThrow();
+});
+
+it("adopts once after cleanup restart and never recreates a new card whose POST was accepted without a receipt", async () => {
+  const settings = configSchema.parse(env.CONFIG);
+  const epoch = crypto.randomUUID();
+  const owner = { accountId: 3, conversationId: 34567, guildId: GUILD, forumId: FORUM, generation: 1 };
+  const thread = "100000000000056789";
+  const activeEnv = {
+    ...env,
+    CONFIG: {
+      ...settings,
+      relay: { ...settings.relay, startAfterMessageId: 101 },
+      cutover: {
+        phase: "active" as const,
+        epoch,
+        interactionFence: "100",
+        notificationsAfter: Date.now() + 3600000,
+        legacyWebhooks: { [FORUM]: ["100000000000000001"] },
+      },
+    },
+  };
+  let history = 0;
+  let cards = 0;
+  const { requests } = mockFetch(
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/34567", () =>
+      json({
+        id: 34567,
+        status: "resolved",
+        inbox_id: 2,
+        custom_attributes: { discord_thread: `https://discord.com/channels/${GUILD}/${thread}` },
+        messages: [],
+      }),
+    ),
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/34567/messages", () => json({ payload: [] })),
+    on("GET", `discord.com/api/v10/channels/${thread}`, () => json({ id: thread, guild_id: GUILD, parent_id: FORUM })),
+    on("GET", `discord.com/api/v10/channels/${thread}/messages`, () => {
+      history++;
+      return json([]);
+    }),
+    on("PATCH", `discord.com/api/v10/channels/${thread}`, () => json({})),
+    on("POST", "discord.com/api/v10/webhooks/1/tok", () => {
+      cards++;
+      return json({}, { status: 500 });
+    }),
+  );
+  // Ready discovery is local; adoption must not execute a second forum discovery.
+  await runInDurableObject(env.FORUM_REGISTRY.getByName(`forum:v1:${FORUM}`), (_instance, state) => {
+    state.storage.sql.exec(
+      "INSERT OR REPLACE INTO cache VALUES ('ready', ?, NULL)",
+      JSON.stringify({ id: "1", token: "tok", guildId: GUILD, version: 1 }),
+    );
+  });
+  await runInDurableObject(env.CONVERSATION.getByName(`adopt:${epoch}`), async (_instance, state) => {
+    vi.spyOn(state.storage, "setAlarm").mockResolvedValue();
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const ctx = state;
+    let executor = new Conversation(ctx, activeEnv);
+    executor.stage(owner, thread, epoch, 101, []);
+    await executor.enqueueConversation(3, 34567);
+    for (let i = 0; i < 5; i++) {
+      await executor.alarm();
+      now += 6000;
+      executor = new Conversation(ctx, activeEnv);
+      await executor.enqueueConversation(3, 34567);
+    }
+  });
+  expect(history).toBe(1);
+  expect(cards).toBe(1);
+  expect(requests.some((request) => request.method === "PATCH" && JSON.parse(request.body).archived === true)).toBe(
+    true,
+  );
+});
 
 it("rejects A100 unfinished/B101 sent, held/partial work, unresolved sends and missing inventory", () => {
   expect(() => validateCut(cut())).not.toThrow();

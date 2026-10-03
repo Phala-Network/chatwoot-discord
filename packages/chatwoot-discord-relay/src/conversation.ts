@@ -30,20 +30,14 @@ import { downloadAttachment } from "./commands/attachments.ts";
 import { text } from "./commands/components.ts";
 import { type HandlerResult, handleInteraction } from "./commands/handler.ts";
 import { type CommandJob, commandJobSchema } from "./commands/job.ts";
-import { relaysInbox, type Settings } from "./config.ts";
+import type { Settings } from "./config.ts";
 import { control, type ThreadOwner } from "./control.ts";
 import { DiscordForum } from "./discord/forum.ts";
 import { DiscordLimiter } from "./discord/limiter.ts";
 import { DiscordHttpError, DiscordRest } from "./discord/rest.ts";
 import { Effects } from "./effects.ts";
 import type { Env } from "./env.ts";
-import {
-  latestMessageId,
-  type ProcessorContext,
-  processConversation,
-  refreshMetadata,
-  relayFor,
-} from "./relay/processor.ts";
+import { type ProcessorContext, processConversation, refreshMetadata, relayFor } from "./relay/processor.ts";
 import { processMessageUpdate } from "./relay/updates.ts";
 import { loadSettings } from "./settings.ts";
 import { type Job, Store } from "./store.ts";
@@ -84,7 +78,6 @@ const PRIORITY = {
   "message-updated": 2,
   metadata: 5,
 } as const;
-/** Requests a job may need before it can start without being cut short. */
 /** Commands that change nothing in Chatwoot: their post needs no sync. */
 const READ_ONLY_ACTIONS: ReadonlySet<string> = new Set(["panel", "pick-assignee"]);
 /** A job that takes longer than this is logged, to tell a slow upstream from a busy queue. */
@@ -99,14 +92,13 @@ const COMMAND_START_DEADLINE_MS = 12 * 60 * 1000;
 const EXPIRED = "❌ This could not start in time, so nothing was done. Please try again.";
 /** How long a triage answer's draft is kept for Reply with draft, and the answer remembered. */
 const ANSWER_TTL_MS = 14 * 24 * 60 * 60 * 1000;
-/** How long the support queue may be posted after it is due: Discord's nonce check covers a few minutes. */
 
 export class Conversation extends DurableObject<Env> {
   private readonly store: Store;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.store = new Store(ctx.storage.sql);
+    this.store = new Store(ctx.storage.sql, Date.now, (write) => ctx.storage.transactionSync(write));
     this.store.migrate();
   }
 
@@ -124,8 +116,8 @@ export class Conversation extends DurableObject<Env> {
     if (existing === stage) return;
     if (this.store.conversation(owner.accountId, owner.conversationId)?.threadId)
       throw new Error("Adoption target already active");
-    this.store.set("adoption:stage", stage);
     this.ctx.storage.transactionSync(() => {
+      this.store.set("adoption:stage", stage);
       this.store.set("generation", String(owner.generation));
       for (const response of responses) {
         this.store.savePostedResponse(owner.accountId, owner.conversationId, response.messageId, response.digest);
@@ -173,6 +165,8 @@ export class Conversation extends DurableObject<Env> {
     const saved = this.store.get(`admission:${interaction.id}`);
     if (saved) return JSON.parse(saved);
     const settings = await loadSettings(this.env);
+    if (settings.config.cutover && !row?.threadId && !this.store.get("adoption:stage"))
+      throw new Error("Thread adoption is not staged");
     const modalBoundary = JSON.stringify({
       generation: owner.generation,
       epoch: settings.config.cutover?.epoch ?? "initial",
@@ -238,10 +232,6 @@ export class Conversation extends DurableObject<Env> {
     this.store.set(answerKey(answerId), draft, ANSWER_TTL_MS);
     this.enqueue({ type: "answer", ...ticket, answerId, replyTo });
     await scheduleAlarm(this.ctx, this.store.nextWakeup());
-  }
-
-  async ticketForThread(threadId: string): Promise<{ accountId: number; conversationId: number } | null> {
-    return this.store.ticketForThread(threadId) ?? null;
   }
 
   /** Cloudflare runs at most one alarm() at a time per Durable Object. */
@@ -336,7 +326,13 @@ export class Conversation extends DurableObject<Env> {
               conversationId: stage.owner.conversationId,
             });
           });
-        } else this.store.set("adoption:complete", "new");
+        } else {
+          const [accountId, conversationId] = (this.store.get("owner") ?? "").split(":").map(Number);
+          const raw = await services.chatwoot.getConversation(accountId ?? 0, conversationId ?? 0);
+          if (raw?.custom_attributes?.[services.settings.config.relay.linkAttribute])
+            throw new Error("Existing thread was not staged for adoption");
+          this.store.set("adoption:complete", "new");
+        }
       }
       switch (payload.type) {
         case "command": {

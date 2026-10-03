@@ -72,7 +72,7 @@ app.post("/chatwoot/webhook", bodyLimit({ maxSize: 2 * 1024 * 1024 }), async (c)
 });
 
 // The triage bot's hook, signed like Chatwoot's webhooks: its answer `answerId` to message
-// `replyTo` is in the post `threadId`, with the reply `draft` it proposes (see Hub.triageAnswered).
+// `replyTo` is in the post `threadId`, with the reply `draft` it proposes (see Conversation.triageAnswered).
 const answerSchema = z.strictObject({
   threadId: z.string().regex(/^\d{17,20}$/),
   answerId: z.string().regex(/^\d{17,20}$/),
@@ -99,11 +99,13 @@ app.post("/triage/answered", bodyLimit({ maxSize: 64 * 1024 }), async (c) => {
   }
   const owner = await control(undefined, () => c.env.THREAD_DIRECTORY.getByName(`thread:v1:${answer.threadId}`).get());
   if (!owner || !(await loadSettings(c.env)).account(owner.accountId)) return c.text("unknown thread", 404);
-  await conversation(c.env, owner.accountId, owner.conversationId).triageAnswered(
-    answer.threadId,
-    answer.answerId,
-    answer.replyTo,
-    answer.draft,
+  await control(undefined, () =>
+    conversation(c.env, owner.accountId, owner.conversationId).triageAnswered(
+      answer.threadId,
+      answer.answerId,
+      answer.replyTo,
+      answer.draft,
+    ),
   );
   return c.json({ ok: true });
 });
@@ -177,16 +179,22 @@ const handler = {
     const settings = await loadSettings(env);
     if (settings.config.cutover?.phase === "maintenance") return;
     for (const account of settings.config.accounts)
-      ctx.waitUntil(env.ACCOUNT_SWEEP.getByName(`account:v1:${account.id}`).request(account.id));
+      ctx.waitUntil(
+        control(undefined, () => env.ACCOUNT_SWEEP.getByName(`account:v1:${account.id}`).request(account.id)),
+      );
     for (const forumId of new Set(settings.config.accounts.map((account) => account.forumChannelId)))
-      ctx.waitUntil(env.FORUM_REGISTRY.getByName(`forum:v1:${forumId}`).lookup(forumId));
+      ctx.waitUntil(control(undefined, () => env.FORUM_REGISTRY.getByName(`forum:v1:${forumId}`).lookup(forumId)));
     const queue = settings.config.queue;
     if (
       queue &&
       new Date(controller.scheduledTime).getUTCMinutes() === 0 &&
       controller.scheduledTime >= (settings.config.cutover?.notificationsAfter ?? 0)
     )
-      ctx.waitUntil(env.QUEUE_DIGEST.getByName(`digest:v1:${queue.channelId}`).request(controller.scheduledTime));
+      ctx.waitUntil(
+        control(undefined, () =>
+          env.QUEUE_DIGEST.getByName(`digest:v1:${queue.channelId}`).request(controller.scheduledTime),
+        ),
+      );
   },
 } satisfies ExportedHandler<Env>;
 

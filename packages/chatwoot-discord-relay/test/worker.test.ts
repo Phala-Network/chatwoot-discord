@@ -13,9 +13,13 @@ import { z } from "zod";
 import { Budget, JobDeadlineError } from "../../../shared/budget.ts";
 import { chatwootClient } from "../../../shared/chatwoot/api.ts";
 import type { CommandJob } from "../src/commands/job.ts";
+import { configSchema } from "../src/config.ts";
 import { conversation } from "../src/control.ts";
+import { QueueDigest } from "../src/digest.ts";
+import { DiscordLimiter } from "../src/discord/limiter.ts";
 import { DiscordRest } from "../src/discord/rest.ts";
 import worker from "../src/index.ts";
+import { ForumRegistry } from "../src/registry.ts";
 import { processConversation, relayFor } from "../src/relay/processor.ts";
 import { loadSettings } from "../src/settings.ts";
 import { Store } from "../src/store.ts";
@@ -1341,7 +1345,9 @@ describe("worker", () => {
     try {
       // A slow page must not hold a different conversation's command or feedback.
       await vi.waitFor(() => expect(world.sent("POST", /\/toggle_status$/)).toHaveLength(1));
-      await vi.waitFor(() => expect(world.sent("PATCH", /interaction-token\/messages\/(@|%40)original$/)).toHaveLength(1));
+      await vi.waitFor(() =>
+        expect(world.sent("PATCH", /interaction-token\/messages\/(@|%40)original$/)).toHaveLength(1),
+      );
       expect(world.requests.filter(isPage)).toHaveLength(1);
     } finally {
       release();
@@ -1692,6 +1698,413 @@ it("measures command feedback behind a slow conversation", async () => {
   releaseSlow();
   await drain();
 });
+
+it.for(["baseline", "headers", "body", "discord"] as const)(
+  "measures thirty warm independent conversations while A blocks %s",
+  { timeout: 60000 },
+  async (mode, context) => {
+    const samples: Array<{ ack: number; queue: number; action: number; feedback: number; firstPost: number }> = [];
+    for (let sample = 0; sample < 30; sample++) {
+      world.mock.spy.mockRestore();
+      const a = 900000 + sample;
+      const b = 910000 + sample;
+      const accountId = sample % 2 ? 1 : 3;
+      const aThread = nextThreadId();
+      const bThread = nextThreadId();
+      let blocked = false;
+      let upstreamAborted = false;
+      let released = false;
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = () => {
+          released = true;
+          resolve();
+        };
+      });
+      let action = 0;
+      let feedback = 0;
+      let firstPost = 0;
+      let jobStartedAt = 0;
+      const bRaw = {
+        id: b,
+        status: "open",
+        inbox_id: 2,
+        custom_attributes: {},
+        messages: [{ id: b }],
+        meta: { sender: { name: "Fixture" } },
+      };
+      const aRaw = {
+        id: a,
+        status: "open",
+        inbox_id: 2,
+        custom_attributes: {},
+        messages: mode === "discord" ? [{ id: a }] : [],
+      };
+      world = new World([
+        on("GET", `chatwoot.example.com/api/v1/accounts/3/conversations/${a}`, async (request) => {
+          if (mode === "headers" || mode === "body")
+            request.signal.addEventListener(
+              "abort",
+              () => {
+                upstreamAborted = true;
+              },
+              { once: true },
+            );
+          if (mode === "headers") {
+            blocked = true;
+            await gate;
+          }
+          if (mode === "body") {
+            let canceled = false;
+            return new Response(
+              new ReadableStream<Uint8Array>({
+                start(controller) {
+                  blocked = true;
+                  void gate.then(() => {
+                    if (!canceled) {
+                      controller.enqueue(encoder.encode(JSON.stringify(aRaw)));
+                      controller.close();
+                    }
+                  });
+                },
+                cancel() {
+                  canceled = true;
+                },
+              }),
+            );
+          }
+          return json(aRaw);
+        }),
+        on("GET", `chatwoot.example.com/api/v1/accounts/${accountId}/conversations/${b}`, () => json(bRaw)),
+        on("GET", `chatwoot.example.com/api/v1/accounts/${accountId}/conversations/${b}/messages`, (request) =>
+          json({
+            payload:
+              Number(request.url.searchParams.get("after") ?? 0) >= b
+                ? []
+                : [{ id: b, content: "Fixture body", message_type: 0 }],
+          }),
+        ),
+        on("GET", "chatwoot.example.com/api/v1/profile", () => {
+          jobStartedAt = Date.now();
+          return json({ id: 42, accounts: [{ id: 3 }, { id: 1 }] });
+        }),
+        on("GET", `chatwoot.example.com/api/v1/accounts/${accountId}/inboxes/2`, () =>
+          json({ id: 2, name: "Fixture inbox" }),
+        ),
+        on("POST", `chatwoot.example.com/api/v1/accounts/${accountId}/conversations/${b}/custom_attributes`, () => {
+          bRaw.custom_attributes = { discord_thread: `https://discord.com/channels/${GUILD}/${bThread}` };
+          return json({});
+        }),
+        on("POST", `chatwoot.example.com/api/v1/accounts/${accountId}/conversations/${b}/toggle_status`, () => {
+          action = performance.now();
+          return json({});
+        }),
+        on(
+          "PATCH",
+          new RegExp(`^discord.com/api/v10/webhooks/100000000000000001/measure-${sample}/messages/(@|%40)original$`),
+          () => {
+            feedback = performance.now();
+            return json({});
+          },
+        ),
+        (request) => {
+          if (request.method !== "POST" || request.url.pathname !== "/api/v10/webhooks/1/tok") return undefined;
+          const thread = request.url.searchParams.get("thread_id");
+          if (thread === bThread && String(JSON.parse(request.body).content).startsWith("Fixture body"))
+            firstPost ||= performance.now();
+          if (
+            mode !== "discord" ||
+            thread !== aThread ||
+            !String(JSON.parse(request.body).content).startsWith("A fixture")
+          )
+            return undefined;
+          blocked = true;
+          request.signal.addEventListener(
+            "abort",
+            () => {
+              upstreamAborted = true;
+            },
+            { once: true },
+          );
+          // The server accepted the post; response loss must never cause a second POST.
+          return gate.then(() => json({}, { status: 500 }));
+        },
+      ]);
+      world.conversation(a, mode === "discord" ? [{ id: a, content: "A fixture", message_type: 0 }] : []);
+      world.threads.set(aThread, FORUM);
+      world.threads.set(bThread, FORUM);
+      await runInDurableObject(hub(a), (_instance, state) => {
+        new Store(state.storage.sql).adoptThread(3, a, aThread);
+        new Store(state.storage.sql).setCursor(3, a, 0);
+      });
+      await runInDurableObject(hub(b, accountId), async (_instance, state) => {
+        const store = new Store(state.storage.sql);
+        store.adoptThread(accountId, b, bThread);
+        store.setCursor(accountId, b, 0);
+        // Learn the real fake webhook capacity before measuring a concurrent in-flight POST.
+        const budget = new Budget(45);
+        const rest = new DiscordRest("test-bot-token", budget.fetch, new DiscordLimiter(store, env, budget));
+        await vi.waitFor(
+          async () => {
+            await rest.post("/webhooks/1/tok", { body: { thread_name: "Warm", content: "Warm" }, auth: false });
+          },
+          { timeout: 3000, interval: 50 },
+        );
+      });
+      const signed = await signedInteraction(
+        {
+          id: String(100000000000200000n + BigInt(sample)),
+          application_id: "100000000000000001",
+          token: `measure-${sample}`,
+          type: 2,
+          channel_id: bThread,
+          channel: { id: bThread, type: 11 },
+          member: { user: { id: ALICE } },
+          data: { type: 1, name: "resolve" },
+        },
+        Math.floor(Date.now() / 1000),
+      );
+      if (mode !== "baseline") {
+        await hub(a).enqueueConversation(3, a);
+        await vi.waitFor(() => expect(blocked).toBe(true), { interval: 5, timeout: 3000 });
+      }
+      const started = performance.now();
+      try {
+        const response = await call(signed());
+        const ack = performance.now() - started;
+        expect(await response.json()).toMatchObject({ type: 5 });
+        // This admission must also commit before A's upstream gate is released.
+        const webhook = await chatwootWebhook(
+          { ...created(b), account: { id: accountId } },
+          { secret: accountId === 3 ? "secret-acme" : "secret-globex" },
+        );
+        expect(webhook.status).toBe(200);
+        await vi.waitFor(() => expect(feedback).toBeGreaterThan(0), { interval: 5 });
+        if (mode !== "baseline") expect(upstreamAborted).toBe(false);
+        await vi.waitFor(() => expect(firstPost).toBeGreaterThan(0), { interval: 5, timeout: 3000 });
+        expect(released).toBe(false);
+        expect(action - started).toBeLessThan(1000);
+        expect(feedback - started).toBeLessThan(1000);
+        const admitted = await runInDurableObject(
+          hub(b, accountId),
+          (_instance, state) =>
+            state.storage.sql
+              .exec<{ received_at: number }>("SELECT received_at FROM interactions ORDER BY received_at DESC LIMIT 1")
+              .one().received_at,
+        );
+        // Queue age is measured at the first upstream operation, on the same worker clock.
+        const queue = Math.max(0, jobStartedAt - admitted);
+        expect(admitted).toBeGreaterThan(0);
+        samples.push({
+          ack,
+          queue,
+          action: action - started,
+          feedback: feedback - started,
+          firstPost: firstPost - started,
+        });
+      } finally {
+        release();
+      }
+      await drain();
+      if (mode === "discord") {
+        await hub(a).enqueueConversation(3, a);
+        await drain();
+        expect(
+          world
+            .webhookPosts()
+            .filter((post) => post.thread === aThread && String(post.body.content).startsWith("A fixture")),
+        ).toHaveLength(1);
+      }
+      // Every sampled owner settles before replacing the fake upstream for the next pair.
+      await vi.waitFor(
+        async () => {
+          const jobs = await runInDurableObject(
+            hub(b, accountId),
+            (_instance, state) => state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM jobs").one().n,
+          );
+          expect(jobs).toBe(0);
+        },
+        { interval: 5, timeout: 5000 },
+      );
+    }
+    const percentile = (field: keyof (typeof samples)[number], p: number) => {
+      const sorted = samples.map((sample) => sample[field]).sort((a, b) => a - b);
+      return Math.round(sorted[Math.ceil(sorted.length * p) - 1] ?? 0);
+    };
+    const fields = ["ack", "queue", "action", "feedback", "firstPost"] as const;
+    Object.assign(context.task.meta, {
+      latency: {
+        mode,
+        count: samples.length,
+        p50: Object.fromEntries(fields.map((field) => [field, percentile(field, 0.5)])),
+        p95: Object.fromEntries(fields.map((field) => [field, percentile(field, 0.95)])),
+      },
+    });
+  },
+);
+
+it("refuses maintenance commands and old interaction ids immediately without executing them", async () => {
+  const settings = configSchema.parse(env.CONFIG);
+  const signed = await signedInteraction(
+    {
+      id: "100000000000000999",
+      application_id: "100000000000000001",
+      token: "old-cut",
+      type: 2,
+      channel_id: nextThreadId(),
+      member: { user: { id: ALICE } },
+      data: { type: 1, name: "resolve" },
+    },
+    Math.floor(Date.now() / 1000),
+  );
+  for (const phase of ["maintenance", "active"] as const) {
+    const response = await worker.fetch(
+      signed(),
+      {
+        ...env,
+        CONFIG: {
+          ...settings,
+          cutover: {
+            phase,
+            epoch: "cut",
+            interactionFence: "100000000000000999",
+            notificationsAfter: Date.now() + 3600000,
+            legacyWebhooks: {},
+          },
+        },
+      },
+      createExecutionContext(),
+    );
+    expect(await response.json()).toMatchObject({
+      type: 4,
+      data: {
+        flags: 64,
+        content: expect.stringMatching(phase === "maintenance" ? /not accepted or executed/ : /previous relay/),
+      },
+    });
+  }
+  expect(world.sent("POST", /\/toggle_status$/)).toEqual([]);
+});
+
+it("bounds a triage callback whose conversation RPC never responds", async () => {
+  const thread = nextThreadId();
+  await env.THREAD_DIRECTORY.getByName(`thread:v1:${thread}`).claim({
+    accountId: 3,
+    conversationId: 12,
+    guildId: GUILD,
+    forumId: FORUM,
+    generation: 1,
+  });
+  const namespace = new Proxy(env.CONVERSATION, {
+    get(target, property, receiver) {
+      if (property === "getByName")
+        return () =>
+          new Proxy(hub(), {
+            get(stub, key, stubReceiver) {
+              if (key === "triageAnswered") return async () => new Promise<never>(() => {});
+              return Reflect.get(stub, key, stubReceiver);
+            },
+          });
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  const body = JSON.stringify({
+    threadId: thread,
+    answerId: "100000000000000333",
+    replyTo: "100000000000000332",
+    draft: "Fixture draft",
+  });
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const signature = await hmac("triage-hook-secret-0123456789abcdef", `${timestamp}.${body}`);
+  vi.useFakeTimers();
+  try {
+    const pending = worker.fetch(
+      new Request("https://relay.example.com/triage/answered", {
+        method: "POST",
+        body,
+        headers: { "x-timestamp": timestamp, "x-signature": `sha256=${signature}` },
+      }),
+      { ...env, CONVERSATION: namespace },
+      createExecutionContext(),
+    );
+    await vi.advanceTimersByTimeAsync(401);
+    expect((await pending).status).toBe(500);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it.each(["digest", "registry"] as const)(
+  "does not wait for a slow %s page before a person's feedback",
+  async (kind) => {
+    world.mock.spy.mockRestore();
+    let blocked = false;
+    let feedback = false;
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    world = new World([
+      on("GET", "chatwoot.example.com/api/v1/profile", () => json({ id: 42, accounts: [{ id: 3 }] })),
+      on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/946/toggle_status", () => json({})),
+      on(
+        "GET",
+        kind === "digest"
+          ? "chatwoot.example.com/api/v1/accounts/3/conversations"
+          : "discord.com/api/v10/applications/@me",
+        async () => {
+          blocked = true;
+          await gate;
+          return kind === "digest" ? json({ data: { payload: [] } }) : json({ id: "100000000000000001" });
+        },
+      ),
+      on(
+        "PATCH",
+        /^discord.com\/api\/v10\/webhooks\/100000000000000001\/shared-fault\/messages\/(@|%40)original$/,
+        () => {
+          feedback = true;
+          return json({});
+        },
+      ),
+    ]);
+    const settings = configSchema.parse(env.CONFIG);
+    const namespace = kind === "digest" ? env.QUEUE_DIGEST : env.FORUM_REGISTRY;
+    const pending = runInDurableObject(
+      namespace.getByName(`fault:${crypto.randomUUID()}`),
+      async (_instance, state) => {
+        vi.spyOn(state.storage, "setAlarm").mockResolvedValue();
+        if (kind === "digest") {
+          const executor = new QueueDigest(state, {
+            ...env,
+            CONFIG: { ...settings, queue: { channelId: "100000000000000099" } },
+          });
+          await executor.request(Date.now());
+          await executor.alarm();
+        } else {
+          const executor = new ForumRegistry(state, env);
+          await executor.lookup(FORUM);
+          await executor.alarm();
+        }
+      },
+    );
+    try {
+      await vi.waitFor(() => expect(blocked).toBe(true));
+      await enqueueCommand({
+        interactionId: `fault-${kind}`,
+        applicationId: "100000000000000001",
+        token: "shared-fault",
+        discordUserId: ALICE,
+        accountId: 3,
+        conversationId: 946,
+        action: { type: "status", status: "resolved" },
+      });
+      await vi.waitFor(() => expect(feedback).toBe(true));
+    } finally {
+      release();
+      await pending;
+    }
+  },
+);
 
 it("measures the first customer post with a slow decorative lookup", async () => {
   await runInDurableObject(hub(), (_instance, state) =>

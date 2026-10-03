@@ -61,7 +61,7 @@ describe("DiscordForum", () => {
     const cache = new MemoryCache();
     cache.set("forum:55:webhook", "1:abc");
     const { requests } = mockFetch(
-      on("POST", `${api}/webhooks/1/abc`, () => json({ id: "101", channel_id: "thread-9" })),
+      on("POST", `${api}/webhooks/1/abc`, () => json({ id: "101", channel_id: "100000000000000009" })),
     );
     const budget = new Budget(5);
     budget.startSlice(10);
@@ -70,7 +70,7 @@ describe("DiscordForum", () => {
       new DiscordForum(new DiscordRest("bot-token", budget.fetch), cache).execute(
         "55",
         { content: "hi" },
-        "thread-9",
+        "100000000000000009",
         "send-1",
       ),
     ).rejects.toBeInstanceOf(JobDeadlineError);
@@ -78,10 +78,10 @@ describe("DiscordForum", () => {
       await new DiscordForum(new DiscordRest("bot-token", new Budget(5).fetch), cache).execute(
         "55",
         { content: "hi" },
-        "thread-9",
+        "100000000000000009",
         "send-1",
       ),
-    ).toEqual({ state: "confirmed", channelId: "thread-9", messageId: "101" });
+    ).toEqual({ state: "confirmed", channelId: "100000000000000009", messageId: "101" });
     expect(requests).toHaveLength(1);
   });
 
@@ -93,9 +93,9 @@ describe("DiscordForum", () => {
         await new Promise<void>((_resolve, reject) =>
           request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true }),
         );
-        return json({ id: "101", channel_id: "thread-9" });
+        return json({ id: "101", channel_id: "100000000000000009" });
       }),
-      on("GET", `${api}/channels/thread-9/messages`, () => json([])),
+      on("GET", `${api}/channels/100000000000000009/messages`, () => json([])),
     );
     const budget = new Budget(5);
     budget.startSlice(30);
@@ -103,7 +103,7 @@ describe("DiscordForum", () => {
       new DiscordForum(new DiscordRest("bot-token", budget.fetch), cache).execute(
         "55",
         { content: "hi" },
-        "thread-9",
+        "100000000000000009",
         "send-2",
       ),
     ).resolves.toEqual({ state: "unknown" });
@@ -111,7 +111,7 @@ describe("DiscordForum", () => {
       new DiscordForum(new DiscordRest("bot-token", new Budget(5).fetch), cache).execute(
         "55",
         { content: "hi" },
-        "thread-9",
+        "100000000000000009",
         "send-2",
       ),
     ).resolves.toEqual({ state: "unknown" });
@@ -127,17 +127,19 @@ describe("DiscordForum", () => {
         posts += 1;
         return posts === 1
           ? json({ message: "accepted, response lost" }, { status: 500 })
-          : json({ id: "102", channel_id: "thread-9" });
+          : json({ id: "102", channel_id: "100000000000000009" });
       }),
-      on("GET", `${api}/channels/thread-9/messages`, () => json([])),
+      on("GET", `${api}/channels/100000000000000009/messages`, () => json([])),
     );
     const first = new DiscordForum(new DiscordRest("bot-token", new Budget(5).fetch), cache);
-    await expect(first.execute("55", { content: "hi" }, "thread-9", "send-500")).resolves.toEqual({ state: "unknown" });
+    await expect(first.execute("55", { content: "hi" }, "100000000000000009", "send-500")).resolves.toEqual({
+      state: "unknown",
+    });
     await expect(
       new DiscordForum(new DiscordRest("bot-token", new Budget(5).fetch), cache).execute(
         "55",
         { content: "hi" },
-        "thread-9",
+        "100000000000000009",
         "send-500",
       ),
     ).resolves.toEqual({ state: "unknown" });
@@ -153,10 +155,10 @@ describe("DiscordForum", () => {
       on("POST", `${api}/webhooks/1/abc`, () => json({ message: "accepted, response lost" }, { status: 500 })),
     );
     const client = new DiscordForum(new DiscordRest("bot-token", new Budget(5).fetch), cache);
-    await expect(client.execute("55", { content: "hi" }, "thread-9", "send-recover")).resolves.toEqual({
+    await expect(client.execute("55", { content: "hi" }, "100000000000000009", "send-recover")).resolves.toEqual({
       state: "unknown",
     });
-    await expect(client.execute("55", { content: "hi" }, "thread-9", "send-recover")).resolves.toEqual({
+    await expect(client.execute("55", { content: "hi" }, "100000000000000009", "send-recover")).resolves.toEqual({
       state: "unknown",
     });
     expect(requests.filter((request) => request.method === "POST")).toHaveLength(1);
@@ -169,15 +171,15 @@ describe("DiscordForum", () => {
     const oldMessage = String(((BigInt(Date.now() + 5 * 60 * 1000) - 1_420_070_400_000n) << 22n) + 1n);
     const { requests } = mockFetch(
       on("POST", `${api}/webhooks/1/abc`, () => json({ message: "accepted, response lost" }, { status: 500 })),
-      on("GET", `${api}/channels/thread-9/messages`, () =>
+      on("GET", `${api}/channels/100000000000000009/messages`, () =>
         json([{ id: oldMessage, webhook_id: "1", content: "hi", flags: 0 }]),
       ),
     );
     const client = new DiscordForum(new DiscordRest("bot-token", new Budget(5).fetch), cache);
-    await expect(client.execute("55", { content: "hi" }, "thread-9", "send-old-match")).resolves.toEqual({
+    await expect(client.execute("55", { content: "hi" }, "100000000000000009", "send-old-match")).resolves.toEqual({
       state: "unknown",
     });
-    await expect(client.execute("55", { content: "hi" }, "thread-9", "send-old-match")).resolves.toEqual({
+    await expect(client.execute("55", { content: "hi" }, "100000000000000009", "send-old-match")).resolves.toEqual({
       state: "unknown",
     });
     expect(requests.filter((request) => request.method === "POST")).toHaveLength(1);
@@ -193,17 +195,17 @@ describe("DiscordForum", () => {
       on("POST", `${api}/webhooks/1/abc`, (request) => {
         if (JSON.parse(request.body).applied_tags?.length) return json({ code: 10087 }, { status: 400 });
         accepted += 1;
-        return json({ id: "101", channel_id: "thread-9" });
+        return json({ id: "101", channel_id: "100000000000000009" });
       }),
       on("GET", `${api}/channels/55`, () => (++reads === 1 ? json({}, { status: 500 }) : json({ available_tags: [] }))),
     );
     const client = new DiscordForum(new DiscordRest("bot-token", new Budget(10).fetch), cache);
     await expect(
-      client.execute("55", { content: "hi", applied_tags: ["deleted"] }, "thread-9", "send-3"),
+      client.execute("55", { content: "hi", applied_tags: ["deleted"] }, "100000000000000009", "send-3"),
     ).rejects.toMatchObject({ status: 500 });
     await expect(
-      client.execute("55", { content: "hi", applied_tags: ["deleted"] }, "thread-9", "send-3"),
-    ).resolves.toEqual({ state: "confirmed", channelId: "thread-9", messageId: "101" });
+      client.execute("55", { content: "hi", applied_tags: ["deleted"] }, "100000000000000009", "send-3"),
+    ).resolves.toEqual({ state: "confirmed", channelId: "100000000000000009", messageId: "101" });
     expect(accepted).toBe(1);
   });
 
@@ -220,8 +222,10 @@ describe("DiscordForum", () => {
       ),
     );
     const client = forum();
-    await expect(client.execute("55", { content: "hi" }, "thread-9")).rejects.toBeInstanceOf(UnknownThreadError);
-    await expect(client.deleteMessage("55", "thread-9", "m1")).resolves.toBeUndefined();
+    await expect(client.execute("55", { content: "hi" }, "100000000000000009")).rejects.toBeInstanceOf(
+      UnknownThreadError,
+    );
+    await expect(client.deleteMessage("55", "100000000000000009", "m1")).resolves.toBeUndefined();
   });
 
   it("reuses the existing Chatwoot webhook and posts without the bot token", async () => {
@@ -230,21 +234,21 @@ describe("DiscordForum", () => {
       on("GET", `${api}/channels/55/webhooks`, () =>
         json([{ id: "1", token: "abc", type: 1, name: "Chatwoot", application_id: "100000000000000001" }]),
       ),
-      on("POST", `${api}/webhooks/1/abc`, () => json({ id: "101", channel_id: "thread-9" })),
+      on("POST", `${api}/webhooks/1/abc`, () => json({ id: "101", channel_id: "100000000000000009" })),
     );
     const client = forum();
     expect(await client.execute("55", { content: "hi", thread_name: "Ticket" })).toEqual({
-      channelId: "thread-9",
+      channelId: "100000000000000009",
       messageId: "101",
       state: "confirmed",
     });
-    await client.execute("55", { content: "again" }, "thread-9");
+    await client.execute("55", { content: "again" }, "100000000000000009");
     // The application id and the webhook are looked up once, then cached.
     expect(requests.filter((request) => request.method === "GET")).toHaveLength(3);
     const posts = requests.filter((request) => request.url.pathname.startsWith("/api/v10/webhooks/"));
     expect(posts.map((request) => request.url.search)).toEqual([
       "?wait=true&with_components=true",
-      "?wait=true&with_components=true&thread_id=thread-9",
+      "?wait=true&with_components=true&thread_id=100000000000000009",
     ]);
     expect(posts.every((request) => request.headers.get("authorization") === null)).toBe(true);
     expect(requests[1]?.headers.get("authorization")).toBe("Bot bot-token");
@@ -259,7 +263,7 @@ describe("DiscordForum", () => {
       on("POST", `${api}/channels/55/webhooks`, () =>
         json({ id: "900", token: "new-token", type: 1, name: "Chatwoot", application_id: "100000000000000001" }),
       ),
-      on("POST", `${api}/webhooks/900/new-token`, () => json({ id: "101", channel_id: "thread-1" })),
+      on("POST", `${api}/webhooks/900/new-token`, () => json({ id: "101", channel_id: "100000000000000010" })),
     );
     await forum().execute("55", { content: "hi", thread_name: "Ticket" });
     expect(
@@ -327,11 +331,11 @@ describe("DiscordForum", () => {
       on("POST", `${api}/webhooks/1/abc`, (request) =>
         JSON.parse(request.body).applied_tags?.length
           ? json({ message: "Invalid Form Body", code: 50035 }, { status: 400 })
-          : json({ id: "101", channel_id: "thread-9" }),
+          : json({ id: "101", channel_id: "100000000000000009" }),
       ),
     );
     expect(await forum().execute("55", { content: "card", thread_name: "Ticket", applied_tags: ["t-gone"] })).toEqual({
-      channelId: "thread-9",
+      channelId: "100000000000000009",
       messageId: "101",
       state: "confirmed",
     });
@@ -347,7 +351,9 @@ describe("DiscordForum", () => {
       ),
       on("POST", `${api}/webhooks/1/abc`, () => json({ message: "Unknown Channel", code: 10003 }, { status: 404 })),
     );
-    await expect(forum().execute("55", { content: "hi" }, "thread-1")).rejects.toBeInstanceOf(UnknownThreadError);
+    await expect(forum().execute("55", { content: "hi" }, "100000000000000010")).rejects.toBeInstanceOf(
+      UnknownThreadError,
+    );
   });
 
   it("deletes a webhook message in its thread, treating an already deleted one as done", async () => {
@@ -362,10 +368,13 @@ describe("DiscordForum", () => {
       ),
     );
     const client = forum();
-    await client.deleteMessage("55", "thread-1", "m1");
-    await client.deleteMessage("55", "thread-1", "m2");
+    await client.deleteMessage("55", "100000000000000010", "m1");
+    await client.deleteMessage("55", "100000000000000010", "m2");
     const deletes = requests.filter((request) => request.method === "DELETE");
-    expect(deletes.map((request) => request.url.search)).toEqual(["?thread_id=thread-1", "?thread_id=thread-1"]);
+    expect(deletes.map((request) => request.url.search)).toEqual([
+      "?thread_id=100000000000000010",
+      "?thread_id=100000000000000010",
+    ]);
     expect(deletes.every((request) => request.headers.get("authorization") === null)).toBe(true);
   });
 

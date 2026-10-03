@@ -106,6 +106,19 @@ it("keeps the longest shared cooldown after duplicate reports and owner restart"
   );
 });
 
+it("does not lose a shared cooldown when a concurrent successful response omits scope", () => {
+  const limits = new LimitState(new Memory());
+  const a = request();
+  const b = request("bob");
+  limits.reserve(a);
+  limits.reserve(b);
+  limits.report(report(a, { retryAfterMs: 60000, scope: "shared" }));
+  limits.report(report(b, { remaining: 100 }));
+  const retry = limits.reserve(request("carol"));
+  expect(retry.allowed).toBe(false);
+  if (!retry.allowed) expect(retry.retryAfterMs).toBeGreaterThan(59000);
+});
+
 it("counts global permits across the sliding window and bounds a control wait by its job slice", async () => {
   let now = Date.now();
   vi.spyOn(Date, "now").mockImplementation(() => now);

@@ -15,7 +15,7 @@ export interface Effect<T, Request = unknown> {
 }
 
 export class Effects {
-  constructor(private readonly store: Pick<Cache, "get" | "set">) {}
+  constructor(private readonly store: Pick<Cache, "get" | "set" | "transaction">) {}
 
   read<T, Request = unknown>(key: string): Effect<T, Request> | undefined {
     const saved = this.store.get(`effect:${key}`);
@@ -31,6 +31,7 @@ export class Effects {
     key: string,
     request: Request,
     send: (frozen: Request) => Promise<T>,
+    checkpoint?: (receipt: T) => void,
   ): Promise<Effect<T, Request>> {
     const effect = this.read<T, Request>(key) ?? { state: "READY", request };
     if (effect.state === "DISPATCHING") this.save(key, { ...effect, state: "UNKNOWN" });
@@ -40,11 +41,19 @@ export class Effects {
         throw new DiscordHttpError(rejected.status, rejected.code, "previously rejected");
       throw new ChatwootError(rejected.status, "previously rejected");
     }
-    if (effect.state !== "READY") return this.read<T, Request>(key) ?? effect;
-    this.save(key, { ...effect, state: "DISPATCHING", startedAt: Date.now() });
+    if (effect.state !== "READY") {
+      if (effect.state === "CONFIRMED" && effect.receipt !== undefined) checkpoint?.(effect.receipt);
+      return this.read<T, Request>(key) ?? effect;
+    }
+    effect.startedAt = Date.now();
+    this.save(key, { ...effect, state: "DISPATCHING" });
     try {
       const receipt = await send(effect.request);
-      return this.save(key, { ...effect, state: "CONFIRMED", receipt });
+      const commit = () => {
+        checkpoint?.(receipt);
+        return this.save(key, { ...effect, state: "CONFIRMED", receipt });
+      };
+      return this.store.transaction ? this.store.transaction(commit) : commit();
     } catch (error) {
       const http = error instanceof DiscordHttpError || error instanceof ChatwootError;
       if (

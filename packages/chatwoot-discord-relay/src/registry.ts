@@ -54,7 +54,9 @@ export async function discoverForum(rest: DiscordRest, store: Cache, forumId: st
 }
 
 export class ForumRegistry extends DurableObject<Env> {
-  private readonly store = new QueueStore(this.ctx.storage.sql);
+  private readonly store = new QueueStore(this.ctx.storage.sql, Date.now, (write) =>
+    this.ctx.storage.transactionSync(write),
+  );
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.store.migrate();

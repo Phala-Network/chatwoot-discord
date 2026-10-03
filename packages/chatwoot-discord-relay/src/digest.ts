@@ -11,7 +11,9 @@ import { escalationsSchema, postQueue } from "./queue.ts";
 import { loadSettings } from "./settings.ts";
 
 export class QueueDigest extends DurableObject<Env> {
-  private readonly store = new QueueStore(this.ctx.storage.sql);
+  private readonly store = new QueueStore(this.ctx.storage.sql, Date.now, (write) =>
+    this.ctx.storage.transactionSync(write),
+  );
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.store.migrate();
@@ -30,10 +32,19 @@ export class QueueDigest extends DurableObject<Env> {
     await scheduleAlarm(this.ctx, this.store.nextWakeup());
   }
   override async alarm(): Promise<void> {
+    const settings = await loadSettings(this.env);
+    if (settings.config.cutover?.phase === "maintenance") {
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
     const job = this.store.nextDueJob();
     if (!job) return;
     const now: number = JSON.parse(job.payload);
-    const settings = await loadSettings(this.env);
+    if (now < (settings.config.cutover?.notificationsAfter ?? 0)) {
+      this.store.completeJob(job);
+      await scheduleAlarm(this.ctx, this.store.nextWakeup());
+      return;
+    }
     const budget = new Budget(settings.config.relay.subrequestBudget);
     budget.startSlice();
     const rest = new DiscordRest(

@@ -5,6 +5,7 @@ import type { RateLimitStore } from "../../../../shared/rate-limit.ts";
 
 interface ControlBudget {
   consume(): void;
+  require(requests: number): void;
   controlSignal(ms: number): AbortSignal;
 }
 interface LimiterBindings {
@@ -101,8 +102,15 @@ export class LimitState {
     this.retain(receiptKey, Date.now() + Math.max(60_000, report.retryAfterMs + report.resetAfterMs));
     const request = report.reservation;
     const oldKey = this.bucket(request);
-    if (report.bucket)
-      this.state.set(`alias:${request.route}`, { bucket: report.bucket, scope: report.scope ?? "user" });
+    if (report.bucket) {
+      const previous = this.state.get<{ bucket: string; scope: string }>(`alias:${request.route}`);
+      // Scope is only guaranteed on 429 responses. A concurrent 2xx cannot erase a known
+      // shared resource cooldown by omitting that header.
+      this.state.set(`alias:${request.route}`, {
+        bucket: report.bucket,
+        scope: report.scope ?? previous?.scope ?? "user",
+      });
+    }
     const key = this.bucket(request);
     const now = Date.now();
     const old = this.state.get<Window>(oldKey);
@@ -190,6 +198,8 @@ export class DiscordLimiter {
 
   async reserve(method: string, path: string, token: string, auth: boolean, interaction: boolean) {
     await this.flush();
+    // Reserve room for both controls, HTTP and cooldown reports before dispatch.
+    this.budget?.require(interaction ? 3 : 5);
     const resource = /^\/(channels|guilds|webhooks)\/([^/]+)/.exec(path);
     const owner = resource ? `${resource[1]}:${resource[2]}` : `route:${path}`;
     const route = `${method}:${path

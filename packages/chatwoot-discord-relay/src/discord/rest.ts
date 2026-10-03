@@ -140,7 +140,9 @@ export class DiscordRest {
         ...(response.headers.get("x-ratelimit-bucket")
           ? { bucket: response.headers.get("x-ratelimit-bucket") ?? "" }
           : {}),
-        scope: response.headers.get("x-ratelimit-scope") ?? "user",
+        ...(response.headers.has("x-ratelimit-scope")
+          ? { scope: response.headers.get("x-ratelimit-scope") ?? "" }
+          : {}),
         ...(response.headers.has("x-ratelimit-remaining")
           ? { remaining: Number(response.headers.get("x-ratelimit-remaining")) }
           : {}),

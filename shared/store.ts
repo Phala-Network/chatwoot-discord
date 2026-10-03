@@ -15,7 +15,12 @@ export class QueueStore {
   constructor(
     protected readonly sql: SqlStorage,
     protected readonly now: () => number = Date.now,
+    private readonly atomic: <T>(write: () => T) => T = (write) => write(),
   ) {}
+
+  transaction<T>(write: () => T): T {
+    return this.atomic(write);
+  }
 
   migrate(): void {
     this.sql.exec(`CREATE TABLE IF NOT EXISTS jobs (

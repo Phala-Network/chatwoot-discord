@@ -304,12 +304,6 @@ export function threadIdFromUrl(value: unknown): string | undefined {
   )?.[1];
 }
 
-/** The newest message id Chatwoot included with a conversation, if any. */
-export function latestMessageId(conversation: ChatwootConversation): number | undefined {
-  const ids = (conversation.messages ?? []).flatMap((message) => (message.id === undefined ? [] : [message.id]));
-  return ids.length === 0 ? undefined : Math.max(...ids);
-}
-
 /** The inbox name for a new post's ticket header; omitted when Chatwoot will not say. */
 function cachedInboxName(
   context: ProcessorContext,

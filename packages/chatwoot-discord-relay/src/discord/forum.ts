@@ -5,21 +5,16 @@ import {
   type RESTDeleteAPIWebhookWithTokenMessageQuery,
   type RESTDeleteAPIWebhookWithTokenMessageResult,
   type RESTGetAPIChannelResult,
-  type RESTGetAPIChannelWebhooksResult,
-  type RESTGetCurrentApplicationResult,
   type RESTPatchAPIChannelJSONBody,
   type RESTPatchAPIChannelResult,
   type RESTPatchAPIWebhookWithTokenMessageJSONBody,
   type RESTPatchAPIWebhookWithTokenMessageQuery,
   type RESTPatchAPIWebhookWithTokenMessageResult,
-  type RESTPostAPIChannelWebhookJSONBody,
-  type RESTPostAPIChannelWebhookResult,
   type RESTPostAPIWebhookWithTokenJSONBody,
   type RESTPostAPIWebhookWithTokenQuery,
   type RESTPostAPIWebhookWithTokenWaitResult,
   type RESTPutAPIChannelThreadMembersResult,
   Routes,
-  WebhookType,
 } from "discord-api-types/v10";
 import { log } from "../../../../shared/log.ts";
 import { Effects } from "../effects.ts";
@@ -38,6 +33,7 @@ export interface Cache {
   /** `ttlMs` undefined keeps the value until it is deleted. */
   set(key: string, value: string, ttlMs?: number): void;
   delete(key: string): void;
+  transaction?<T>(write: () => T): T;
 }
 
 export class DiscordForum implements ForumClient {
@@ -52,6 +48,7 @@ export class DiscordForum implements ForumClient {
     message: WebhookMessage,
     threadId?: string,
     sendKey?: string,
+    checkpoint?: (receipt: { channelId: string; messageId: string }) => void,
   ): Promise<SendOutcome> {
     const webhook = await this.webhook(forumChannelId);
     const effects = new Effects(this.cache);
@@ -62,19 +59,25 @@ export class DiscordForum implements ForumClient {
         const existing = effects.read(key);
         if (existing?.state === "READY") effects.save(key, { state: "READY", request });
         try {
-          return await effects.run(key, request, async (frozen) => {
-            const sent = await this.rest.post<
-              RESTPostAPIWebhookWithTokenWaitResult,
-              RESTPostAPIWebhookWithTokenJSONBody,
-              RESTPostAPIWebhookWithTokenQuery
-            >(Routes.webhook(webhook.id, webhook.token), {
-              body: frozen,
-              query: { wait: true, with_components: true, ...(threadId ? { thread_id: threadId } : {}) },
-              auth: false,
-            });
-            if (!sent?.channel_id || !/^\d+$/.test(sent.id)) throw new TypeError("Missing Discord message receipt");
-            return { channelId: sent.channel_id, messageId: sent.id };
-          });
+          return await effects.run(
+            key,
+            request,
+            async (frozen) => {
+              const sent = await this.rest.post<
+                RESTPostAPIWebhookWithTokenWaitResult,
+                RESTPostAPIWebhookWithTokenJSONBody,
+                RESTPostAPIWebhookWithTokenQuery
+              >(Routes.webhook(webhook.id, webhook.token), {
+                body: frozen,
+                query: { wait: true, with_components: true, ...(threadId ? { thread_id: threadId } : {}) },
+                auth: false,
+              });
+              if (!sent?.channel_id || !/^\d+$/.test(sent.channel_id) || !/^\d+$/.test(sent.id))
+                throw new TypeError("Missing Discord message receipt");
+              return { channelId: sent.channel_id, messageId: sent.id };
+            },
+            checkpoint,
+          );
         } catch (error) {
           if (tags?.length && error instanceof DiscordHttpError && (error.status === 400 || error.code === UNKNOWN_TAG))
             effects.save(key, { state: "READY", request });

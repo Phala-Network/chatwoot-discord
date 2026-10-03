@@ -159,9 +159,18 @@ export class FakeForum implements ForumClient {
 
   constructor(public guildId = "100000000000000044") {}
 
-  async execute(_forum: string, payload: WebhookMessage, threadId?: string, sendKey?: string) {
+  async execute(
+    _forum: string,
+    payload: WebhookMessage,
+    threadId?: string,
+    sendKey?: string,
+    checkpoint?: (receipt: { channelId: string; messageId: string }) => void,
+  ) {
     const confirmed = sendKey ? this.confirmedSends.get(sendKey) : undefined;
-    if (confirmed) return confirmed;
+    if (confirmed) {
+      checkpoint?.(confirmed);
+      return confirmed;
+    }
     if (sendKey && this.unknownSends.has(sendKey)) return { state: "unknown" as const };
     if (threadId && this.failAfter !== undefined) {
       if (this.failAfter === 0) {
@@ -186,6 +195,7 @@ export class FakeForum implements ForumClient {
     }
     const receipt = { state: "confirmed" as const, channelId: threadId ?? `thread-${this.calls.length}`, messageId };
     if (sendKey) this.confirmedSends.set(sendKey, receipt);
+    checkpoint?.(receipt);
     return receipt;
   }
 
@@ -274,7 +284,7 @@ export function testSettings(
 
 export { json, on, type Recorded, type Route, takeUnmatched } from "../../../shared/test/http.ts";
 
-import { mockFetch as httpFetch, json, on, type Route } from "../../../shared/test/http.ts";
+import { mockFetch as httpFetch, type Route } from "../../../shared/test/http.ts";
 import { type Cache, DiscordForum } from "../src/discord/forum.ts";
 import type { DiscordRest } from "../src/discord/rest.ts";
 import { discoverForum, type ForumSnapshot } from "../src/registry.ts";

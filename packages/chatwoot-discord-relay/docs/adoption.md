@@ -28,11 +28,11 @@ Set the same cut to active only after every precondition and stage receipt is ve
 
 On first use the Conversation rechecks its link and real guild/forum, claims the Directory and runs recoverable history cleanup before making a fresh card. Cleanup pages `limit=100` with persisted `before`/pending deletes. It deletes only an empty-body standalone V2 ticket card of a verified old webhook with the exact ticket-card shape. It never deletes ordinary mirror bodies, even when they have buttons, or another webhook's messages. Individual DELETE accepts a real 404 and retries other failures; it uses no two-week bulk-delete shortcut. Cleanup-complete persists before new card creation. An UNKNOWN new card stays unaddressable and is never automatically created again; other metadata, mirrors and human commands continue. Register a real resource id only through explicit repair after investigating Discord.
 
-## Accepted losses and preserved boundaries
+## Declared losses, required acceptance and preserved boundaries
 
 - Drafts are not imported. A missing/stale draft gives the explicit **Apps → Reply with this** fallback; new cards omit it. Old modal submissions and late answers cannot restore a draft without a current source/generation.
 - Hourly counters reset at the next UTC hour. Notifications do not restart the old hour's quota. Digest/escalation baselines have separate handling above.
-- Deletion sync for pre-W messages is lost: their old Discord receipt/title associations are not imported. Deleting such a Chatwoot message does not remove its old Discord mirror; handle that history manually when required.
+- Deletion sync for pre-W messages would be lost: their old Discord receipt/title associations are not imported. Deleting such a Chatwoot message would not remove its old Discord mirror or title reference. This is a declared historical loss, **not established owner acceptance**. Explicit owner acceptance, recorded in the sealed cut evidence, is a cutover prerequisite. Without that acceptance, stop and obtain a separately reviewed minimal receipt handover; do not activate this zero-receipt adoption.
 - Old CSAT/delivery updates are **not frozen**: minimal observed digests are staged, unchanged old updates do not repost, and a genuinely changed old response can still publish. Its newly created receipt supports subsequent deletion. Pending hold semantics are unchanged.
 - Old command results cannot be declared uniformly unexecuted merely by dropping their rows. Unexplained prior write outcomes block this cut. New message creation UNKNOWN remains UNKNOWN without history matching or resend.
 

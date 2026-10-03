@@ -33,6 +33,10 @@ import { assignedLine, assigneeKey, Notifier, type TriageOptions } from "./notif
 
 export type WebhookMessage = RESTPostAPIWebhookWithTokenJSONBody;
 type MessageComponents = NonNullable<WebhookMessage["components"]>;
+interface PlannedPart {
+  message: WebhookMessage;
+  plainContent: string;
+}
 
 /** Thrown by a ForumClient when a post no longer exists in Discord (e.g. it was deleted). */
 export class UnknownThreadError extends Error {
@@ -48,7 +52,13 @@ export type SendOutcome =
 
 export interface ForumClient {
   /** Executes the forum's webhook. Without `threadId`, `message.thread_name` starts a new post. */
-  execute(forumChannelId: string, message: WebhookMessage, threadId?: string, sendKey?: string): Promise<SendOutcome>;
+  execute(
+    forumChannelId: string,
+    message: WebhookMessage,
+    threadId?: string,
+    sendKey?: string,
+    checkpoint?: (receipt: { channelId: string; messageId: string }) => void,
+  ): Promise<SendOutcome>;
   /**
    * Modifies a post of the forum. Discord rejects changes to an archived post unless the same
    * request unarchives it. Throws UnknownThreadError if the post no longer exists.
@@ -189,7 +199,7 @@ export class Relay {
     const conversation = message.conversation;
     const planKey = `plan:${accountId}:${conversation.id}:${message.id}`;
     const saved = store.get(planKey);
-    const parts: WebhookMessage[] = saved ? JSON.parse(saved) : await this.parts(message, text);
+    const parts: PlannedPart[] = saved ? JSON.parse(saved) : await this.parts(message, text);
     if (!saved) store.set(planKey, JSON.stringify(parts));
     if (message.messageType === "incoming") this.customerEvent(accountId, conversation.id, `message:${message.id}`);
     let threadId = store.conversation(accountId, conversation.id)?.threadId;
@@ -398,7 +408,7 @@ export class Relay {
    * with room for them, so a message splits the same way on every attempt and a retry can
    * resume after the parts already posted.
    */
-  private async parts(message: RelayMessage, text: string): Promise<WebhookMessage[]> {
+  private async parts(message: RelayMessage, text: string): Promise<PlannedPart[]> {
     const { frontendUrl, maxChunks } = this.options;
     const notification = await this.notifier.notification(message);
     const chunks = split(text, CONTENT_LIMIT - this.notifier.reserve);
@@ -406,7 +416,7 @@ export class Relay {
     const username = senderName(message);
     const avatar = senderAvatar(message, this.options.avatars);
     const agents = [...(message.mentionedAgents?.values() ?? [])];
-    const parts: WebhookMessage[] = kept.map((chunk, index) => {
+    const parts: PlannedPart[] = kept.map((chunk, index) => {
       const last = index === kept.length - 1;
       const content = last ? [chunk, ...notification.lines].join("\n") : chunk;
       // Linked agents mentioned in a private note are pinged where the mention is.
@@ -415,36 +425,47 @@ export class Relay {
         ...agents.filter((id) => chunk.includes(`<@${id}>`)),
       ]);
       return {
-        content,
-        username,
-        avatar_url: avatar,
-        allowed_mentions: users.size > 0 ? { parse: [], users: [...users] } : { parse: [] },
+        plainContent: chunk,
+        message: {
+          content,
+          username,
+          avatar_url: avatar,
+          allowed_mentions: users.size > 0 ? { parse: [], users: [...users] } : { parse: [] },
+        },
       };
     });
     if (chunks.length > maxChunks) {
       const link = conversationUrl(frontendUrl, message.account.id, message.conversation.id);
+      const content = `-# Message truncated (${charLength(text)} characters). Full text: <${link}>`;
       parts.push({
-        content: `-# Message truncated (${charLength(text)} characters). Full text: <${link}>`,
-        username,
-        avatar_url: avatar,
-        allowed_mentions: { parse: [] },
+        plainContent: content,
+        message: { content, username, avatar_url: avatar, allowed_mentions: { parse: [] } },
       });
     }
     return parts;
   }
 
   /**
-   * Posts the parts not yet posted, recording each one. A customer's message is their latest from
-   * its first part on, so a later part that fails leaves no earlier draft offered.
+   * Posts the parts not yet posted. A draft needs the full confirmed context; the customer
+   * event already invalidated the previous draft before the first attempted part.
    */
-  private async post(message: RelayMessage, parts: WebhookMessage[], threadId: string): Promise<boolean> {
+  private async post(message: RelayMessage, parts: PlannedPart[], threadId: string): Promise<boolean> {
     const { store, forum } = this.options;
     const accountId = message.account.id;
     const conversationId = message.conversation.id;
     await this.options.ensureThread?.(accountId, conversationId, threadId);
     let incomplete = false;
-    for (const [part, frozen] of parts.entries()) {
-      const payload = incomplete ? { ...frozen, content: frozen.content?.replace(/\n-#.*$/, "") } : frozen;
+    for (const [part, { message: frozen, plainContent }] of parts.entries()) {
+      const payload = incomplete
+        ? {
+            ...frozen,
+            content: plainContent,
+            allowed_mentions: {
+              parse: [],
+              users: frozen.allowed_mentions?.users?.filter((id) => plainContent.includes(`<@${id}>`)) ?? [],
+            },
+          }
+        : frozen;
       this.unarchived(accountId, message.conversation);
       store.updateConversation(accountId, conversationId, { cardCovered: 1 });
       const outcome = await forum.execute(
@@ -452,16 +473,16 @@ export class Relay {
         payload,
         threadId,
         `message:${accountId}:${conversationId}:${message.id}:${part}:${threadId}`,
+        (receipt) => store.savePostedPart(accountId, conversationId, message.id, part, receipt.messageId),
       );
       if (outcome.state !== "confirmed") {
         incomplete = true;
         this.logUnknownSend(accountId, conversationId, message.id, threadId, part);
-        continue;
       }
-      store.savePostedPart(accountId, conversationId, message.id, part, outcome.messageId);
-      if (message.messageType === "incoming" && part === 0)
-        this.customerWrote(accountId, conversationId, outcome.messageId);
     }
+    const first = store.postedParts(accountId, conversationId, message.id)[0];
+    if (!incomplete && message.messageType === "incoming" && first)
+      this.customerWrote(accountId, conversationId, first);
     return true;
   }
 
@@ -493,19 +514,18 @@ export class Relay {
       post,
       undefined,
       `post:${accountId}:${conversation.id}:${store.get("generation") ?? 1}`,
+      (receipt) =>
+        store.updateConversation(accountId, conversation.id, {
+          threadId: receipt.channelId,
+          titleSubject: subject,
+          title,
+          titleMessageId: message.id,
+          state: this.stateOf(conversation),
+          announcedAssignee: "",
+        }),
     );
     if (outcome.state !== "confirmed") return undefined;
-    const threadId = outcome.channelId;
-    store.updateConversation(accountId, conversation.id, {
-      threadId,
-      titleSubject: subject,
-      title,
-      titleMessageId: message.id,
-      state: this.stateOf(conversation),
-      // Nothing announced yet: an assignee is announced after the run's messages.
-      announcedAssignee: "",
-    });
-    return threadId;
+    return outcome.channelId;
   }
 
   /**
@@ -607,11 +627,12 @@ export class Relay {
       { ...card, username: SYSTEM_USERNAME, avatar_url: avatars.chatwoot, allowed_mentions: { parse: [] } },
       threadId,
       `${key}:${revision}`,
+      (receipt) => {
+        store.updateConversation(accountId, conversationId, { cardId: receipt.messageId, cardCovered: 0 });
+        store.delete(`${key}:placing`);
+      },
     );
-    if (outcome.state === "confirmed") {
-      store.updateConversation(accountId, conversationId, { cardId: outcome.messageId, cardCovered: 0 });
-      store.delete(`${key}:placing`);
-    } else {
+    if (outcome.state !== "confirmed") {
       store.set(`${key}:unknown`, "1");
       store.updateConversation(accountId, conversationId, { cardCovered: 0 });
       this.logUnknownSend(accountId, conversationId, undefined, threadId);
