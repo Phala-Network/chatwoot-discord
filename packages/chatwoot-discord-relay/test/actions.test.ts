@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Budget } from "../../../shared/budget.ts";
-import { executeCommand, type CommandExecution } from "../src/commands/actions.ts";
+import { type CommandExecution, executeCommand } from "../src/commands/actions.ts";
 import type { CommandAction, CommandJob } from "../src/commands/job.ts";
 import { ALICE, BOB, json, mockFetch, on, type Route, testSettings } from "./helpers.ts";
 
@@ -320,7 +320,9 @@ describe("executeCommand", () => {
     mockFetch(
       on("GET", `${cw}/profile`, () => json({ id: 42, name: "A", email: "a@example.com", accounts: [{ id: 99 }] })),
     );
-    expect((await executeCommand(job({ type: "block" }), { settings, fetch: (request) => fetch(request) })).content).toBe(
+    expect(
+      (await executeCommand(job({ type: "block" }), { settings, fetch: (request) => fetch(request) })).content,
+    ).toBe(
       "❌ Your Chatwoot user is no longer an agent in this Chatwoot account. Ask an admin to add you back, or to unlink your Discord account.",
     );
   });
@@ -360,7 +362,10 @@ describe("executeCommand", () => {
   it("refuses a queued command once its invoker is no longer linked", async () => {
     const unlinked = testSettings({ agents: [{ discordUserId: BOB, chatwootUserId: 43 }] });
     const { requests } = mockFetch(profile);
-    const { content } = await executeCommand(job({ type: "block" }), { settings: unlinked, fetch: (request) => fetch(request) });
+    const { content } = await executeCommand(job({ type: "block" }), {
+      settings: unlinked,
+      fetch: (request) => fetch(request),
+    });
     expect(content).toBe("❌ Your Discord account is not linked to a Chatwoot agent.");
     expect(requests).toEqual([]);
   });

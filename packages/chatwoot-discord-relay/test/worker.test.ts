@@ -10,7 +10,7 @@ import {
 import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { Budget } from "../../../shared/budget.ts";
+import { Budget, JobDeadlineError } from "../../../shared/budget.ts";
 import { chatwootClient } from "../../../shared/chatwoot/api.ts";
 import { DiscordForum } from "../src/discord/forum.ts";
 import { DiscordRest } from "../src/discord/rest.ts";
@@ -1757,6 +1757,77 @@ it("does not confirm a historical identical note after an unknown mutation", asy
   expect(JSON.parse(feedback?.body ?? "{}").content).toContain("result is unknown");
 });
 
+it("continues attachments after a bounded slice while another command gets feedback", async () => {
+  world.mock.spy.mockRestore();
+  const downloads = [0, 0];
+  let sends = 0;
+  let feedbackAt = 0;
+  const sizes = [2 * 1024 * 1024 + 1, 3];
+  world = new World([
+    on("GET", "chatwoot.example.com/api/v1/profile", () => json({ id: 42, accounts: [{ id: 3 }] })),
+    on("GET", /^cdn\.discordapp\.com\/attachments\/slow-[01]$/, (request) => {
+      const index = request.url.pathname.endsWith("0") ? 0 : 1;
+      downloads[index] += 1;
+      if (index === 1 && downloads[index] === 1) throw new JobDeadlineError();
+      return Promise.resolve(new Response(new Uint8Array(sizes[index])));
+    }),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/888/messages", (request) => {
+      sends += 1;
+      const files = request.form?.getAll("attachments[]") ?? [];
+      expect(files.map((file) => (file instanceof File ? [file.name, file.size] : file))).toEqual([
+        ["first.bin", sizes[0]],
+        ["second.bin", sizes[1]],
+      ]);
+      return json({ id: 88801 });
+    }),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/889/toggle_status", () => json({})),
+    on(
+      "PATCH",
+      /^discord\.com\/api\/v10\/webhooks\/100000000000000001\/slice-feedback\/messages\/(@|%40)original$/,
+      () => {
+        feedbackAt = Date.now();
+        return json({});
+      },
+    ),
+  ]);
+  world.conversation(888, [{ id: 88801, content: "Files", message_type: 0 }]);
+  world.conversation(889, [{ id: 88901, content: "Status", message_type: 0 }]);
+  const queued = Date.now();
+  await hub().enqueueCommand({
+    interactionId: "slow-attachments",
+    applicationId: "100000000000000001",
+    token: "attachment-feedback",
+    discordUserId: ALICE,
+    accountId: 3,
+    conversationId: 888,
+    action: {
+      type: "message",
+      private: true,
+      content: "Files",
+      files: sizes.map((size, index) => ({
+        url: `https://cdn.discordapp.com/attachments/slow-${index}`,
+        filename: index === 0 ? "first.bin" : "second.bin",
+        size,
+      })),
+    },
+  });
+  await vi.waitFor(() => expect(downloads[1]).toBe(1));
+  await hub().enqueueCommand({
+    interactionId: "command-during-attachments",
+    applicationId: "100000000000000001",
+    token: "slice-feedback",
+    discordUserId: ALICE,
+    accountId: 3,
+    conversationId: 889,
+    action: { type: "status", status: "resolved" },
+  });
+  await drain();
+  expect(feedbackAt).toBeGreaterThan(0);
+  expect(feedbackAt - queued).toBeLessThan(1000);
+  expect(downloads).toEqual([1, 2]);
+  expect(sends).toBe(1);
+});
+
 it("does not confirm labels unless the complete resulting set matches", async () => {
   world.mock.spy.mockRestore();
   world = new World([
@@ -1825,7 +1896,7 @@ it("delivers confirmed feedback before an optional panel read", async () => {
     on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/889/toggle_status", () => json({})),
     on(
       "PATCH",
-      /^discord\.com\/api\/v10\/webhooks\/100000000000000001\/panel-feedback\/messages\/(\@|%40)original$/,
+      /^discord\.com\/api\/v10\/webhooks\/100000000000000001\/panel-feedback\/messages\/(@|%40)original$/,
       () => {
         feedback += 1;
         return json({});

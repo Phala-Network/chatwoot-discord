@@ -46,7 +46,7 @@ export interface CommandExecution {
   attachment?: (
     file: CommandJob["action"] & { type: "message" },
     index: number,
-  ) => Promise<{ blob: Blob; filename: string }>,
+  ) => Promise<{ blob: Blob; filename: string }>;
 }
 
 export async function executeCommand(job: CommandJob, execution: CommandExecution): Promise<CommandResult> {

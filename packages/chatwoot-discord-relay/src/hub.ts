@@ -30,7 +30,7 @@ import { ChatwootError, chatwootClient, toRelayConversation } from "../../../sha
 import { parseJson } from "../../../shared/json.ts";
 import { errorFields, log } from "../../../shared/log.ts";
 import { retryDelay } from "../../../shared/store.ts";
-import { commandPanel, executeCommand, statusMessage, type CommandExecution } from "./commands/actions.ts";
+import { type CommandExecution, commandPanel, executeCommand, statusMessage } from "./commands/actions.ts";
 import { downloadAttachment } from "./commands/attachments.ts";
 import { UNKNOWN_RESULT } from "./commands/common.ts";
 import { text } from "./commands/components.ts";

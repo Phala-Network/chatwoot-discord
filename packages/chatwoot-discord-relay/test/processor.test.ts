@@ -10,7 +10,7 @@ import type { Settings } from "../src/config.ts";
 import { DiscordForum } from "../src/discord/forum.ts";
 import { DiscordRest } from "../src/discord/rest.ts";
 import { minimumBudget, requestsPerMessage } from "../src/relay/limits.ts";
-import { refreshMetadata, type ProcessOutcome, processConversation, relayFor } from "../src/relay/processor.ts";
+import { type ProcessOutcome, processConversation, refreshMetadata, relayFor } from "../src/relay/processor.ts";
 import { processMessageUpdate } from "../src/relay/updates.ts";
 import { Store } from "../src/store.ts";
 import { ALICE, BOB, FORUM, json, mockFetch, on, type Recorded, TRIAGE, testSettings } from "./helpers.ts";
