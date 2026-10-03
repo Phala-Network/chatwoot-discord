@@ -51,21 +51,20 @@ export interface CommandFiles {
   ) => Promise<{ blob: Blob; filename: string }>;
 }
 
-export interface CommandPreparation extends CommandRetry, CommandPresentation, CommandFiles {
-  limits?: RateLimitStore;
-}
-
 export async function executeCommand(
   job: CommandJob,
   settings: Settings,
   fetch: Fetch,
-  preparation: CommandPreparation = {},
+  limits?: RateLimitStore,
+  retry: CommandRetry = {},
+  presentation: CommandPresentation = {},
+  attachments: CommandFiles = {},
 ): Promise<CommandResult> {
   // The link is checked again here: it may have changed since the command was queued.
   const chatwootUserId = settings.chatwootUserFor(job.discordUserId);
   const token = settings.agentToken(job.discordUserId);
   if (chatwootUserId === undefined || !token) return { content: `❌ ${NOT_LINKED}`, conversationGone: false };
-  const chatwoot = chatwootClient(settings.config.chatwoot.baseUrl, token, fetch, preparation.limits);
+  const chatwoot = chatwootClient(settings.config.chatwoot.baseUrl, token, fetch, limits);
   const { accountId, conversationId, action } = job;
 
   try {
@@ -193,8 +192,8 @@ export async function executeCommand(
         const files = [];
         let total = 0;
         for (const [index, file] of action.files.entries()) {
-          const downloaded = preparation.attachment
-            ? await preparation.attachment(action, index)
+          const downloaded = attachments.attachment
+            ? await attachments.attachment(action, index)
             : await downloadAttachment(file, limits.maxFileBytes, fetch);
           total += downloaded.blob.size;
           if (total > limits.maxTotalBytes) throw filesTooLarge(limits.maxTotalBytes);
@@ -221,7 +220,7 @@ export async function executeCommand(
       }
     }
     log.info("command done", { action: action.type, discordUserId: job.discordUserId, accountId, conversationId });
-    if ((job.panel === true && !preparation.deferPanel) || action.type === "panel") {
+    if ((job.panel === true && !presentation.deferPanel) || action.type === "panel") {
       const ticket = `${settings.account(accountId)?.name ?? "Ticket"} #${conversationId}`;
       return {
         content: message ? `✅ ${message}` : ticket,
@@ -231,8 +230,8 @@ export async function executeCommand(
     }
     return { content: `✅ ${message}`, conversationGone: false };
   } catch (error) {
-    const tracked = typeof preparation.retryable === "function";
-    const retryable = preparation.retryable?.() ?? false;
+    const tracked = typeof retry.retryable === "function";
+    const retryable = retry.retryable?.() ?? false;
     if (
       tracked &&
       !retryable &&
@@ -241,7 +240,7 @@ export async function executeCommand(
         (error instanceof DOMException && ["TimeoutError", "AbortError"].includes(error.name)) ||
         error instanceof JobDeadlineError)
     ) {
-      const confirmed = await preparation.confirmUnknown?.(chatwoot, action);
+      const confirmed = await retry.confirmUnknown?.(chatwoot, action);
       if (confirmed !== undefined) return { content: `✅ ${confirmed}`, conversationGone: false };
       return { content: UNKNOWN_RESULT, conversationGone: false };
     }
