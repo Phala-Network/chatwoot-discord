@@ -184,12 +184,16 @@ export async function processConversation(
           attempts,
           ...errorFields(error),
         });
-        await notifyQuietly(
-          context,
-          accountId,
-          conversation,
-          `⚠️ Chatwoot message ${message.id} could not be relayed. Check it in Chatwoot.`,
-        );
+        try {
+          await relay.notify(
+            accountId,
+            conversation,
+            `⚠️ Chatwoot message ${message.id} could not be relayed. Check it in Chatwoot.`,
+          );
+        } catch (noticeError) {
+          if (noticeError instanceof BudgetExhaustedError) return "yield";
+          log.warn("failed relay notice unavailable", { accountId, conversationId, ...errorFields(noticeError) });
+        }
       }
       cursor = message.id;
       store.setCursor(accountId, conversationId, cursor);
@@ -230,20 +234,6 @@ async function answeringReply(
     if (next === undefined || next <= after) throw new Error("Chatwoot message page did not advance");
     after = next;
     store.set(key, String(after));
-  }
-}
-
-/** A notice that must not fail the job: the failure is already logged by the caller. */
-async function notifyQuietly(
-  { relay }: ProcessorContext,
-  accountId: number,
-  conversation: RelayConversation,
-  text: string,
-): Promise<void> {
-  try {
-    await relay.notify(accountId, conversation, text);
-  } catch (error) {
-    if (error instanceof BudgetExhaustedError) throw error;
   }
 }
 

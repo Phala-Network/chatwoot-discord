@@ -28,18 +28,7 @@ export class Router extends DurableObject<Env> {
   constructor(context: DurableObjectState, env: Env) {
     super(context, env);
     this.store = new QueueStore(context.storage.sql);
-    context.blockConcurrencyWhile(async () => {
-      this.store.migrate();
-      if (!this.store.get("migration:agent-bot")) {
-        // Old account-webhook jobs and effects cannot run against the new lifecycle. Reply
-        // attempts survive; Chatwoot attributes remain untouched throughout rollback.
-        context.storage.sql.exec("DELETE FROM jobs");
-        for (const prefix of ["seen:", "decision:", "assign:", "labels:", "status:", "sweep:"]) {
-          context.storage.sql.exec("DELETE FROM cache WHERE key >= ? AND key < ?", prefix, `${prefix.slice(0, -1)};`);
-        }
-        this.store.set("migration:agent-bot", "1");
-      }
-    });
+    this.store.migrate();
   }
 
   async enqueueConversation(accountId: number, conversationId: number, transition?: Transition): Promise<void> {

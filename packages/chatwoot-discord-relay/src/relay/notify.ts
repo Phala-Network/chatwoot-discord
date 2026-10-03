@@ -104,7 +104,6 @@ export class Notifier {
     const { account, conversation } = message;
     // Decided and counted once per message: a retry after a failed post repeats the decision.
     const decision = store.once(`triage:${account.id}:${message.id}`, () => {
-      // Recorded as "answered" since v0.23, when only replies counted.
       if (conversation.status !== "open" || message.answered) return "answered";
       const hour = this.options.now().toISOString().slice(0, 13);
       const key = `${message.account.id}:${message.conversation.id}`;
@@ -134,8 +133,6 @@ function conversationBudgetNote(triage: TriageOptions): string {
 }
 
 function handledNote(triage: TriageOptions): string {
-  // As long as v0.23's "answered automatically. Ask it here if needed.": the notes' length decides where a
-  // message splits (see reserve), which a retry across versions relies on.
   return `-# ${triage.name} not called: handled automatically. Ask it here, if needed.`;
 }
 

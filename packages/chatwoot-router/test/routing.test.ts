@@ -119,7 +119,7 @@ describe("native bot turns", () => {
     expect(sent(mock.requests, "POST", `${CW}/toggle_status`)[0]?.headers.get("api_access_token")).toBe("bot-token");
   });
 
-  it.each(["person", "other bot", "unassigned", "open", "blocked"])(
+  it.each(["person", "other bot", "unassigned", "open"])(
     "leaves a disconnected %s ticket untouched",
     async (reason) => {
       const ticket: Ticket = { bot: null };
@@ -133,12 +133,19 @@ describe("native bot turns", () => {
         ticket.assigneeType = null;
       }
       if (reason === "open") ticket.status = "open";
-      if (reason === "blocked") ticket.blocked = true;
       const mock = world(ticket);
       await routeConversation(context(), 1, 5);
       expect(mock.requests.filter((request) => request.method === "POST")).toEqual([]);
     },
   );
+
+  it("hands off a disconnected brand bot's blocked pending ticket without sending", async () => {
+    const mock = world({ bot: null, blocked: true });
+    await routeConversation(context(), 1, 5);
+    expect(mock.ticket.status).toBe("open");
+    expect(sent(mock.requests, "POST", JEV)).toEqual([]);
+    expect(sent(mock.requests, "POST", `${CW}/messages`)).toEqual([]);
+  });
 
   it("retries a failed disconnect handoff without classifying", async () => {
     const mock = world({ bot: null, fail: { toggle_status: 1 } });
@@ -476,6 +483,27 @@ describe("native bot turns", () => {
     expect(sent(mock.requests, "POST", `${CW}/messages`)).toEqual([]);
   });
 
+  it("does not resend an observed historical reply that later disappears", async () => {
+    const mock = world(
+      {
+        messages: [
+          { id: 1, message_type: 1, private: false, sender: { type: "agent_bot", id: 1 } },
+          activity(2),
+          incoming(3),
+        ],
+      },
+      { owner: ["cloud", 1], kind: ["bounty", 1] },
+    );
+    const ctx = context(new MemoryStore(), KINDS);
+    await routeConversation(ctx, 1, 5);
+    mock.ticket.messages = mock.ticket.messages?.filter((message) => message.id !== 1);
+    mock.ticket.messages?.push(incoming(5, "Another report"));
+    mock.ticket.status = "pending";
+    await routeConversation(ctx, 1, 5);
+    expect(mock.ticket.status).toBe("open");
+    expect(sent(mock.requests, "POST", `${CW}/messages`)).toEqual([]);
+  });
+
   it("hands off a successful POST whose response does not confirm the brand reply", async () => {
     const mock = world(
       {
@@ -488,6 +516,25 @@ describe("native bot turns", () => {
     await routeConversation(context(new MemoryStore(), KINDS), 1, 5);
     expect(mock.ticket.status).toBe("open");
     expect(sent(mock.requests, "POST", `${CW}/messages`)).toHaveLength(1);
+  });
+
+  it.each(["messages", "read-messages"])("hands off a reply that fails during %s before resolving", async (stage) => {
+    const mock = world(
+      {
+        during: (operation) => {
+          if (operation !== stage) return;
+          const reply = mock.ticket.messages?.find((message) => message.message_type === 1);
+          if (reply) reply.status = "failed";
+        },
+      },
+      { owner: ["cloud", 1], kind: ["bounty", 1] },
+    );
+    await routeConversation(context(new MemoryStore(), KINDS), 1, 5);
+    expect(mock.ticket.status).toBe("open");
+    expect(sent(mock.requests, "POST", `${CW}/messages`)).toHaveLength(1);
+    expect(sent(mock.requests, "POST", `${CW}/toggle_status`).map((request) => JSON.parse(request.body))).toEqual([
+      { status: "open" },
+    ]);
   });
 
   it("hands off immediately on a missing canned response, and keeps retrying a failed handoff", async () => {

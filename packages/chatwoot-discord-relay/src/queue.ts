@@ -17,6 +17,7 @@ import {
 } from "discord-api-types/v10";
 import { z } from "zod";
 import { type ChatwootClient, CONVERSATIONS_PER_PAGE, personAssignee } from "../../../shared/chatwoot/api.ts";
+import { parseJson } from "../../../shared/json.ts";
 import { log } from "../../../shared/log.ts";
 import { relaysInbox, type Settings } from "./config.ts";
 import type { DiscordRest } from "./discord/rest.ts";
@@ -87,7 +88,8 @@ export async function postQueue(
   const queue = settings.config.queue;
   if (!queue) return;
   const nowSeconds = now / 1000;
-  const previous = readEscalations(store.get(ESCALATIONS_KEY));
+  const saved = escalationsSchema.safeParse(parseJson(store.get(ESCALATIONS_KEY)));
+  const previous = saved.success ? saved.data : {};
   const escalations: Escalations = {};
   const tickets: Ticket[] = [];
   let unread = false;
@@ -244,14 +246,4 @@ async function post(
       retry: false,
     },
   );
-}
-
-function readEscalations(stored: string | undefined): Escalations {
-  if (stored === undefined) return {};
-  try {
-    const parsed = escalationsSchema.safeParse(JSON.parse(stored));
-    return parsed.success ? parsed.data : {};
-  } catch {
-    return {};
-  }
 }

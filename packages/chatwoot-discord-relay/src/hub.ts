@@ -19,9 +19,9 @@ import {
 import { z } from "zod";
 import { Budget, BudgetExhaustedError } from "../../../shared/budget.ts";
 import { chatwootClient, toRelayConversation } from "../../../shared/chatwoot/api.ts";
+import { parseJson } from "../../../shared/json.ts";
 import { errorFields, log } from "../../../shared/log.ts";
 import { retryDelay } from "../../../shared/store.ts";
-import { readSweepPass, saveSweepPass } from "../../../shared/sweep.ts";
 import { executeCommand } from "./commands/actions.ts";
 import { text } from "./commands/components.ts";
 import { type CommandJob, commandJobSchema } from "./commands/job.ts";
@@ -61,11 +61,8 @@ const PRIORITY = {
 /** Requests a job may need before it can start without being cut short. */
 const COMMAND_BUDGET = 20;
 const MIN_BUDGET = 2;
-/**
- * Pages of conversations (25 each by default) a sweep job reads; a longer pass continues in the
- * next job. One, so a command waiting runs between pages rather than after the whole pass.
- */
-const SWEEP_PAGES = 1;
+const sweepPassSchema = z.object({ cutoff: z.number(), page: z.number().int().positive(), startedAt: z.number() });
+const PASS_TTL_MS = 24 * 60 * 60 * 1000;
 /** Commands that change nothing in Chatwoot: their post needs no sync. */
 const READ_ONLY_ACTIONS: ReadonlySet<string> = new Set(["panel", "pick-assignee"]);
 /** A job that takes longer than this is logged, to tell a slow upstream from a busy queue. */
@@ -94,7 +91,7 @@ export class Hub extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.store = new Store(ctx.storage.sql);
-    ctx.blockConcurrencyWhile(async () => this.store.migrate());
+    this.store.migrate();
   }
 
   /**
@@ -167,10 +164,6 @@ export class Hub extends DurableObject<Env> {
 
   /** Cloudflare runs at most one alarm() at a time per Durable Object. */
   override async alarm(): Promise<void> {
-    await this.drain();
-  }
-
-  private async drain(): Promise<void> {
     const settings = await loadSettings(this.env);
     const budget = new Budget(settings.config.relay.subrequestBudget);
     const services = this.services(settings, budget);
@@ -179,12 +172,13 @@ export class Hub extends DurableObject<Env> {
 
     this.store.prune();
     for (let job = this.store.nextDueJob(); job; job = this.store.nextDueJob()) {
-      const payload = parsePayload(job.payload);
-      if (!payload) {
+      const parsed = payloadSchema.safeParse(parseJson(job.payload));
+      if (!parsed.success) {
         log.warn("unreadable job dropped", { job: job.key });
         this.store.deleteJob(job.key);
         continue;
       }
+      const payload = parsed.data;
       if (budget.remaining < requiredBudget(payload, settings) || Date.now() - startedAt > RUN_WALL_MS) {
         yielded = true;
         break;
@@ -312,60 +306,61 @@ export class Hub extends DurableObject<Env> {
    * Finds conversations whose post is behind (new messages, or tags/status/archive state that
    * differ) and queues them. Covers webhooks that were never delivered and service downtime.
    * A pass reads conversations newest activity first, down to the start of its window (since the
-   * previous pass started, at least `lookbackSeconds`, at most `maxCatchUpSeconds`), SWEEP_PAGES
-   * pages per job, continuing where it stopped until it is done. Activity means a new message
+   * previous pass started, at least `lookbackSeconds`, at most `maxCatchUpSeconds`), one page
+   * per job, continuing where it stopped until it is done. Activity means a new message
    * (Chatwoot's `last_activity_at`); a change that creates none, such as only a custom
    * attribute, relies on its webhook. Once a pass it also queues posts still without a card
    * (backfillCards).
    */
   private async sweep(accountId: number, { settings, chatwoot, relay }: ProcessorContext): Promise<void> {
-    const pass = readSweepPass(this.store, accountId, settings.config.reconcile);
-
+    const key = `sweep:${accountId}:pass`;
+    const saved = sweepPassSchema.safeParse(parseJson(this.store.get(key)));
+    const now = Date.now();
+    const last = Number(this.store.get(`sweep:${accountId}:last`) ?? 0);
+    const { lookbackSeconds, maxCatchUpSeconds } = settings.config.reconcile;
+    const window = Math.min(
+      Math.max(last > 0 ? (now - last) / 1000 + 60 : lookbackSeconds, lookbackSeconds),
+      maxCatchUpSeconds,
+    );
+    const pass = saved.success ? saved.data : { cutoff: now / 1000 - window, page: 1, startedAt: now };
     const account = settings.account(accountId);
     let seen = 0;
     let queued = 0;
-    let reachedCutoff = false;
-    let page = pass.page;
-    for (; page < pass.page + SWEEP_PAGES && !reachedCutoff; page += 1) {
-      const conversations = await chatwoot.listConversations(accountId, page);
-      if (conversations.length === 0) reachedCutoff = true;
-      for (const conversation of conversations) {
-        const activity = conversation.last_activity_at ?? 0;
-        if (activity < pass.cutoff) {
-          reachedCutoff = true;
-          break;
-        }
-        const conversationId = conversation.id;
-        if (conversationId === undefined || !account || !relaysInbox(account, conversation.inbox_id)) continue;
-        seen += 1;
-        const row = this.store.conversation(accountId, conversationId);
-        const latest = latestMessageId(conversation);
-        // An adopted post without a cursor needs one run to pick its starting point.
-        const needsCursor = row?.threadId !== undefined && row.cursor === undefined;
-        const cursor = row?.cursor ?? settings.config.relay.startAfterMessageId;
-        const behind = needsCursor || (latest !== undefined && latest > cursor);
-        // A card still to be moved or posted counts too (its sync may have failed).
-        const stale =
-          row?.threadId !== undefined &&
-          (row.state !== relay.stateOf(toRelayConversation(conversationId, conversation)) ||
-            row.cardCovered === 1 ||
-            isUnknownCard(row.cardId));
-        if (behind || stale) {
-          this.enqueue({ type: "conversation", accountId, conversationId });
-          queued += 1;
-        }
+    const conversations = await chatwoot.listConversations(accountId, pass.page);
+    let reachedCutoff = conversations.length === 0;
+    for (const conversation of conversations) {
+      if ((conversation.last_activity_at ?? 0) < pass.cutoff) {
+        reachedCutoff = true;
+        break;
+      }
+      const conversationId = conversation.id;
+      if (conversationId === undefined || !account || !relaysInbox(account, conversation.inbox_id)) continue;
+      seen += 1;
+      const row = this.store.conversation(accountId, conversationId);
+      const latest = latestMessageId(conversation);
+      const needsCursor = row?.threadId !== undefined && row.cursor === undefined;
+      const cursor = row?.cursor ?? settings.config.relay.startAfterMessageId;
+      const behind = needsCursor || (latest !== undefined && latest > cursor);
+      const stale =
+        row?.threadId !== undefined &&
+        (row.state !== relay.stateOf(toRelayConversation(conversationId, conversation)) ||
+          row.cardCovered === 1 ||
+          isUnknownCard(row.cardId));
+      if (behind || stale) {
+        this.enqueue({ type: "conversation", accountId, conversationId });
+        queued += 1;
       }
     }
     if (pass.page === 1) queued += this.backfillCards(accountId);
     if (reachedCutoff) {
-      // The next pass covers everything active since this one started, so activity while it ran
-      // (which reorders the list) is read again.
-      saveSweepPass(this.store, accountId, pass);
-      log.info("sweep done", { accountId, pages: page - 1, seen, queued });
+      // The next pass covers list movement while this pass ran.
+      this.store.set(`sweep:${accountId}:last`, String(pass.startedAt));
+      this.store.delete(key);
+      log.info("sweep done", { accountId, pages: pass.page, seen, queued });
     } else {
-      saveSweepPass(this.store, accountId, pass, page);
-      this.enqueue({ type: "sweep", accountId }); // Continues in the next job.
-      log.info("sweep continues", { accountId, nextPage: page, seen, queued });
+      this.store.set(key, JSON.stringify({ ...pass, page: pass.page + 1 }), PASS_TTL_MS);
+      this.enqueue({ type: "sweep", accountId });
+      log.info("sweep continues", { accountId, nextPage: pass.page + 1, seen, queued });
     }
   }
 
@@ -452,17 +447,7 @@ function jobKey(payload: JobPayload): string {
 function requiredBudget(payload: JobPayload, settings: Settings): number {
   if (payload.type === "command") return COMMAND_BUDGET;
   if (payload.type === "queue") return queueBudget(settings.config.accounts.length);
-  return payload.type === "sweep" ? SWEEP_PAGES : MIN_BUDGET;
-}
-
-/** A stored job, or undefined for one that is unreadable or of an unknown kind. */
-function parsePayload(raw: string): JobPayload | undefined {
-  try {
-    const parsed = payloadSchema.safeParse(JSON.parse(raw));
-    return parsed.success ? parsed.data : undefined;
-  } catch {
-    return undefined;
-  }
+  return payload.type === "sweep" ? 1 : MIN_BUDGET;
 }
 
 function answerKey(answerId: string): string {

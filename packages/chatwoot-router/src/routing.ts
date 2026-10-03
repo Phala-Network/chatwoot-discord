@@ -120,7 +120,7 @@ export async function routeConversation(
       return;
     }
     const conversation = toRelayConversation(conversationId, raw);
-    if (conversation.contact.blocked || conversation.assignee) return;
+    if (conversation.assignee) return;
     if (raw.meta?.assignee && (raw.meta.assignee_type !== "AgentBot" || raw.meta.assignee.id !== botId)) return;
     if ((await chatwoot.inboxBot(accountId, raw.inbox_id))?.id !== botId) {
       // Disconnect is level-triggered: native bot handoff also clears ai_assignee.
@@ -131,13 +131,13 @@ export async function routeConversation(
           latest?.status === "pending" &&
           latest.inbox_id === raw.inbox_id &&
           latest.meta?.assignee_type === "AgentBot" &&
-          latest.meta.assignee?.id === botId &&
-          !toRelayConversation(conversationId, latest).contact.blocked
+          latest.meta.assignee?.id === botId
         )
           await bot.setStatus(accountId, conversationId, { status: "open" });
       }
       return;
     }
+    if (conversation.contact.blocked) return;
     observeStatus(store, accountId, conversationId, "pending");
     return { raw, conversation };
   };
@@ -166,13 +166,15 @@ export async function routeConversation(
   };
   const turn = await readTurn(chatwoot, store, accountId, conversationId);
   const input = inputs(turn.messages);
-  const humanReply = (messages: ChatwootMessage[]) =>
+  const requiresHandoff = (messages: ChatwootMessage[]) =>
     messages.some(
       (message) =>
         message.message_type === 1 &&
         !message.private &&
-        message.sender?.type === "user" &&
-        !message.content_attributes?.deleted,
+        ((message.sender?.type === "user" && !message.content_attributes?.deleted) ||
+          (message.sender?.type === "agent_bot" &&
+            message.sender.id === botId &&
+            (message.status === "failed" || message.content_attributes?.deleted))),
     );
 
   // A fresh read before every effect. A new input/boundary is work for a new queue run.
@@ -181,7 +183,7 @@ export async function routeConversation(
     if (!current) return;
     const latest = await readTurn(chatwoot, store, accountId, conversationId);
     if (latest.boundary !== turn.boundary || inputs(latest.messages).key !== input.key) return "defer" as const;
-    return { ...current, handoff: latest.handoff || humanReply(latest.messages) };
+    return { ...current, handoff: latest.handoff || requiresHandoff(latest.messages) };
   };
   const handoff = async (current?: Awaited<ReturnType<typeof fresh>>) => {
     requestHandoff(store, accountId, conversationId);
@@ -190,9 +192,10 @@ export async function routeConversation(
     if (current) await bot.setStatus(accountId, conversationId, { status: "open" });
     return undefined;
   };
-  if (turn.handoff || humanReply(turn.messages) || input.count === 0) return handoff();
+  if (turn.handoff || requiresHandoff(turn.messages) || input.count === 0) return handoff();
   const memoKey = `decision:${accountId}:${conversationId}:${input.key}`;
-  let decision = readDecision(store.get(memoKey));
+  const memo = decisionSchema.safeParse(parseJson(store.get(memoKey)));
+  let decision = memo.success ? memo.data : undefined;
   if (!decision) {
     decision = await decide(ctx, owners, routing.kinds?.[String(accountId)], input.text);
     store.set(memoKey, JSON.stringify(decision));
@@ -230,6 +233,8 @@ export async function routeConversation(
       return handoff();
     }
     if (history === "unknown" || (history === "complete-none" && store.get(replyKey) !== undefined)) return handoff();
+    // Preserve the once-per-conversation guard even if an observed historical reply is later removed.
+    if (history === "found" && store.get(replyKey) === undefined) store.set(replyKey, "observed");
     if (history === "complete-none") {
       const content = await chatwoot.cannedResponse(accountId, kind.cannedResponse);
       if (!content?.trim()) return handoff();
@@ -362,9 +367,4 @@ async function decide(ctx: RoutingContext, owners: Owners, kinds: Kinds | undefi
     kindConfidence: kind.confidence,
     noRequest: request.choice === "none" && request.confidence >= routing.minConfidence,
   };
-}
-
-function readDecision(stored: string | undefined): Decision | undefined {
-  const parsed = decisionSchema.safeParse(parseJson(stored));
-  return parsed.success ? parsed.data : undefined;
 }

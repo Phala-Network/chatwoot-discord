@@ -221,20 +221,6 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
     return list && messageListSchema.parse(list).payload.toSorted((a, b) => a.id - b.id);
   }
 
-  function setCustomAttributes(
-    accountId: number,
-    conversationId: number,
-    attributes: Record<string, unknown>,
-  ): Promise<void> {
-    return ensureOk(
-      "set custom attribute",
-      client.POST("/api/v1/accounts/{account_id}/conversations/{conversation_id}/custom_attributes", {
-        params: { path: { account_id: accountId, conversation_id: conversationId } },
-        body: { custom_attributes: attributes, merge: true },
-      }),
-    );
-  }
-
   return {
     /** The conversation, or undefined when it does not exist (it was deleted). */
     getConversation(accountId: number, conversationId: number): Promise<ChatwootConversation | undefined> {
@@ -269,16 +255,6 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
     ): Promise<ChatwootMessage | undefined> {
       const messages = await listMessages(accountId, conversationId, { after: messageId - 1, before: messageId + 1 });
       return messages?.find((message) => message.id === messageId);
-    },
-
-    async listInboxes(accountId: number): Promise<number[]> {
-      const list = await data(
-        "list inboxes",
-        client.GET("/api/v1/accounts/{account_id}/inboxes", {
-          params: { path: { account_id: accountId } },
-        }),
-      );
-      return (list.payload ?? []).flatMap((inbox) => (inbox.id === undefined ? [] : [inbox.id]));
     },
 
     async inboxBot(accountId: number, inboxId: number): Promise<{ id: number } | undefined> {
@@ -440,7 +416,15 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
       );
     },
 
-    setCustomAttributes,
+    setCustomAttributes(accountId: number, conversationId: number, attributes: Record<string, unknown>): Promise<void> {
+      return ensureOk(
+        "set custom attribute",
+        client.POST("/api/v1/accounts/{account_id}/conversations/{conversation_id}/custom_attributes", {
+          params: { path: { account_id: accountId, conversation_id: conversationId } },
+          body: { custom_attributes: attributes, merge: true },
+        }),
+      );
+    },
 
     /**
      * Sends an outgoing message (or private note). With files it is sent as the spec's
