@@ -83,6 +83,8 @@ export interface PostFields {
   state: string;
   /** The Chatwoot user id of the assignee the post last announced ("" for none; see assigneeKey). */
   announcedAssignee: string;
+  /** Last confirmed assignee notice, to distinguish repeated assignments without replaying an unknown send. */
+  assigneeNoticeId: string;
   /** 1 while a live message is posted and the assignee is not announced after it yet (see announceAssignee). */
   announcePending: number;
   /**
@@ -247,20 +249,25 @@ export class Relay {
    * job's retry posts it even when there are no new messages.
    */
   async announceAssignee(accountId: number, conversation: RelayConversation): Promise<void> {
+    const { store } = this.options;
     const discordId = this.notifier.newAssignee(accountId, conversation);
     if (discordId) {
       const notice = this.notice(assignedLine(`<@${discordId}>`));
-      const posted = await this.postMessage(accountId, conversation, {
-        ...notice,
-        allowed_mentions: { parse: [], users: [discordId] },
-      });
+      const posted = await this.postMessage(
+        accountId,
+        conversation,
+        { ...notice, allowed_mentions: { parse: [], users: [discordId] } },
+        `assignee:${store.conversation(accountId, conversation.id)?.assigneeNoticeId ?? "initial"}`,
+      );
       if (posted === undefined) return;
-      await this.addMember(accountId, conversation.id, discordId);
+      store.updateConversation(accountId, conversation.id, { assigneeNoticeId: posted });
     }
-    this.options.store.updateConversation(accountId, conversation.id, {
+    // Commit before the best-effort member PUT, so its failure cannot replay the notice.
+    store.updateConversation(accountId, conversation.id, {
       announcedAssignee: assigneeKey(conversation),
       announcePending: 0,
     });
+    if (discordId) await this.addMember(accountId, conversation.id, discordId);
   }
 
   /**
@@ -325,7 +332,12 @@ export class Relay {
    * Posts a customer's response to an interactive message into the conversation's post, under
    * the contact's name and avatar (see `postMessage`).
    */
-  async postResponse(accountId: number, conversation: RelayConversation, text: string): Promise<string | undefined> {
+  async postResponse(
+    accountId: number,
+    conversation: RelayConversation,
+    text: string,
+    sendKey: string,
+  ): Promise<string | undefined> {
     const { frontendUrl, avatars } = this.options;
     let content = defused(text);
     if (content.length > CONTENT_LIMIT) {
@@ -333,12 +345,17 @@ export class Relay {
       const note = `-# Response truncated (${charLength(text)} characters). Full text: <${link}>`;
       content = `${split(content, CONTENT_LIMIT - note.length - 1)[0] ?? ""}\n${note}`;
     }
-    const messageId = await this.postMessage(accountId, conversation, {
-      content,
-      username: customerName(conversation.contact),
-      avatar_url: customerAvatar(conversation.contact.avatarUrl, avatars),
-      allowed_mentions: { parse: [] },
-    });
+    const messageId = await this.postMessage(
+      accountId,
+      conversation,
+      {
+        content,
+        username: customerName(conversation.contact),
+        avatar_url: customerAvatar(conversation.contact.avatarUrl, avatars),
+        allowed_mentions: { parse: [] },
+      },
+      sendKey,
+    );
     if (messageId) this.customerWrote(accountId, conversation.id, messageId);
     return messageId;
   }
@@ -347,8 +364,13 @@ export class Relay {
    * Posts a notice into the conversation's post, e.g. when one of its messages could not be
    * relayed or delivered (see `postMessage`).
    */
-  notify(accountId: number, conversation: RelayConversation, content: string): Promise<string | undefined> {
-    return this.postMessage(accountId, conversation, this.notice(content));
+  notify(
+    accountId: number,
+    conversation: RelayConversation,
+    content: string,
+    sendKey: string,
+  ): Promise<string | undefined> {
+    return this.postMessage(accountId, conversation, this.notice(content), sendKey);
   }
 
   /** The conversation was deleted in Chatwoot: says so in its post, archives it, and forgets it. */
@@ -356,7 +378,7 @@ export class Relay {
     const { store, forum } = this.options;
     const threadId = store.conversation(accountId, conversationId)?.threadId;
     const gone = this.notice("This conversation no longer exists in Chatwoot.");
-    if (threadId && (await this.postMessage(accountId, { id: conversationId }, gone)) !== undefined) {
+    if (threadId && (await this.postMessage(accountId, { id: conversationId }, gone, "deleted")) !== undefined) {
       try {
         await forum.updateThread(this.forumOf(accountId), threadId, { archived: true });
       } catch (error) {
@@ -498,13 +520,19 @@ export class Relay {
     accountId: number,
     conversation: Pick<RelayConversation, "id" | "status">,
     message: WebhookMessage,
+    sendKey: string,
   ): Promise<string | undefined> {
     const { store, forum } = this.options;
     const threadId = store.conversation(accountId, conversation.id)?.threadId;
     if (!threadId) return undefined;
     let messageId: string;
     try {
-      ({ messageId } = await forum.execute(this.forumOf(accountId), message, threadId));
+      ({ messageId } = await forum.execute(
+        this.forumOf(accountId),
+        message,
+        threadId,
+        `notice:${accountId}:${conversation.id}:${threadId}:${sendKey}`,
+      ));
     } catch (error) {
       if (!(error instanceof UnknownThreadError)) throw error;
       store.forgetThread(accountId, conversation.id);

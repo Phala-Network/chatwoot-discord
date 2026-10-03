@@ -172,7 +172,11 @@ export async function processConversation(
         conversation,
         ...(await linkedAgents(context, message, accountId)),
       });
-      if (store.get(`answer-version:${accountId}:${conversationId}`) !== pageVersion || (scan !== undefined && store.get(scanKey) !== scan)) return "yield";
+      if (
+        store.get(`answer-version:${accountId}:${conversationId}`) !== pageVersion ||
+        (scan !== undefined && store.get(scanKey) !== scan)
+      )
+        return "yield";
       relayMessage.answered = answered;
       try {
         await relay.relay(relayMessage);
@@ -198,6 +202,7 @@ export async function processConversation(
             accountId,
             conversation,
             `⚠️ Chatwoot message ${message.id} could not be relayed. Check it in Chatwoot.`,
+            `failed:${message.id}`,
           );
         } catch (noticeError) {
           if (noticeError instanceof BudgetExhaustedError) return "yield";

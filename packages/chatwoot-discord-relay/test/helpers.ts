@@ -61,6 +61,7 @@ export class MemoryStore implements RelayStore {
       threadId,
       state,
       announcedAssignee,
+      assigneeNoticeId: row.assigneeNoticeId,
       announcePending,
       titleSubject,
       title,

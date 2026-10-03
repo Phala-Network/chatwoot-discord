@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { Budget, JobDeadlineError } from "../../../shared/budget.ts";
 import manifest from "../package.json" with { type: "json" };
 import { DiscordForum } from "../src/discord/forum.ts";
 import { DiscordHttpError, DiscordRest } from "../src/discord/rest.ts";
@@ -50,6 +51,89 @@ function forum() {
 afterEach(() => vi.restoreAllMocks());
 
 describe("DiscordForum", () => {
+  it("resumes a send when its time slice ended before dispatch", async () => {
+    const cache = new MemoryCache();
+    cache.set("forum:55:webhook", "1:abc");
+    const { requests } = mockFetch(
+      on("POST", `${api}/webhooks/1/abc`, () => json({ id: "m1", channel_id: "thread-9" })),
+    );
+    const budget = new Budget(5);
+    budget.startSlice(10);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await expect(
+      new DiscordForum(new DiscordRest("bot-token", budget.fetch), cache).execute(
+        "55",
+        { content: "hi" },
+        "thread-9",
+        "send-1",
+      ),
+    ).rejects.toBeInstanceOf(JobDeadlineError);
+    expect(
+      await new DiscordForum(new DiscordRest("bot-token", new Budget(5).fetch), cache).execute(
+        "55",
+        { content: "hi" },
+        "thread-9",
+        "send-1",
+      ),
+    ).toEqual({ channelId: "thread-9", messageId: "m1" });
+    expect(requests).toHaveLength(1);
+  });
+
+  it("never replays an in-flight send after its time slice expires", async () => {
+    const cache = new MemoryCache();
+    cache.set("forum:55:webhook", "1:abc");
+    const { requests } = mockFetch(
+      on("POST", `${api}/webhooks/1/abc`, async (request) => {
+        await new Promise<void>((_resolve, reject) =>
+          request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true }),
+        );
+        return json({ id: "m1", channel_id: "thread-9" });
+      }),
+    );
+    const budget = new Budget(5);
+    budget.startSlice(30);
+    await expect(
+      new DiscordForum(new DiscordRest("bot-token", budget.fetch), cache).execute(
+        "55",
+        { content: "hi" },
+        "thread-9",
+        "send-2",
+      ),
+    ).rejects.toBeInstanceOf(JobDeadlineError);
+    await expect(
+      new DiscordForum(new DiscordRest("bot-token", new Budget(5).fetch), cache).execute(
+        "55",
+        { content: "hi" },
+        "thread-9",
+        "send-2",
+      ),
+    ).rejects.toThrow("outcome is unknown");
+    expect(requests).toHaveLength(1);
+  });
+
+  it("retries a refused tag send after the recovery read fails", async () => {
+    const cache = new MemoryCache();
+    cache.set("forum:55:webhook", "1:abc");
+    let reads = 0;
+    let accepted = 0;
+    mockFetch(
+      on("POST", `${api}/webhooks/1/abc`, (request) => {
+        if (JSON.parse(request.body).applied_tags?.length) return json({ code: 10087 }, { status: 400 });
+        accepted += 1;
+        return json({ id: "m1", channel_id: "thread-9" });
+      }),
+      on("GET", `${api}/channels/55`, () => (++reads === 1 ? json({}, { status: 500 }) : json({ available_tags: [] }))),
+    );
+    const client = new DiscordForum(new DiscordRest("bot-token", new Budget(10).fetch), cache);
+    await expect(
+      client.execute("55", { content: "hi", applied_tags: ["deleted"] }, "thread-9", "send-3"),
+    ).rejects.toMatchObject({ status: 500 });
+    await expect(
+      client.execute("55", { content: "hi", applied_tags: ["deleted"] }, "thread-9", "send-3"),
+    ).resolves.toEqual({ channelId: "thread-9", messageId: "m1" });
+    expect(accepted).toBe(1);
+  });
+
   it("takes Discord's Unknown Channel for a post that no longer exists", async () => {
     mockFetch(
       application,
@@ -255,10 +339,13 @@ describe("DiscordRest", () => {
     const cache = new MemoryCache();
     const { requests } = mockFetch(on("GET", `${api}/channels/1`, () => json({ retry_after: 60 }, { status: 429 })));
     const started = Date.now();
-    await expect(new DiscordRest("t", (request) => fetch(request), cache).get("/channels/1")).rejects.toMatchObject({
-      status: 429,
-      retryAfterMs: 60_000,
-    });
+    const limited = await new DiscordRest("t", (request) => fetch(request), cache)
+      .get("/channels/1")
+      .catch((error: unknown) => error);
+    if (!(limited instanceof DiscordHttpError)) throw new Error("Expected a rate-limit response");
+    expect(limited.status).toBe(429);
+    expect(limited.retryAfterMs).toBeGreaterThanOrEqual(59_500);
+    expect(limited.retryAfterMs).toBeLessThanOrEqual(60_000);
     await expect(new DiscordRest("t", (request) => fetch(request), cache).get("/channels/1")).rejects.toMatchObject({
       status: 429,
     });

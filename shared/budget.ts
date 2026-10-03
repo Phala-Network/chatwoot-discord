@@ -11,7 +11,7 @@ export class BudgetExhaustedError extends Error {
 }
 
 export class JobDeadlineError extends Error {
-  constructor() {
+  constructor(readonly requestStarted = false) {
     super("Job time slice is used up");
     this.name = "JobDeadlineError";
   }
@@ -82,7 +82,7 @@ export class Budget {
             else controller.enqueue(value);
           } catch (error) {
             await reader.cancel().catch(() => {});
-            controller.error(slice?.aborted ? new JobDeadlineError() : error);
+            controller.error(slice?.aborted ? new JobDeadlineError(true) : error);
           }
         },
         cancel: (reason) => reader.cancel(reason),
@@ -93,7 +93,7 @@ export class Budget {
         headers: response.headers,
       });
     } catch (error) {
-      this.checkpoint();
+      if (this.slice?.aborted) throw new JobDeadlineError(true);
       throw error;
     }
   };

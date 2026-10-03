@@ -89,6 +89,7 @@ const MIGRATIONS: string[] = [
    ALTER TABLE conversations ADD COLUMN answer_id TEXT;
    ALTER TABLE conversations ADD COLUMN answer_source_id TEXT;
    ALTER TABLE conversations ADD COLUMN customer_message_id TEXT;`,
+  `ALTER TABLE conversations ADD COLUMN assignee_notice_id TEXT;`,
 ];
 
 const COUNTER_TTL_MS = 2 * 60 * 60 * 1000;
@@ -108,6 +109,7 @@ const COLUMNS: ReadonlyArray<readonly [keyof ConversationFields, string]> = [
   ["state", "state"],
   ["cursor", "cursor"],
   ["announcedAssignee", "announced_assignee"],
+  ["assigneeNoticeId", "assignee_notice_id"],
   ["announcePending", "announce_pending"],
   ["titleSubject", "title_subject"],
   ["title", "title"],
@@ -201,6 +203,7 @@ export class Store extends QueueStore implements RelayStore, Cache {
         state: string | null;
         cursor: number | null;
         announced_assignee: string | null;
+        assignee_notice_id: string | null;
         announce_pending: number | null;
         title_subject: string | null;
         title: string | null;
@@ -223,6 +226,7 @@ export class Store extends QueueStore implements RelayStore, Cache {
       state: row.state ?? undefined,
       cursor: row.cursor ?? undefined,
       announcedAssignee: row.announced_assignee ?? undefined,
+      assigneeNoticeId: row.assignee_notice_id ?? undefined,
       announcePending: row.announce_pending ?? undefined,
       titleSubject: row.title_subject ?? undefined,
       title: row.title ?? undefined,
@@ -315,7 +319,7 @@ export class Store extends QueueStore implements RelayStore, Cache {
     this.sql.exec(
       `INSERT INTO conversations (account_id, conversation_id, thread_id, card_id) VALUES (?, ?, ?, ?)
        ON CONFLICT (account_id, conversation_id) DO UPDATE SET thread_id = excluded.thread_id, state = NULL,
-         announced_assignee = NULL, announce_pending = NULL, title_subject = NULL, title = NULL, title_message_id = NULL,
+         announced_assignee = NULL, assignee_notice_id = NULL, announce_pending = NULL, title_subject = NULL, title = NULL, title_message_id = NULL,
          card_id = excluded.card_id, card_covered = NULL, answer_id = NULL, answer_source_id = NULL,
          customer_message_id = NULL`,
       accountId,
@@ -402,7 +406,7 @@ export class Store extends QueueStore implements RelayStore, Cache {
     const key = `send:post:${accountId}:${conversationId}`;
     if (this.get(key) !== "unknown") this.delete(key);
     this.sql.exec(
-      `UPDATE conversations SET thread_id = NULL, state = NULL, announced_assignee = NULL, announce_pending = NULL,
+      `UPDATE conversations SET thread_id = NULL, state = NULL, announced_assignee = NULL, assignee_notice_id = NULL, announce_pending = NULL,
          title_subject = NULL, title = NULL, title_message_id = NULL, card_id = NULL, card_covered = NULL, answer_id = NULL,
          answer_source_id = NULL, customer_message_id = NULL
        WHERE account_id = ? AND conversation_id = ?`,

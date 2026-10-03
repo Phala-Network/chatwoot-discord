@@ -604,12 +604,14 @@ describe("Relay", () => {
   });
 
   it("posts a notice into the existing post, and archives a resolved post again afterwards", async () => {
-    expect(await relay.notify(3, message().conversation, "⚠️ Notice")).toBeUndefined(); // no post yet
+    expect(await relay.notify(3, message().conversation, "⚠️ Notice", "notice-1")).toBeUndefined(); // no post yet
     await relay.relay(message({ conversation: resolved }));
     await relay.sync(3, message({ conversation: resolved }).conversation, "thread-1");
     expect(forum.archived.has("thread-1")).toBe(true);
 
-    expect(await relay.notify(3, message({ conversation: resolved }).conversation, "⚠️ Notice")).toBeTypeOf("string");
+    expect(await relay.notify(3, message({ conversation: resolved }).conversation, "⚠️ Notice", "notice-2")).toBeTypeOf(
+      "string",
+    );
     expect(forum.calls.at(-1)).toEqual([
       "thread-1",
       { content: "⚠️ Notice", username: "Chatwoot", avatar_url: AVATARS.chatwoot, allowed_mentions: { parse: [] } },
@@ -623,7 +625,7 @@ describe("Relay", () => {
     await relay.relay(message());
     const contact = { name: "Jane Doe", avatarUrl: "https://cdn.example.com/jane.png" };
     const conversation = message({ conversation: { contact } }).conversation;
-    expect(await relay.postResponse(3, conversation, "Pick one\n\n**Response:** A")).toBeTypeOf("string");
+    expect(await relay.postResponse(3, conversation, "Pick one\n\n**Response:** A", "response-1")).toBeTypeOf("string");
     expect(forum.calls.at(-1)).toEqual([
       "thread-1",
       {
@@ -635,7 +637,7 @@ describe("Relay", () => {
     ]);
 
     const long = `Question\n\n**Responses:**\n${"• Notes: text\n".repeat(300)}`;
-    await relay.postResponse(3, conversation, long);
+    await relay.postResponse(3, conversation, long, "response-2");
     const content = forum.contents().at(-1) ?? "";
     expect(content.length).toBeLessThanOrEqual(CONTENT_LIMIT);
     expect(content.startsWith("Question\n\n**Responses:**\n• Notes: text\n")).toBe(true);
@@ -646,14 +648,21 @@ describe("Relay", () => {
 
   it("defuses mentions and subtext in a customer's response", async () => {
     await relay.relay(message());
-    await relay.postResponse(3, message().conversation, "Pick one\n\n**Response:** <@100000000000000777>\n-# x");
+    await relay.postResponse(
+      3,
+      message().conversation,
+      "Pick one\n\n**Response:** <@100000000000000777>\n-# x",
+      "response-3",
+    );
     expect(forum.contents().at(-1)).toBe("Pick one\n\n**Response:** <\u200b@100000000000000777>\n\u200b-# x");
   });
 
   it("forgets a post deleted in Discord instead of posting a response", async () => {
     await relay.relay(message());
     forum.failThreadWith = "gone";
-    expect(await relay.postResponse(3, message().conversation, "**Email:** a@example.com")).toBeUndefined();
+    expect(
+      await relay.postResponse(3, message().conversation, "**Email:** a@example.com", "response-4"),
+    ).toBeUndefined();
     await relay.relay(message({ id: 102, content: "New request" }));
     expect(forum.calls.map(([thread]) => thread)).toEqual([undefined, "thread-1", undefined, "thread-3"]);
     expect(forum.contents().at(-1)).toBe("New request");
@@ -919,7 +928,7 @@ describe("the card", () => {
     relay.answered(3, 12, answer, second);
     await relay.sync(3, conversation, "thread-1");
     expect(draftOffered()).toBe(`ticket:draft:${answer}`);
-    await relay.postResponse(3, conversation, "• Rating: 5");
+    await relay.postResponse(3, conversation, "• Rating: 5", "response-5");
     await relay.sync(3, conversation, "thread-1");
     expect(draftOffered()).toBe("ticket:reply");
   });
@@ -963,7 +972,7 @@ describe("the card", () => {
     expect(draftOffered()).toBe("ticket:reply");
 
     // A response comes, then C2's last part: an answer to that part answers C2, before the response.
-    await relay.postResponse(3, conversation, "• Rating: 5");
+    await relay.postResponse(3, conversation, "• Rating: 5", "response-5");
     await relay.relay(message({ id: 2, content: long }));
     const lastPart = forum.ids.at(-1) ?? "";
     relay.answered(3, 12, snowflake(), lastPart);

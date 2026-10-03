@@ -83,15 +83,15 @@ const payloadSchema = z.discriminatedUnion("type", [
 type JobPayload = z.infer<typeof payloadSchema>;
 
 const PRIORITY = {
-  command: 0,
-  answer: 1,
+  command: 1,
+  answer: 2,
   feedback: 0,
-  sync: 1,
-  conversation: 1,
-  "message-updated": 1,
-  sweep: 2,
-  queue: 3,
-  metadata: 4,
+  sync: 2,
+  conversation: 2,
+  "message-updated": 2,
+  sweep: 3,
+  queue: 4,
+  metadata: 5,
 } as const;
 /** Requests a job may need before it can start without being cut short. */
 const COMMAND_BUDGET = 20;

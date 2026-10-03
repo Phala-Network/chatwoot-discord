@@ -30,7 +30,7 @@ counters, a small cache) and does all work from its alarm. One object keeps work
 conversation and keeps triage budgets and post lookups under one writer. Bounded operations and
 persisted continuations allow other due jobs to run between time slices.
 
-Commands and their feedback run first, then live messages and immediate card updates, then sweep
+Confirmed command feedback runs first, then commands, live messages and immediate card updates, then sweep
 pages and the hourly digest. Waiting jobs gain one priority level every 30 seconds, so background
 reconciliation progresses under sustained live traffic. Every job has a 10-second time slice and
 an invocation-wide subrequest budget. Metadata reads/writes time out after 1.5 seconds;
@@ -56,9 +56,12 @@ cache; misses enqueue a low-priority refresh with a 300 ms deadline and fallback
 fetches the conversation and the messages after its cursor, posts them in order, then corrects
 tags and the archived flag once. Each Discord message is recorded as soon as it is accepted and
 the cursor moves past a Chatwoot message once all its parts are posted, so duplicate, reordered,
-or lost webhooks resume after recorded parts. Before a customer-message part or new post is sent,
+or lost webhooks resume after recorded parts. Before a message, notice, derived response or new post is sent,
 a permanent attempt guard is written. Execute Webhook has no idempotency key: a lost receipt stays
 unknown and cannot automatically replay that send. Known receipts are retained for recovery.
+Derived responses use a revision per source message, so a customer changing a rating back is a
+new response. Assignee notices commit before the best-effort member update. A deadline reached
+before dispatch permits continuation; a timeout after dispatch preserves the unknown outcome.
 
 ## Sweep
 

@@ -777,6 +777,20 @@ describe("worker", () => {
         .slice(posts)
         .map((post) => post.body.content),
     ).toEqual(["How did we do?\n\n**CSAT:**\n• Rating: 5", "How did we do?\n\n**CSAT:**\n• Rating: 4"]);
+    // Returning to the original rating is a new response, despite having identical text.
+    Object.assign(question, { content_attributes: rated(5) });
+    await chatwootWebhook(updated(5));
+    await drain();
+    expect(
+      world
+        .webhookPosts()
+        .slice(posts)
+        .map((post) => post.body.content),
+    ).toEqual([
+      "How did we do?\n\n**CSAT:**\n• Rating: 5",
+      "How did we do?\n\n**CSAT:**\n• Rating: 4",
+      "How did we do?\n\n**CSAT:**\n• Rating: 5",
+    ]);
   });
 
   it("posts each supported interactive response from a signed message update", async () => {
@@ -1731,3 +1745,121 @@ it("does not replay a customer reply whose creation response was lost", async ()
   );
   expect(JSON.parse(feedback?.body ?? "{}").content).toContain("result is unknown");
 });
+
+it("does not replay a derived response whose Discord receipt was lost", async () => {
+  world.mock.spy.mockRestore();
+  let sends = 0;
+  world = new World([
+    (request) => {
+      if (
+        request.method !== "POST" ||
+        request.url.pathname !== "/api/v10/webhooks/1/tok" ||
+        !request.body.includes("Rating: 5")
+      )
+        return undefined;
+      sends += 1;
+      throw new TypeError("Connection lost after Discord accepted the response");
+    },
+  ]);
+  const question = { id: 88702, content: "How did we do?", message_type: 3, content_type: "input_csat" };
+  world.conversation(887, [{ id: 88701, content: "Thank you", message_type: 0 }, question]);
+  await hub().enqueueConversation(3, 887);
+  await drain();
+  Object.assign(question, { content_attributes: { submitted_values: { csat_survey_response: { rating: 5 } } } });
+  await hub().enqueueMessageUpdate(3, 887, question.id);
+  await drain();
+  await makeJobsDue();
+  await drain();
+  expect(sends).toBe(1);
+});
+
+it("continues slow attachments while another person's command receives feedback within one slice", async () => {
+  world.mock.spy.mockRestore();
+  const downloads = [0, 0];
+  let downloading = false;
+  let reports = 0;
+  let sends = 0;
+  let feedbackAt = 0;
+  const sizes = [2 * 1024 * 1024 + 1, 3];
+  world = new World([
+    on("GET", "chatwoot.example.com/api/v1/profile", () => json({ id: 42, accounts: [{ id: 3 }] })),
+    on("GET", /^cdn\.discordapp\.com\/attachments\/slow-[01]$/, async (request) => {
+      const index = request.url.pathname.endsWith("0") ? 0 : 1;
+      downloads[index] = (downloads[index] ?? 0) + 1;
+      downloading = true;
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, 5500);
+        request.signal.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(timer);
+            reject(request.signal.reason);
+          },
+          { once: true },
+        );
+      });
+      return new Response(new Uint8Array(sizes[index] ?? 0));
+    }),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/888/messages", (request) => {
+      sends += 1;
+      const files = request.form?.getAll("attachments[]") ?? [];
+      expect(files.map((file) => (file instanceof File ? [file.name, file.size] : file))).toEqual([
+        ["first.bin", sizes[0]],
+        ["second.bin", sizes[1]],
+      ]);
+      return json({ id: 88801 });
+    }),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/889/toggle_status", () => json({})),
+    on(
+      "PATCH",
+      /^discord\.com\/api\/v10\/webhooks\/100000000000000001\/attachment-feedback\/messages\/(@|%40)original$/,
+      () => {
+        reports += 1;
+        return json({});
+      },
+    ),
+    on(
+      "PATCH",
+      /^discord\.com\/api\/v10\/webhooks\/100000000000000001\/slice-feedback\/messages\/(@|%40)original$/,
+      () => {
+        feedbackAt = Date.now();
+        return json({});
+      },
+    ),
+  ]);
+  await hub().enqueueCommand({
+    interactionId: "slow-attachments",
+    applicationId: "100000000000000001",
+    token: "attachment-feedback",
+    discordUserId: ALICE,
+    accountId: 3,
+    conversationId: 888,
+    action: {
+      type: "message",
+      private: true,
+      content: "Files",
+      files: sizes.map((size, index) => ({
+        url: `https://cdn.discordapp.com/attachments/slow-${index}`,
+        filename: index === 0 ? "first.bin" : "second.bin",
+        size,
+      })),
+    },
+  });
+  await vi.waitFor(() => expect(downloading).toBe(true));
+  const queued = Date.now();
+  await hub().enqueueCommand({
+    interactionId: "command-during-attachments",
+    applicationId: "100000000000000001",
+    token: "slice-feedback",
+    discordUserId: ALICE,
+    accountId: 3,
+    conversationId: 889,
+    action: { type: "status", status: "resolved" },
+  });
+  await vi.waitFor(() => expect(feedbackAt).toBeGreaterThan(0), { timeout: 11_000 });
+  expect(feedbackAt - queued).toBeLessThan(11_000);
+  await vi.waitFor(() => expect(reports).toBe(1), { timeout: 15_000 });
+  await drain();
+  expect(downloads).toEqual([1, 2]);
+  expect(sends).toBe(1);
+}, 30_000);

@@ -24,7 +24,7 @@ import {
   Routes,
   WebhookType,
 } from "discord-api-types/v10";
-import { BudgetExhaustedError } from "../../../../shared/budget.ts";
+import { BudgetExhaustedError, JobDeadlineError } from "../../../../shared/budget.ts";
 import { parallel } from "../../../../shared/concurrent.ts";
 import { isRecord, parseJson } from "../../../../shared/json.ts";
 import { log } from "../../../../shared/log.ts";
@@ -76,28 +76,38 @@ export class DiscordForum implements ForumClient {
       throw new UnknownSendError();
     }
     const webhook = await this.webhook(forumChannelId);
-    if (key) this.cache.set(key, "unknown");
     try {
-      const sent = await this.withTags(forumChannelId, message.applied_tags, (tags) =>
-        this.rest.post<
-          RESTPostAPIWebhookWithTokenWaitResult,
-          RESTPostAPIWebhookWithTokenJSONBody,
-          RESTPostAPIWebhookWithTokenQuery
-        >(Routes.webhook(webhook.id, webhook.token), {
-          body: tags ? { ...message, applied_tags: tags } : message,
-          // The webhook is this application's, so with_components lets it post any components.
-          query: { wait: true, with_components: true, ...(threadId ? { thread_id: threadId } : {}) },
-          auth: false,
-        }),
-      );
+      const sent = await this.withTags(forumChannelId, message.applied_tags, async (tags) => {
+        if (key) this.cache.set(key, "unknown");
+        try {
+          return await this.rest.post<
+            RESTPostAPIWebhookWithTokenWaitResult,
+            RESTPostAPIWebhookWithTokenJSONBody,
+            RESTPostAPIWebhookWithTokenQuery
+          >(Routes.webhook(webhook.id, webhook.token), {
+            body: tags ? { ...message, applied_tags: tags } : message,
+            // The webhook is this application's, so with_components lets it post any components.
+            query: { wait: true, with_components: true, ...(threadId ? { thread_id: threadId } : {}) },
+            auth: false,
+          });
+        } catch (error) {
+          // Clear only a confirmed refusal or a deadline reached before dispatch. In particular,
+          // a refused tag followed by a failed metadata read has never accepted a send.
+          if (
+            key &&
+            (error instanceof DiscordHttpError ||
+              error instanceof BudgetExhaustedError ||
+              (error instanceof JobDeadlineError && !error.requestStarted))
+          )
+            this.cache.delete(key);
+          throw error;
+        }
+      });
       if (!sent?.channel_id || !sent.id) throw new UnknownSendError();
       const receipt = { channelId: sent.channel_id, messageId: sent.id };
       if (key) this.cache.set(key, JSON.stringify(receipt));
       return receipt;
     } catch (error) {
-      // An explicit rejection or an exhausted request count confirms that no send was accepted.
-      // Timeouts, cancellation and lost receipts remain unknown permanently.
-      if (key && (error instanceof DiscordHttpError || error instanceof BudgetExhaustedError)) this.cache.delete(key);
       if (threadId && isUnknownChannel(error)) throw new UnknownThreadError(threadId);
       if (error instanceof DiscordHttpError && error.status === 404) {
         if (error.code === UNKNOWN_WEBHOOK) {
