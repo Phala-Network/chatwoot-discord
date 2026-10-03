@@ -30,7 +30,7 @@ import { ChatwootError, chatwootClient, toRelayConversation } from "../../../sha
 import { parseJson } from "../../../shared/json.ts";
 import { errorFields, log } from "../../../shared/log.ts";
 import { retryDelay } from "../../../shared/store.ts";
-import { commandFeedback, executeCommand, statusMessage } from "./commands/actions.ts";
+import { commandPanel, executeCommand, statusMessage, type CommandExecution } from "./commands/actions.ts";
 import { downloadAttachment } from "./commands/attachments.ts";
 import { UNKNOWN_RESULT } from "./commands/common.ts";
 import { text } from "./commands/components.ts";
@@ -59,6 +59,7 @@ const id = z.number().int().positive();
 const resultSchema = z.object({
   content: z.string(),
   conversationGone: z.boolean(),
+  confirmed: z.boolean().optional(),
   components: z
     .array(
       z.custom<APIMessageTopLevelComponent>((value) => typeof value === "object" && value !== null && "type" in value),
@@ -284,14 +285,24 @@ export class Hub extends DurableObject<Env> {
         }
         case "feedback": {
           if (Date.now() < payload.expiresAt) {
-            const result = await commandFeedback(
-              payload.job,
-              payload.result,
-              services.settings,
-              services.budget.fetch,
-              this.store,
-            );
-            await respond(services.rest, payload.job, result.content, result.components);
+            await respond(services.rest, payload.job, payload.result.content, payload.result.components);
+            if (payload.result.confirmed === true && !payload.result.components) {
+              try {
+                const components = await commandPanel(
+                  payload.job,
+                  payload.result,
+                  services.settings,
+                  services.budget.fetch,
+                  this.store,
+                );
+                if (components) await respond(services.rest, payload.job, payload.result.content, components);
+              } catch (error) {
+                log.warn("optional command panel failed", {
+                  interactionId: payload.job.interactionId,
+                  ...errorFields(error),
+                });
+              }
+            }
           }
           this.store.completeJob(job);
           return "done";
@@ -362,6 +373,24 @@ export class Hub extends DurableObject<Env> {
 
   private async runCommand(job: CommandJob, services: ProcessorContext) {
     const key = `command:${job.interactionId}:started`;
+    const agentId = services.settings.chatwootUserFor(job.discordUserId);
+    const token = services.settings.agentToken(job.discordUserId);
+    let beforeMessageId: number | undefined;
+    let beforeLabels: string[] | undefined;
+    if (agentId !== undefined && token && ["message", "label", "labels"].includes(job.action.type)) {
+      const beforeClient = chatwootClient(
+        services.settings.config.chatwoot.baseUrl,
+        token,
+        services.budget.fetchWith(METADATA_TIMEOUT_MS),
+        this.store,
+      );
+      const before = await beforeClient.getConversation(job.accountId, job.conversationId);
+      if (before) {
+        beforeMessageId = latestMessageId(before) ?? 0;
+        if (job.action.type === "label" || job.action.type === "labels")
+          beforeLabels = await beforeClient.conversationLabels(job.accountId, job.conversationId);
+      }
+    }
     let confirmed = false;
     const fetch = async (request: Request) => {
       services.budget.checkpoint();
@@ -384,15 +413,15 @@ export class Hub extends DurableObject<Env> {
       if (mutation && response.ok) confirmed = true;
       return response;
     };
-    return executeCommand(
-      job,
-      services.settings,
+    const execution: CommandExecution = {
+      settings: services.settings,
       fetch,
-      this.store,
-      () => this.store.get(key) === undefined,
-      (chatwoot, action) => this.confirmUnknownCommand(chatwoot, job, action),
-      true,
-      async (action, index) => {
+      limits: this.store,
+      retryable: () => this.store.get(key) === undefined,
+      confirmUnknown: (chatwoot, action) =>
+        this.confirmUnknownCommand(chatwoot, job, action, services.settings, agentId, beforeMessageId, beforeLabels),
+      deferPanel: true,
+      attachment: async (action, index) => {
         const file = action.files[index];
         if (!file) throw new Error("Missing command attachment");
         services.budget.checkpoint();
@@ -406,21 +435,34 @@ export class Hub extends DurableObject<Env> {
         await this.store.saveCommandFile(job.interactionId, index, downloaded.blob);
         return downloaded;
       },
-    );
+    };
+    return executeCommand(job, execution);
   }
 
   private async confirmUnknownCommand(
     chatwoot: ReturnType<typeof chatwootClient>,
     job: CommandJob,
     action: CommandAction,
+    settings: Settings,
+    agentId: number | undefined,
+    beforeMessageId: number | undefined,
+    beforeLabels: string[] | undefined,
   ): Promise<string | undefined> {
     try {
       const conversation = await chatwoot.getConversation(job.accountId, job.conversationId);
       if (!conversation) return undefined;
       switch (action.type) {
         case "status":
-          if (conversation.status === action.status) return statusMessage(action.status, action.snoozedUntil);
-          return undefined;
+          if (String(conversation.status) !== action.status) return undefined;
+          if (action.status === "snoozed" && (conversation.snoozed_until ?? undefined) !== action.snoozedUntil)
+            return undefined;
+          if (action.status === "pending" && conversation.inbox_id !== undefined) {
+            const bot = await chatwoot.inboxBot(job.accountId, conversation.inbox_id);
+            if (bot && (conversation.meta?.assignee_type !== "AgentBot" || conversation.meta.assignee?.id !== bot.id))
+              return undefined;
+            if (bot) return "Handed back to the inbox bot.";
+          }
+          return statusMessage(action.status, action.snoozedUntil);
         case "priority":
           if (conversation.priority === action.priority)
             return action.priority ? `Priority set to ${action.priority}.` : "Priority removed.";
@@ -430,29 +472,39 @@ export class Hub extends DurableObject<Env> {
             return `Assigned to the agent.`;
           return undefined;
         case "unassign":
-          if (
-            !conversation.meta?.assignee ||
-            (conversation.meta.assignee_type === "User" && conversation.meta.assignee.id === undefined)
-          )
-            return "Unassigned.";
-          return undefined;
+          return conversation.meta?.assignee ? undefined : "Unassigned.";
         case "label": {
+          if (beforeLabels === undefined) return undefined;
           const labels = await chatwoot.conversationLabels(job.accountId, job.conversationId);
-          const present = labels.includes(action.label);
-          if ((action.change === "add" && present) || (action.change === "remove" && !present))
+          const expected =
+            action.change === "add"
+              ? beforeLabels.includes(action.label)
+                ? beforeLabels
+                : [...beforeLabels, action.label]
+              : beforeLabels.filter((label) => label !== action.label);
+          if (sameLabels(labels, expected))
             return action.change === "add" ? `Label ${action.label} added.` : `Label ${action.label} removed.`;
           return undefined;
         }
         case "labels": {
+          if (beforeLabels === undefined) return undefined;
           const labels = await chatwoot.conversationLabels(job.accountId, job.conversationId);
-          if (action.labels.every((label) => labels.includes(label)))
+          const kinds = new Set(settings.config.router?.keepLabels ?? []);
+          const expected = [
+            ...action.labels,
+            ...beforeLabels.filter((label) => kinds.has(label) && !action.labels.includes(label)),
+          ];
+          if (sameLabels(labels, expected))
             return action.labels.length > 0 ? `Label set to ${action.labels.join(", ")}.` : "Labels removed.";
           return undefined;
         }
         case "message": {
+          if (beforeMessageId === undefined || agentId === undefined) return undefined;
           const messages = await chatwoot.listMessages(job.accountId, job.conversationId);
           const found = messages.some(
             (message) =>
+              message.id > beforeMessageId &&
+              message.sender?.id === agentId &&
               message.message_type === 1 &&
               message.private === action.private &&
               message.content === action.content &&
@@ -639,4 +691,11 @@ function requiredBudget(payload: JobPayload): number {
 
 function answerKey(answerId: string): string {
   return `answer:${answerId}`;
+}
+
+function sameLabels(actual: string[], expected: string[]): boolean {
+  if (actual.length !== expected.length) return false;
+  const actualSorted = [...actual].sort();
+  const expectedSorted = [...expected].sort();
+  return actualSorted.every((label, index) => label === expectedSorted[index]);
 }

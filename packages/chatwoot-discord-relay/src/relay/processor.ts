@@ -63,7 +63,7 @@ export interface ProcessorContext {
   rest: DiscordRest;
   chatwoot: ChatwootClient;
   budget: Budget;
-  enqueueMetadata?: (accountId: number, inboxId?: number, discordUserId?: string) => void;
+  enqueueMetadata: (accountId: number, inboxId?: number, discordUserId?: string) => void;
 }
 
 /** "yield" means the invocation's request budget ran low; run again in a fresh invocation. */
@@ -317,20 +317,8 @@ async function cachedInboxName(
   const key = `inbox:${accountId}:${inboxId}`;
   const cached = store.get(key);
   if (cached !== undefined) return cached || null;
-  if (enqueueMetadata) {
-    enqueueMetadata(accountId, inboxId);
-    return null;
-  }
-  try {
-    const name = await decorativeChatwoot(context).inboxName(accountId, inboxId);
-    store.set(key, name ?? "", name ? INBOX_CACHE_MS : 60_000);
-    return name ?? null;
-  } catch (error) {
-    if (error instanceof BudgetExhaustedError) throw error;
-    log.warn("inbox name unavailable", { accountId, inboxId, ...errorFields(error) });
-    store.set(key, "", 60_000);
-    return null;
-  }
+  enqueueMetadata(accountId, inboxId);
+  return null;
 }
 
 /**
@@ -368,24 +356,12 @@ async function cachedDiscordAvatar(
   discordUserId: string,
   accountId: number,
 ): Promise<string | undefined> {
-  const { store, rest, enqueueMetadata } = context;
+  const { store, enqueueMetadata } = context;
   const key = `avatar:${discordUserId}`;
   const cached = store.get(key);
   if (cached !== undefined) return cached || undefined;
-  if (enqueueMetadata) {
-    enqueueMetadata(accountId, undefined, discordUserId);
-    return;
-  }
-  try {
-    const url = await fetchAvatarUrl(rest, discordUserId, AbortSignal.timeout(300));
-    store.set(key, url, AVATAR_CACHE_MS);
-    return url;
-  } catch (error) {
-    if (error instanceof BudgetExhaustedError) throw error;
-    log.warn("Discord avatar unavailable", { discordUserId, ...errorFields(error) });
-    store.set(key, "", AVATAR_RETRY_MS);
-    return undefined;
-  }
+  enqueueMetadata(accountId, undefined, discordUserId);
+  return undefined;
 }
 
 function decorativeChatwoot({ settings, budget, store }: ProcessorContext): ChatwootClient {

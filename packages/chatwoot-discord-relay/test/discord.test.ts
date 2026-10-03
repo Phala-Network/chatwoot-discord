@@ -143,10 +143,11 @@ describe("DiscordForum", () => {
   it("recovers an accepted unknown send from the thread without posting again", async () => {
     const cache = new MemoryCache();
     cache.set("forum:55:webhook", "1:abc");
+    const freshMessage = String(((BigInt(Date.now()) - 1_420_070_400_000n) << 22n) + 1n);
     const { requests } = mockFetch(
       on("POST", `${api}/webhooks/1/abc`, () => json({ message: "accepted, response lost" }, { status: 500 })),
       on("GET", `${api}/channels/thread-9/messages`, () =>
-        json([{ id: "m2", webhook_id: "1", content: "hi", flags: 0 }]),
+        json([{ id: freshMessage, webhook_id: "1", content: "hi", flags: 0 }]),
       ),
     );
     const client = new DiscordForum(new DiscordRest("bot-token", new Budget(5).fetch), cache);
@@ -155,7 +156,7 @@ describe("DiscordForum", () => {
     });
     await expect(client.execute("55", { content: "hi" }, "thread-9", "send-recover")).resolves.toEqual({
       channelId: "thread-9",
-      messageId: "m2",
+      messageId: freshMessage,
     });
     expect(requests.filter((request) => request.method === "POST")).toHaveLength(1);
   });

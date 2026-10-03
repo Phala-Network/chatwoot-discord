@@ -40,6 +40,7 @@ const UNKNOWN_TAG = 10087;
 const APPLICATION_KEY = "discord:application";
 /** Messages per page when looking for a post's cards (Discord's maximum). */
 const CARD_PAGE = 100;
+const DISCORD_EPOCH_MS = 1_420_070_400_000n;
 
 export interface Cache {
   get(key: string): string | undefined;
@@ -74,10 +75,11 @@ export class DiscordForum implements ForumClient {
       if (isRecord(receipt) && typeof receipt.channelId === "string" && typeof receipt.messageId === "string")
         return { channelId: receipt.channelId, messageId: receipt.messageId };
       if (!key) throw new UnknownSendError();
-      if (saved !== "unknown" || !threadId) throw new UnknownSendError();
+      const attempt = unknownAttempt(saved);
+      if (!attempt || !threadId) throw new UnknownSendError();
       const webhook = await this.webhook(forumChannelId);
       try {
-        const confirmed = await this.confirmSend(webhook.id, threadId, message);
+        const confirmed = await this.confirmSend(webhook.id, threadId, message, attempt.started);
         if (confirmed) {
           this.cache.set(key, JSON.stringify(confirmed));
           return confirmed;
@@ -93,7 +95,7 @@ export class DiscordForum implements ForumClient {
     const webhook = await this.webhook(forumChannelId);
     try {
       const sent = await this.withTags(forumChannelId, message.applied_tags, async (tags) => {
-        if (key) this.cache.set(key, "unknown");
+        if (key) this.cache.set(key, JSON.stringify({ state: "unknown", started: snowflakeAt(Date.now()) }));
         try {
           return await this.rest.post<
             RESTPostAPIWebhookWithTokenWaitResult,
@@ -216,12 +218,15 @@ export class DiscordForum implements ForumClient {
     webhookId: string,
     threadId: string,
     expected: WebhookMessage,
+    started: string,
   ): Promise<{ channelId: string; messageId: string } | undefined> {
     const messages = await this.rest.get<RESTGetAPIChannelMessagesResult, RESTGetAPIChannelMessagesQuery>(
       Routes.channelMessages(threadId),
       { query: { limit: CARD_PAGE } },
     );
-    const found = messages.find((message) => message.webhook_id === webhookId && sameMessage(message, expected));
+    const found = messages.find(
+      (message) => message.webhook_id === webhookId && atOrAfter(message.id, started) && sameMessage(message, expected),
+    );
     return found ? { channelId: threadId, messageId: found.id } : undefined;
   }
 
@@ -336,6 +341,25 @@ function isUnknownChannel(error: unknown): boolean {
 
 function webhookKey(forumChannelId: string): string {
   return `forum:${forumChannelId}:webhook`;
+}
+
+function snowflakeAt(timeMs: number): string {
+  return String((BigInt(timeMs) - DISCORD_EPOCH_MS) << 22n);
+}
+
+function atOrAfter(messageId: string, started: string): boolean {
+  try {
+    return BigInt(messageId) >= BigInt(started);
+  } catch {
+    return false;
+  }
+}
+
+function unknownAttempt(value: string): { started: string } | undefined {
+  const parsed = parseJson(value);
+  return isRecord(parsed) && parsed.state === "unknown" && typeof parsed.started === "string"
+    ? { started: parsed.started }
+    : undefined;
 }
 
 function sameMessage(message: RESTGetAPIChannelMessagesResult[number], expected: WebhookMessage): boolean {

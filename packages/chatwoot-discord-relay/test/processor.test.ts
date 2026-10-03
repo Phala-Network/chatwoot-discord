@@ -10,7 +10,7 @@ import type { Settings } from "../src/config.ts";
 import { DiscordForum } from "../src/discord/forum.ts";
 import { DiscordRest } from "../src/discord/rest.ts";
 import { minimumBudget, requestsPerMessage } from "../src/relay/limits.ts";
-import { type ProcessOutcome, processConversation, relayFor } from "../src/relay/processor.ts";
+import { refreshMetadata, type ProcessOutcome, processConversation, relayFor } from "../src/relay/processor.ts";
 import { processMessageUpdate } from "../src/relay/updates.ts";
 import { Store } from "../src/store.ts";
 import { ALICE, BOB, FORUM, json, mockFetch, on, type Recorded, TRIAGE, testSettings } from "./helpers.ts";
@@ -187,7 +187,16 @@ function context(store: Store, settings: Settings, limit = settings.config.relay
   const chatwoot = chatwootClient(settings.config.chatwoot.baseUrl, "relay-token", budget.fetch);
   const rest = new DiscordRest("bot", budget.fetch);
   const forum = new DiscordForum(rest, store);
-  return { settings, store, forum, rest, budget, chatwoot, relay: relayFor(settings, forum, store) };
+  return {
+    settings,
+    store,
+    forum,
+    rest,
+    budget,
+    chatwoot,
+    relay: relayFor(settings, forum, store),
+    enqueueMetadata: () => undefined,
+  };
 }
 
 /** Runs the conversation job until it is done, each run with a fresh budget, like the Hub does. */
@@ -820,9 +829,12 @@ describe("agent avatars", () => {
       },
     ];
     await withStore(async (store) => {
-      await sync(store, testSettings());
+      const settings = testSettings();
+      await refreshMetadata(context(store, settings), { accountId: 3, discordUserId: BOB });
+      await refreshMetadata(context(store, settings), { accountId: 3, discordUserId: ALICE });
+      await sync(store, settings);
       world.messages.push(agent(7, 43));
-      await sync(store, testSettings());
+      await sync(store, settings);
       expect(avatars(world)).toEqual([
         `${cdn}/avatars/${BOB}/a_bob.png`,
         `${cdn}/embed/avatars/${(BigInt(ALICE) >> 22n) % 6n}.png`,
@@ -842,7 +854,9 @@ describe("agent avatars", () => {
     const world = new World();
     world.messages = [agent(1, 43, "https://chatwoot.example.com/bob.png"), agent(2, 43)];
     await withStore(async (store) => {
-      expect(await sync(store, testSettings())).toEqual(["done"]);
+      const settings = testSettings();
+      await refreshMetadata(context(store, settings), { accountId: 3, discordUserId: BOB });
+      expect(await sync(store, settings)).toEqual(["done"]);
       expect(avatars(world)).toEqual([
         "https://chatwoot.example.com/bob.png",
         "https://chatwoot.example.com/favicon-512x512.png",

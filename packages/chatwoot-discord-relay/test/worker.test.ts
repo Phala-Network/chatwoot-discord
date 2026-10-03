@@ -1373,7 +1373,16 @@ describe("worker", () => {
       const chatwoot = chatwootClient(settings.config.chatwoot.baseUrl, "relay-token", budget.fetch);
       const rest = new DiscordRest("test-bot-token", budget.fetch);
       const forum = new DiscordForum(rest, store);
-      const services = { settings, store, budget, chatwoot, rest, forum, relay: relayFor(settings, forum, store) };
+      const services = {
+        settings,
+        store,
+        budget,
+        chatwoot,
+        rest,
+        forum,
+        relay: relayFor(settings, forum, store),
+        enqueueMetadata: () => undefined,
+      };
       expect(await processConversation(services, 3, id)).toBe("yield");
     });
     expect(world.webhookPosts()).toEqual([]);
@@ -1753,9 +1762,7 @@ it("does not confirm labels unless the complete resulting set matches", async ()
   world = new World([
     on("GET", "chatwoot.example.com/api/v1/profile", () => json({ id: 42, accounts: [{ id: 3 }] })),
     on("GET", "chatwoot.example.com/api/v1/accounts/3/labels", () => json({ payload: [] })),
-    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/887/labels", () =>
-      json({ payload: ["billing"] }),
-    ),
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/887/labels", () => json({ payload: ["billing"] })),
     on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/887/labels", () =>
       json({ error: "response lost" }, { status: 502 }),
     ),

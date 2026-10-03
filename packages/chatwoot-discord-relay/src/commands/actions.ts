@@ -32,21 +32,25 @@ export interface CommandResult {
   components?: APIMessageTopLevelComponent[] | undefined;
   /** Chatwoot could not find the conversation: it may have been deleted. */
   conversationGone: boolean;
+  /** The requested Chatwoot action was confirmed, so optional presentation may be refreshed. */
+  confirmed?: boolean | undefined;
 }
 
-export async function executeCommand(
-  job: CommandJob,
-  settings: Settings,
-  fetch: Fetch,
-  limits?: RateLimitStore,
-  retryable?: () => boolean,
-  confirmUnknown?: (chatwoot: ChatwootClient, action: CommandAction) => Promise<string | undefined>,
-  deferPanel = false,
+export interface CommandExecution {
+  settings: Settings;
+  fetch: Fetch;
+  limits?: RateLimitStore;
+  retryable?: () => boolean;
+  confirmUnknown?: (chatwoot: ChatwootClient, action: CommandAction) => Promise<string | undefined>;
+  deferPanel?: boolean;
   attachment?: (
     file: CommandJob["action"] & { type: "message" },
     index: number,
   ) => Promise<{ blob: Blob; filename: string }>,
-): Promise<CommandResult> {
+}
+
+export async function executeCommand(job: CommandJob, execution: CommandExecution): Promise<CommandResult> {
+  const { settings, fetch, limits, retryable, confirmUnknown, attachment, deferPanel = false } = execution;
   // The link is checked again here: it may have changed since the command was queued.
   const chatwootUserId = settings.chatwootUserFor(job.discordUserId);
   const token = settings.agentToken(job.discordUserId);
@@ -79,6 +83,7 @@ export async function executeCommand(
           content: `👤 Assign **${ticket}** to:`,
           components: assigneeMenu(named(agents), personAssignee(conversation)?.id ?? null),
           conversationGone: false,
+          confirmed: true,
         };
       }
       case "labels": {
@@ -213,9 +218,10 @@ export async function executeCommand(
         content: message ? `✅ ${message}` : ticket,
         components: await drawPanel(chatwoot, accountId, conversationId, ticket, message, settings),
         conversationGone: false,
+        confirmed: true,
       };
     }
-    return { content: `✅ ${message}`, conversationGone: false };
+    return { content: `✅ ${message}`, conversationGone: false, confirmed: true };
   } catch (error) {
     const tracked = typeof retryable === "function";
     const canRetry = retryable?.() ?? false;
@@ -228,7 +234,7 @@ export async function executeCommand(
         error instanceof JobDeadlineError)
     ) {
       const confirmed = await confirmUnknown?.(chatwoot, action);
-      if (confirmed !== undefined) return { content: `✅ ${confirmed}`, conversationGone: false };
+      if (confirmed !== undefined) return { content: `✅ ${confirmed}`, conversationGone: false, confirmed: true };
       return { content: UNKNOWN_RESULT, conversationGone: false };
     }
     if (
@@ -356,30 +362,20 @@ function kindLabels(settings: Settings): ReadonlySet<string> {
 }
 
 /** Draw feedback from a confirmed result. This phase never executes the original action. */
-export async function commandFeedback(
+export async function commandPanel(
   job: CommandJob,
   result: CommandResult,
   settings: Settings,
   fetch: Fetch,
   limits?: RateLimitStore,
-): Promise<CommandResult> {
-  if (!job.panel || result.components || !result.content.startsWith("✅")) return result;
+): Promise<APIMessageTopLevelComponent[] | undefined> {
+  if (!job.panel || result.components || result.confirmed !== true) return undefined;
   const token = settings.agentToken(job.discordUserId);
   const userId = settings.chatwootUserFor(job.discordUserId);
-  if (!token || userId === undefined) return result;
+  if (!token || userId === undefined) return undefined;
   const chatwoot = chatwootClient(settings.config.chatwoot.baseUrl, token, fetch, limits);
   const profile = await chatwoot.getProfile();
-  if (profile.id !== userId || !profile.accounts?.some((account) => account.id === job.accountId)) return result;
+  if (profile.id !== userId || !profile.accounts?.some((account) => account.id === job.accountId)) return undefined;
   const ticket = `${settings.account(job.accountId)?.name ?? "Ticket"} #${job.conversationId}`;
-  return {
-    ...result,
-    components: await drawPanel(
-      chatwoot,
-      job.accountId,
-      job.conversationId,
-      ticket,
-      result.content.slice(2).trim(),
-      settings,
-    ),
-  };
+  return drawPanel(chatwoot, job.accountId, job.conversationId, ticket, result.content.slice(2).trim(), settings);
 }
