@@ -5,7 +5,7 @@ import { DiscordForum } from "../src/discord/forum.ts";
 import { DiscordHttpError, DiscordRest } from "../src/discord/rest.ts";
 import { avatarUrl } from "../src/discord/users.ts";
 import { UnknownThreadError } from "../src/relay/relay.ts";
-import { json, mockFetch, on } from "./helpers.ts";
+import { json, mockFetch, on, snowflake } from "./helpers.ts";
 
 class MemoryCache {
   values = new Map<string, string>();
@@ -157,6 +157,26 @@ describe("DiscordForum", () => {
       channelId: "thread-9",
       messageId: "m2",
     });
+    expect(requests.filter((request) => request.method === "POST")).toHaveLength(1);
+  });
+
+  it("does not recover an older identical message as the unknown send", async () => {
+    const cache = new MemoryCache();
+    cache.set("forum:55:webhook", "1:abc");
+    const oldMessage = snowflake();
+    const { requests } = mockFetch(
+      on("POST", `${api}/webhooks/1/abc`, () => json({ message: "accepted, response lost" }, { status: 500 })),
+      on("GET", `${api}/channels/thread-9/messages`, () =>
+        json([{ id: oldMessage, webhook_id: "1", content: "hi", flags: 0 }]),
+      ),
+    );
+    const client = new DiscordForum(new DiscordRest("bot-token", new Budget(5).fetch), cache);
+    await expect(client.execute("55", { content: "hi" }, "thread-9", "send-old-match")).rejects.toMatchObject({
+      status: 500,
+    });
+    await expect(client.execute("55", { content: "hi" }, "thread-9", "send-old-match")).rejects.toThrow(
+      "outcome is unknown",
+    );
     expect(requests.filter((request) => request.method === "POST")).toHaveLength(1);
   });
 

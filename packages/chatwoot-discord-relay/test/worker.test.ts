@@ -1723,6 +1723,122 @@ it("does not replay a customer reply whose creation response was lost", async ()
   expect(JSON.parse(feedback?.body ?? "{}").content).toContain("result is unknown");
 });
 
+it("does not confirm a historical identical note after an unknown mutation", async () => {
+  world.mock.spy.mockRestore();
+  world = new World([
+    on("GET", "chatwoot.example.com/api/v1/profile", () => json({ id: 42, accounts: [{ id: 3 }] })),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/886/messages", () =>
+      json({ error: "response lost" }, { status: 502 }),
+    ),
+  ]);
+  world.conversation(886, [{ id: 88601, content: "Same note", message_type: 1, private: true }]);
+  await hub().enqueueCommand({
+    interactionId: "historical-note",
+    applicationId: "100000000000000001",
+    token: "historical-note-feedback",
+    discordUserId: ALICE,
+    accountId: 3,
+    conversationId: 886,
+    action: { type: "message", private: true, content: "Same note", files: [] },
+  });
+  await drain();
+  const feedback = world.requests.find(
+    (request) => request.method === "PATCH" && request.url.pathname.includes("historical-note-feedback"),
+  );
+  expect(JSON.parse(feedback?.body ?? "{}").content).toContain("result is unknown");
+});
+
+it("does not confirm labels unless the complete resulting set matches", async () => {
+  world.mock.spy.mockRestore();
+  world = new World([
+    on("GET", "chatwoot.example.com/api/v1/profile", () => json({ id: 42, accounts: [{ id: 3 }] })),
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/labels", () => json({ payload: [] })),
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/887/labels", () =>
+      json({ payload: ["billing"] }),
+    ),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/887/labels", () =>
+      json({ error: "response lost" }, { status: 502 }),
+    ),
+  ]);
+  world.conversation(887, []);
+  await hub().enqueueCommand({
+    interactionId: "labels-unknown",
+    applicationId: "100000000000000001",
+    token: "labels-unknown-feedback",
+    discordUserId: ALICE,
+    accountId: 3,
+    conversationId: 887,
+    action: { type: "labels", labels: [] },
+  });
+  await drain();
+  const feedback = world.requests.find(
+    (request) => request.method === "PATCH" && request.url.pathname.includes("labels-unknown-feedback"),
+  );
+  expect(JSON.parse(feedback?.body ?? "{}").content).toContain("result is unknown");
+});
+
+it("does not confirm a snooze without its target time", async () => {
+  world.mock.spy.mockRestore();
+  world = new World([
+    on("GET", "chatwoot.example.com/api/v1/profile", () => json({ id: 42, accounts: [{ id: 3 }] })),
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/888", () =>
+      json({ id: 888, status: "snoozed", snoozed_until: 123, inbox_id: 2, messages: [] }),
+    ),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/888/toggle_status", () =>
+      json({ error: "response lost" }, { status: 502 }),
+    ),
+  ]);
+  await hub().enqueueCommand({
+    interactionId: "snooze-unknown",
+    applicationId: "100000000000000001",
+    token: "snooze-unknown-feedback",
+    discordUserId: ALICE,
+    accountId: 3,
+    conversationId: 888,
+    action: { type: "status", status: "snoozed", snoozedUntil: 456 },
+  });
+  await drain();
+  const feedback = world.requests.find(
+    (request) => request.method === "PATCH" && request.url.pathname.includes("snooze-unknown-feedback"),
+  );
+  expect(JSON.parse(feedback?.body ?? "{}").content).toContain("result is unknown");
+});
+
+it("delivers confirmed feedback before an optional panel read", async () => {
+  world.mock.spy.mockRestore();
+  let profileReads = 0;
+  let feedback = 0;
+  world = new World([
+    on("GET", "chatwoot.example.com/api/v1/profile", () => {
+      profileReads += 1;
+      return profileReads === 1
+        ? json({ id: 42, accounts: [{ id: 3 }] })
+        : json({ error: "panel unavailable" }, { status: 503 });
+    }),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/889/toggle_status", () => json({})),
+    on(
+      "PATCH",
+      /^discord\.com\/api\/v10\/webhooks\/100000000000000001\/panel-feedback\/messages\/(\@|%40)original$/,
+      () => {
+        feedback += 1;
+        return json({});
+      },
+    ),
+  ]);
+  await hub().enqueueCommand({
+    interactionId: "panel-feedback",
+    applicationId: "100000000000000001",
+    token: "panel-feedback",
+    discordUserId: ALICE,
+    accountId: 3,
+    conversationId: 889,
+    panel: true,
+    action: { type: "status", status: "resolved" },
+  });
+  await drain();
+  expect(feedback).toBe(1);
+});
+
 it("does not replay a derived response whose Discord receipt was lost", async () => {
   world.mock.spy.mockRestore();
   let sends = 0;
