@@ -109,6 +109,47 @@ describe("native bot turns", () => {
     expect(mock.requests.filter((request) => request.method === "POST")).toEqual([]);
   });
 
+  it.each(["disconnect", "replacement"])("hands off a %s without reading a turn or calling Jev", async (reason) => {
+    const mock = world({ bot: reason === "disconnect" ? null : { id: 99, account_id: 1 } });
+    await routeConversation(context(), 1, 5);
+    expect(mock.ticket.status).toBe("open");
+    expect(mock.ticket.assignee).toBeNull();
+    expect(sent(mock.requests, "POST", JEV)).toEqual([]);
+    expect(sent(mock.requests, "GET", `${CW}/messages`)).toEqual([]);
+    expect(sent(mock.requests, "POST", `${CW}/toggle_status`)[0]?.headers.get("api_access_token")).toBe("bot-token");
+  });
+
+  it.each(["person", "other bot", "unassigned", "open", "blocked"])(
+    "leaves a disconnected %s ticket untouched",
+    async (reason) => {
+      const ticket: Ticket = { bot: null };
+      if (reason === "person") {
+        ticket.assigneeType = "User";
+        ticket.assignee = { id: 6 };
+      }
+      if (reason === "other bot") ticket.assignee = { id: 99 };
+      if (reason === "unassigned") {
+        ticket.assignee = null;
+        ticket.assigneeType = null;
+      }
+      if (reason === "open") ticket.status = "open";
+      if (reason === "blocked") ticket.blocked = true;
+      const mock = world(ticket);
+      await routeConversation(context(), 1, 5);
+      expect(mock.requests.filter((request) => request.method === "POST")).toEqual([]);
+    },
+  );
+
+  it("retries a failed disconnect handoff without classifying", async () => {
+    const mock = world({ bot: null, fail: { toggle_status: 1 } });
+    const ctx = context();
+    await expect(routeConversation(ctx, 1, 5)).rejects.toThrow("503");
+    await routeConversation(ctx, 1, 5);
+    expect(mock.ticket.status).toBe("open");
+    expect(sent(mock.requests, "POST", JEV)).toEqual([]);
+    expect(sent(mock.requests, "POST", `${CW}/toggle_status`)).toHaveLength(2);
+  });
+
   it.each(["open", "resolved", "snoozed", "person", "blocked", "unlinked"])(
     "respects a %s change while Jev answers",
     async (change) => {

@@ -5,7 +5,6 @@ import { ChatwootError, chatwootClient } from "../../../shared/chatwoot/api.ts";
 import { parseJson } from "../../../shared/json.ts";
 import { errorFields, log } from "../../../shared/log.ts";
 import { QueueStore, retryDelay } from "../../../shared/store.ts";
-import type { Settings } from "./config.ts";
 import type { Env } from "./env.ts";
 import { routeConversation, routesAccount } from "./routing.ts";
 import { loadSettings } from "./settings.ts";
@@ -14,7 +13,7 @@ import type { Transition } from "./webhook.ts";
 
 export const ROUTER_NAME = "global";
 export const ROUTE_BUDGET = 45;
-const BUDGET = { route: ROUTE_BUDGET, sweep: 2 };
+const BUDGET = { route: ROUTE_BUDGET, sweep: 1 };
 const RUN_WALL_MS = 5 * 60 * 1000;
 const id = z.number().int().positive();
 const jobSchema = z.discriminatedUnion("type", [
@@ -22,11 +21,6 @@ const jobSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("sweep"), accountId: id }),
 ]);
 type Payload = z.infer<typeof jobSchema>;
-const passSchema = z.object({
-  page: z.number().int().positive(),
-  remaining: z.array(id),
-  routed: z.array(id),
-});
 
 export class Router extends DurableObject<Env> {
   private readonly store: QueueStore;
@@ -92,7 +86,7 @@ export class Router extends DurableObject<Env> {
           }
           clearFailures(this.store, payload.accountId, payload.conversationId);
         } else if (routesAccount(settings, payload.accountId)) {
-          await this.sweep(settings, chatwoot, payload.accountId);
+          await this.sweep(chatwoot, payload.accountId);
         }
         this.store.completeJob(job);
       } catch (error) {
@@ -124,38 +118,20 @@ export class Router extends DurableObject<Env> {
     await this.schedule(yielded ? Date.now() : undefined);
   }
 
-  private async sweep(
-    settings: Settings,
-    chatwoot: ReturnType<typeof chatwootClient>,
-    accountId: number,
-  ): Promise<void> {
+  private async sweep(chatwoot: ReturnType<typeof chatwootClient>, accountId: number): Promise<void> {
     const key = `sweep:${accountId}:pending`;
-    const saved = passSchema.safeParse(parseJson(this.store.get(key)));
-    const pass = saved.success ? saved.data : { page: 1, remaining: await chatwoot.listInboxes(accountId), routed: [] };
-    const inboxId = pass.remaining[0];
-    if (inboxId !== undefined) {
-      if ((await chatwoot.inboxBot(accountId, inboxId))?.id === settings.config.routing.botIds[String(accountId)]) {
-        pass.routed.push(inboxId);
-      }
-      pass.remaining.shift();
-    } else {
-      const conversations = await chatwoot.listConversations(accountId, pass.page, "pending");
-      for (const conversation of conversations) {
-        if (
-          conversation.id !== undefined &&
-          conversation.inbox_id !== undefined &&
-          pass.routed.includes(conversation.inbox_id)
-        ) {
-          this.enqueue({ type: "route", accountId, conversationId: conversation.id });
-        }
-      }
-      if (conversations.length === 0) {
-        this.store.delete(key);
-        return;
-      }
-      pass.page += 1;
+    const saved = id.safeParse(parseJson(this.store.get(key)));
+    const page = saved.success ? saved.data : 1;
+    // Route snapshots decide ownership from live state, including disconnected bot leftovers.
+    const conversations = await chatwoot.listConversations(accountId, page, "pending");
+    for (const conversation of conversations) {
+      if (conversation.id !== undefined) this.enqueue({ type: "route", accountId, conversationId: conversation.id });
     }
-    this.store.set(key, JSON.stringify(pass));
+    if (conversations.length === 0) {
+      this.store.delete(key);
+      return;
+    }
+    this.store.set(key, String(page + 1));
     this.enqueue({ type: "sweep", accountId });
   }
 

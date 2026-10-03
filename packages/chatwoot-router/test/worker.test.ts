@@ -315,11 +315,24 @@ describe("pending sweep", () => {
     expect(mock.pending.size).toBe(0);
   }, 30000);
 
-  it("does not route disconnected inboxes even when their pending conversations are listed", async () => {
+  it("hands off disconnected bot leftovers across page shifts without Jev", async () => {
     const mock = sweepWorld(false, true);
     await stub().requestSweep();
     await drain(15000);
-    expect(mock.pending.size).toBe(50);
+    expect(mock.pending.size).toBe(25);
+    await stub().requestSweep();
+    await drain(15000);
+    expect(mock.pending.size).toBe(0);
     expect(sent(mock.requests, "POST", JEV)).toEqual([]);
+    const handoffs = mock.requests.filter((request) => request.method === "POST");
+    expect(handoffs).toHaveLength(50);
+    expect(
+      handoffs.every(
+        (request) =>
+          request.url.pathname.endsWith("/toggle_status") &&
+          request.headers.get("api_access_token") === "bot-token" &&
+          request.body === JSON.stringify({ status: "open" }),
+      ),
+    ).toBe(true);
   }, 20000);
 });
