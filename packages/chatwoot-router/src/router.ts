@@ -37,7 +37,7 @@ export class Router extends DurableObject<Env> {
     if (!routesAccount(settings, accountId)) return;
     if (transition) expectActivity(this.store, accountId, conversationId, transition);
     this.enqueue({ type: "route", accountId, conversationId });
-    await this.schedule();
+    await scheduleAlarm(this.ctx, this.store.nextWakeup());
   }
 
   override async alarm(): Promise<void> {
@@ -91,14 +91,10 @@ export class Router extends DurableObject<Env> {
         this.store.retryJob(job, delay);
       }
     }
-    await this.schedule(yielded ? Date.now() : undefined);
+    await scheduleAlarm(this.ctx, yielded ? Date.now() : this.store.nextWakeup());
   }
 
   private enqueue(payload: Payload): void {
     this.store.enqueue(`route:${payload.accountId}:${payload.conversationId}`, 0, JSON.stringify(payload));
-  }
-
-  private async schedule(at?: number): Promise<void> {
-    await scheduleAlarm(this.ctx, at ?? this.store.nextWakeup());
   }
 }

@@ -136,7 +136,7 @@ export class Hub extends DurableObject<Env> {
   async enqueueConversation(accountId: number, conversationId: number, delayMs = 0): Promise<void> {
     this.enqueue({ type: "conversation", accountId, conversationId }, Date.now() + delayMs);
     if (delayMs > 0) this.enqueue({ type: "sync", accountId, conversationId });
-    await this.schedule();
+    await scheduleAlarm(this.ctx, this.store.nextWakeup());
   }
 
   /**
@@ -149,7 +149,7 @@ export class Hub extends DurableObject<Env> {
       this.enqueue({ type: "conversation", accountId, conversationId });
     }
     this.enqueue({ type: "message-updated", accountId, conversationId, messageId });
-    await this.schedule();
+    await scheduleAlarm(this.ctx, this.store.nextWakeup());
   }
 
   async interaction(interaction: APIInteraction): Promise<HandlerResult["response"]> {
@@ -173,7 +173,7 @@ export class Hub extends DurableObject<Env> {
       return;
     }
     this.enqueue({ type: "command", job });
-    await this.schedule();
+    await scheduleAlarm(this.ctx, this.store.nextWakeup());
   }
 
   /** Queues a reconciliation sweep for every configured account (called by the cron trigger). */
@@ -181,14 +181,14 @@ export class Hub extends DurableObject<Env> {
     this.store.wakeHeldJobs();
     for (const account of (await loadSettings(this.env)).config.accounts)
       this.enqueue({ type: "sweep", accountId: account.id });
-    await this.schedule();
+    await scheduleAlarm(this.ctx, this.store.nextWakeup());
   }
 
   /** Queues the hourly support queue, if configured (called by the cron trigger at minute 0). */
   async requestQueue(): Promise<void> {
     if (!(await loadSettings(this.env)).config.queue) return;
     this.enqueue({ type: "queue" });
-    await this.schedule();
+    await scheduleAlarm(this.ctx, this.store.nextWakeup());
   }
 
   /**
@@ -201,7 +201,7 @@ export class Hub extends DurableObject<Env> {
     if (!ticket || this.store.get(answerKey(answerId)) !== undefined) return;
     this.store.set(answerKey(answerId), draft, ANSWER_TTL_MS);
     this.enqueue({ type: "answer", ...ticket, answerId, replyTo });
-    await this.schedule();
+    await scheduleAlarm(this.ctx, this.store.nextWakeup());
   }
 
   /** The draft the triage bot's hook sent with an answer, while it is kept. */
@@ -245,7 +245,7 @@ export class Hub extends DurableObject<Env> {
         break;
       }
     }
-    await this.schedule(yielded ? Date.now() : undefined);
+    await scheduleAlarm(this.ctx, yielded ? Date.now() : this.store.nextWakeup());
   }
 
   private async run(job: Job, payload: JobPayload, services: ProcessorContext): Promise<"done" | "yield"> {
@@ -384,26 +384,37 @@ export class Hub extends DurableObject<Env> {
       if (mutation && response.ok) confirmed = true;
       return response;
     };
-    return executeCommand(job, services.settings, fetch, {
-      deferPanel: true,
-      limits: this.store,
-      retryable: () => this.store.get(key) === undefined,
-      attachment: async (action, index) => {
-        const file = action.files[index];
-        if (!file) throw new Error("Missing command attachment");
-        services.budget.checkpoint();
-        const cached = this.store.commandFile(job.interactionId, index, file.contentType || "application/octet-stream");
-        if (cached) return { blob: cached, filename: file.filename || "attachment" };
-        const downloaded = await downloadAttachment(
-          file,
-          services.settings.config.attachments.maxFileBytes,
-          services.budget.fetchWith(TRANSFER_TIMEOUT_MS),
-        );
-        await this.store.saveCommandFile(job.interactionId, index, downloaded.blob);
-        return downloaded;
+    return executeCommand(
+      job,
+      services.settings,
+      fetch,
+      this.store,
+      {
+        retryable: () => this.store.get(key) === undefined,
+        confirmUnknown: (chatwoot, action) => this.confirmUnknownCommand(chatwoot, job, action),
       },
-      confirmUnknown: (chatwoot, action) => this.confirmUnknownCommand(chatwoot, job, action),
-    });
+      { deferPanel: true },
+      {
+        attachment: async (action, index) => {
+          const file = action.files[index];
+          if (!file) throw new Error("Missing command attachment");
+          services.budget.checkpoint();
+          const cached = this.store.commandFile(
+            job.interactionId,
+            index,
+            file.contentType || "application/octet-stream",
+          );
+          if (cached) return { blob: cached, filename: file.filename || "attachment" };
+          const downloaded = await downloadAttachment(
+            file,
+            services.settings.config.attachments.maxFileBytes,
+            services.budget.fetchWith(TRANSFER_TIMEOUT_MS),
+          );
+          await this.store.saveCommandFile(job.interactionId, index, downloaded.blob);
+          return downloaded;
+        },
+      },
+    );
   }
 
   private async confirmUnknownCommand(
@@ -580,11 +591,6 @@ export class Hub extends DurableObject<Env> {
 
   private enqueue(payload: JobPayload, notBefore?: number): void {
     this.store.enqueue(jobKey(payload), PRIORITY[payload.type], JSON.stringify(payload), notBefore);
-  }
-
-  /** Sets the alarm for the earliest due job (or `at`), unless an earlier alarm is already set. */
-  private async schedule(at?: number): Promise<void> {
-    await scheduleAlarm(this.ctx, at ?? this.store.nextWakeup());
   }
 }
 

@@ -29,7 +29,7 @@ export class Coordinator extends DurableObject<Env> {
         this.store.enqueue(`sweep:${accountId}:${status}`, 0, JSON.stringify({ accountId: Number(accountId), status }));
       }
     }
-    await this.schedule();
+    await scheduleAlarm(this.ctx, this.store.nextWakeup());
   }
 
   override async alarm(): Promise<void> {
@@ -81,10 +81,6 @@ export class Coordinator extends DurableObject<Env> {
         log.warn("sweep page failed; will retry", { job: job.key, ...errorFields(error) });
       }
     }
-    await this.schedule();
-  }
-
-  private async schedule(): Promise<void> {
     await scheduleAlarm(this.ctx, this.store.nextWakeup());
   }
 }
