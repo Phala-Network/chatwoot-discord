@@ -1732,27 +1732,39 @@ it("does not replay a customer reply whose creation response was lost", async ()
   expect(JSON.parse(feedback?.body ?? "{}").content).toContain("result is unknown");
 });
 
-it("does not confirm a historical identical note after an unknown mutation", async () => {
+it("does not confirm a concurrent identical note after an unknown mutation", async () => {
   world.mock.spy.mockRestore();
+  let concurrent = false;
   world = new World([
     on("GET", "chatwoot.example.com/api/v1/profile", () => json({ id: 42, accounts: [{ id: 3 }] })),
-    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/886/messages", () =>
-      json({ error: "response lost" }, { status: 502 }),
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/886", () =>
+      json({ id: 886, status: "open", inbox_id: 2, messages: [{ id: 99601 }] }),
     ),
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/886/messages", () =>
+      json({
+        payload: concurrent
+          ? [{ id: 99602, content: "Same note", message_type: 1, private: true, sender: { id: 42 } }]
+          : [],
+      }),
+    ),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/886/messages", () => {
+      concurrent = true;
+      return json({ error: "response lost" }, { status: 502 });
+    }),
   ]);
-  world.conversation(886, [{ id: 88601, content: "Same note", message_type: 1, private: true }]);
   await hub().enqueueCommand({
-    interactionId: "historical-note",
+    interactionId: "concurrent-note",
     applicationId: "100000000000000001",
-    token: "historical-note-feedback",
+    token: "concurrent-note-feedback",
     discordUserId: ALICE,
     accountId: 3,
     conversationId: 886,
-    action: { type: "message", private: true, content: "Same note", files: [] },
+    action: { type: "message", private: true, content: "Same note", files: [],
+    },
   });
   await drain();
   const feedback = world.requests.find(
-    (request) => request.method === "PATCH" && request.url.pathname.includes("historical-note-feedback"),
+    (request) => request.method === "PATCH" && request.url.pathname.includes("concurrent-note-feedback"),
   );
   expect(JSON.parse(feedback?.body ?? "{}").content).toContain("result is unknown");
 });

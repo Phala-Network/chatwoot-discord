@@ -5,7 +5,7 @@ import { DiscordForum } from "../src/discord/forum.ts";
 import { DiscordHttpError, DiscordRest } from "../src/discord/rest.ts";
 import { avatarUrl } from "../src/discord/users.ts";
 import { UnknownThreadError } from "../src/relay/relay.ts";
-import { json, mockFetch, on, snowflake } from "./helpers.ts";
+import { json, mockFetch, on } from "./helpers.ts";
 
 class MemoryCache {
   values = new Map<string, string>();
@@ -137,37 +137,30 @@ describe("DiscordForum", () => {
     ).rejects.toThrow("outcome is unknown");
     expect(posts).toBe(1);
     expect(requests.filter((request) => request.method === "POST")).toHaveLength(1);
-    expect(requests.filter((request) => request.method === "GET")).toHaveLength(1);
+    expect(requests.filter((request) => request.method === "GET")).toHaveLength(0);
   });
 
-  it("recovers an accepted unknown send from the thread without posting again", async () => {
+  it("keeps an accepted unknown send unknown without reading or posting again", async () => {
     const cache = new MemoryCache();
     cache.set("forum:55:webhook", "1:abc");
-    let freshMessage = "";
     const { requests } = mockFetch(
-      on("POST", `${api}/webhooks/1/abc`, () => {
-        freshMessage = String(((BigInt(Date.now()) - 1_420_070_400_000n) << 22n) + 1n);
-        return json({ message: "accepted, response lost" }, { status: 500 });
-      }),
-      on("GET", `${api}/channels/thread-9/messages`, () =>
-        json([{ id: freshMessage, webhook_id: "1", content: "hi", flags: 0 }]),
-      ),
+      on("POST", `${api}/webhooks/1/abc`, () => json({ message: "accepted, response lost" }, { status: 500 })),
     );
     const client = new DiscordForum(new DiscordRest("bot-token", new Budget(5).fetch), cache);
     await expect(client.execute("55", { content: "hi" }, "thread-9", "send-recover")).rejects.toMatchObject({
       status: 500,
     });
-    await expect(client.execute("55", { content: "hi" }, "thread-9", "send-recover")).resolves.toEqual({
-      channelId: "thread-9",
-      messageId: freshMessage,
-    });
+    await expect(client.execute("55", { content: "hi" }, "thread-9", "send-recover")).rejects.toThrow(
+      "outcome is unknown",
+    );
     expect(requests.filter((request) => request.method === "POST")).toHaveLength(1);
+    expect(requests.filter((request) => request.method === "GET")).toHaveLength(0);
   });
 
-  it("does not recover an older identical message as the unknown send", async () => {
+  it("does not mistake a clock-skewed identical message for an unknown send", async () => {
     const cache = new MemoryCache();
     cache.set("forum:55:webhook", "1:abc");
-    const oldMessage = snowflake();
+    const oldMessage = String(((BigInt(Date.now() + 5 * 60 * 1000) - 1_420_070_400_000n) << 22n) + 1n);
     const { requests } = mockFetch(
       on("POST", `${api}/webhooks/1/abc`, () => json({ message: "accepted, response lost" }, { status: 500 })),
       on("GET", `${api}/channels/thread-9/messages`, () =>
