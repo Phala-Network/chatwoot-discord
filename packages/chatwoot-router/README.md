@@ -45,7 +45,8 @@ may point to another deployment of that API, for example a proxy or gateway.
 - Jev chooses owner, topic, kind and whether there is a request. A confident kind takes precedence; otherwise a
   confident greeting/no-request stays pending while fewer than three texts exist. Empty or identifier-only input,
   three greetings, an unclear owner with an actual request, or a public human reply hands off. Blocked contacts
-  and person-assigned conversations are untouched. Bot and user assignees are distinguished by `assignee_type`.
+  and person-assigned conversations are untouched during routing; disconnect handoff also clears blocked bot leftovers.
+  Bot and user assignees are distinguished by `assignee_type`.
 - Before **each** action, re-read the inbox link, pending status, assignee, turn boundary, inputs and public human
   replies. A changed input defers the job to decide again. Apply topic/kind labels, then the kind's canned reply,
   then exactly one ending action: the kind's resolved/snoozed status, a confident owner's assignment, or explicit

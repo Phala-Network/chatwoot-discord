@@ -378,17 +378,23 @@ describe("native bot turns", () => {
     },
   );
 
-  it("does not resend a failed or unknown canned reply, even when it never arrived", async () => {
-    const mock = world({ fail: { messages: 1 } }, { owner: ["cloud", 1], kind: ["bounty", 1] });
-    const ctx = context(new MemoryStore(), KINDS);
-    await routeConversation(ctx, 1, 5);
-    await routeConversation(ctx, 1, 5);
-    expect(sent(mock.requests, "POST", `${CW}/messages`)).toHaveLength(1);
-    expect(mock.ticket.status).toBe("open");
-    expect(sent(mock.requests, "POST", `${CW}/toggle_status`).map((request) => JSON.parse(request.body))).toEqual([
-      { status: "open" },
-    ]);
-  });
+  it.each(["resolved", "snoozed"])(
+    "hands off an unconfirmed reply without applying %s or resending",
+    async (status) => {
+      const mock = world({ fail: { messages: 1 } }, { owner: ["cloud", 1], kind: ["bounty", 1] });
+      const ctx = context(new MemoryStore(), {
+        ...KINDS,
+        kinds: { "1": { ...KINDS.kinds["1"], bounty: { ...KINDS.kinds["1"].bounty, status } } },
+      });
+      await routeConversation(ctx, 1, 5);
+      await routeConversation(ctx, 1, 5);
+      expect(sent(mock.requests, "POST", `${CW}/messages`)).toHaveLength(1);
+      expect(mock.ticket.status).toBe("open");
+      expect(sent(mock.requests, "POST", `${CW}/toggle_status`).map((request) => JSON.parse(request.body))).toEqual([
+        { status: "open" },
+      ]);
+    },
+  );
 
   it("hands off a lost reply response even if Chatwoot committed the message", async () => {
     const mock = world({ lose: { messages: 1 } }, { owner: ["cloud", 1], kind: ["bounty", 1] });
@@ -496,7 +502,7 @@ describe("native bot turns", () => {
     );
     const ctx = context(new MemoryStore(), KINDS);
     await routeConversation(ctx, 1, 5);
-    mock.ticket.messages = mock.ticket.messages?.filter((message) => message.id !== 1);
+    mock.ticket.messages = (mock.ticket.messages ?? []).filter((message) => message.id !== 1);
     mock.ticket.messages?.push(incoming(5, "Another report"));
     mock.ticket.status = "pending";
     await routeConversation(ctx, 1, 5);
