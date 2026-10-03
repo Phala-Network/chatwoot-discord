@@ -18,7 +18,7 @@ import { configSchema } from "../src/config.ts";
 import { conversation } from "../src/control.ts";
 import { Conversation } from "../src/conversation.ts";
 import { QueueDigest } from "../src/digest.ts";
-import { DiscordLimiter } from "../src/discord/limiter.ts";
+import { DiscordLimiter, fingerprint } from "../src/discord/limiter.ts";
 import { DiscordRest } from "../src/discord/rest.ts";
 import { Effects } from "../src/effects.ts";
 import worker from "../src/index.ts";
@@ -69,6 +69,7 @@ class World {
   bot: { id: number; account_id: number } | null = null;
   failReplies = 0;
   rateLimitReplies = 0;
+  replyRetryAfterSeconds = 64.5;
   failPatches = 0;
   failConversations = 0;
   private replies = 0;
@@ -217,7 +218,10 @@ class World {
         if (thread) {
           if (this.rateLimitReplies > 0) {
             this.rateLimitReplies -= 1;
-            return json({ message: "You are being rate limited.", retry_after: 64.5, global: false }, { status: 429 });
+            return json(
+              { message: "You are being rate limited.", retry_after: this.replyRetryAfterSeconds, global: false },
+              { status: 429 },
+            );
           }
           if (this.failReplies > 0) {
             this.failReplies -= 1;
@@ -447,7 +451,7 @@ afterEach(async () => {
     });
   for (const account of [3, 1])
     await runInDurableObject(env.ACCOUNT_SWEEP.getByName(`account:v1:${account}`), async (_instance, state) => {
-      for (const table of ["jobs", "cache", "roster", "deliveries"]) state.storage.sql.exec(`DELETE FROM ${table}`);
+      for (const table of ["jobs", "cache", "roster"]) state.storage.sql.exec(`DELETE FROM ${table}`);
       await state.storage.deleteAlarm();
     });
   const majorNames = new Set(
@@ -832,12 +836,26 @@ describe("worker", () => {
   });
 
   it("posts a customer's response to an interactive message once, after Chatwoot's API confirms it", async () => {
+    // A reserved probe without response headers leaves this route's capacity unknown.
+    const probe = await env.DISCORD_RATE_LIMIT.getByName("webhooks:1").reserve({
+      id: crypto.randomUUID(),
+      createdAt: Date.now(),
+      route: "POST:/webhooks/:major/:token",
+      credential: await fingerprint("tok"),
+      global: false,
+    });
+    expect(probe.allowed).toBe(true);
     const question = { id: 1402, content: "How did we do?", message_type: 3, content_type: "input_csat" };
     world.conversation(23, [{ id: 1401, content: "thanks, all good", message_type: 0 }, question], {}, "resolved");
     await chatwootWebhook(created(23));
     await drain();
+    expect(world.threads.size).toBe(0);
+    // No due jobs is a paused continuation, not evidence that the thread/body finished.
+    await vi.waitFor(() => expect(world.webhookPosts()).toHaveLength(2), { timeout: 5000 });
     const thread = world.webhookPosts()[1]?.thread;
-    const posts = world.webhookPosts().length;
+    expect(thread).toBeTypeOf("string");
+    if (!thread) throw new Error("Initial thread did not converge");
+    let posts = world.webhookPosts().length;
     const rated = (rating: number) => ({ submitted_values: { csat_survey_response: { rating } } });
     const updated = (rating: number) => ({
       ...created(23),
@@ -852,23 +870,51 @@ describe("worker", () => {
     await drain();
     expect(world.webhookPosts()).toHaveLength(posts);
 
+    // Obtain a real 429 through the normal limiter/report path before the confirmed update.
+    world.rateLimitReplies = 1;
+    world.replyRetryAfterSeconds = 1;
+    await runInDurableObject(hub(23), async (_instance, state) => {
+      const budget = new Budget(45);
+      const rest = new DiscordRest(
+        "test-bot-token",
+        budget.fetch,
+        new DiscordLimiter(new Store(state.storage.sql), env, budget),
+      );
+      await expect(
+        rest.post("/webhooks/1/tok", {
+          body: { content: "Cooldown probe" },
+          query: { thread_id: thread },
+          auth: false,
+        }),
+      ).rejects.toMatchObject({ status: 429, retryAfterMs: 1000 });
+    });
+    posts = world.webhookPosts().length;
     Object.assign(question, { content_attributes: rated(5) });
     await chatwootWebhook(updated(5));
     await drain();
     // Another update of the same response (e.g. its status) is not posted again.
     await chatwootWebhook(updated(5));
     await drain();
-    expect(world.webhookPosts().slice(posts)).toEqual([
-      {
-        thread,
-        body: {
-          content: "How did we do?\n\n**CSAT:**\n• Rating: 5",
-          username: "Jane Doe",
-          avatar_url: "https://gravatar.com/avatar/?d=mp&f=y&s=256",
-          allowed_mentions: { parse: [] },
-        },
-      },
-    ]);
+    expect(world.webhookPosts().slice(posts)).toEqual([]);
+    await vi.waitFor(
+      () =>
+        expect(world.webhookPosts().slice(posts)).toEqual([
+          {
+            thread,
+            body: {
+              content: "How did we do?\n\n**CSAT:**\n• Rating: 5",
+              username: "Jane Doe",
+              avatar_url: "https://gravatar.com/avatar/?d=mp&f=y&s=256",
+              allowed_mentions: { parse: [] },
+            },
+          },
+        ]),
+      { timeout: 5000 },
+    );
+    // A repeat after the continuation has actually delivered also keeps its receipt.
+    await chatwootWebhook(updated(5));
+    await drain();
+    expect(world.webhookPosts().slice(posts)).toHaveLength(1);
     // Posting unarchived the resolved post; it is archived again.
     await vi.waitFor(
       () =>
@@ -881,27 +927,29 @@ describe("worker", () => {
     // A changed response is posted again.
     Object.assign(question, { content_attributes: rated(4) });
     await chatwootWebhook(updated(4));
-    await drain();
-    expect(
-      world
-        .webhookPosts()
-        .slice(posts)
-        .map((post) => post.body.content),
-    ).toEqual(["How did we do?\n\n**CSAT:**\n• Rating: 5", "How did we do?\n\n**CSAT:**\n• Rating: 4"]);
+    await vi.waitFor(() =>
+      expect(
+        world
+          .webhookPosts()
+          .slice(posts)
+          .map((post) => post.body.content),
+      ).toEqual(["How did we do?\n\n**CSAT:**\n• Rating: 5", "How did we do?\n\n**CSAT:**\n• Rating: 4"]),
+    );
     // Returning to the original rating is a new response, despite having identical text.
     Object.assign(question, { content_attributes: rated(5) });
     await chatwootWebhook(updated(5));
-    await drain();
-    expect(
-      world
-        .webhookPosts()
-        .slice(posts)
-        .map((post) => post.body.content),
-    ).toEqual([
-      "How did we do?\n\n**CSAT:**\n• Rating: 5",
-      "How did we do?\n\n**CSAT:**\n• Rating: 4",
-      "How did we do?\n\n**CSAT:**\n• Rating: 5",
-    ]);
+    await vi.waitFor(() =>
+      expect(
+        world
+          .webhookPosts()
+          .slice(posts)
+          .map((post) => post.body.content),
+      ).toEqual([
+        "How did we do?\n\n**CSAT:**\n• Rating: 5",
+        "How did we do?\n\n**CSAT:**\n• Rating: 4",
+        "How did we do?\n\n**CSAT:**\n• Rating: 5",
+      ]),
+    );
   });
 
   it("posts each supported interactive response from a signed message update", async () => {
