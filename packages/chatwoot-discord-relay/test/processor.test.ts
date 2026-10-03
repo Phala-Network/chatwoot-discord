@@ -47,6 +47,8 @@ class World {
   failAnnouncements = 0;
   /** Posts deleted in Discord. */
   goneThreads = new Set<string>();
+  /** New posts Discord fails before accepting them. */
+  failPosts = 0;
   /** Discord's answer to posting into a thread, while it fails. */
   threadFailure: (() => Response) | undefined;
   /** Discord users by id; others are unknown to Discord. */
@@ -128,6 +130,10 @@ class World {
           return json({ message: "unavailable" }, { status: 503 });
         }
         if (thread) return json({ id: String(100000000000001000n + BigInt(this.requests.length)), channel_id: thread });
+        if (this.failPosts > 0) {
+          this.failPosts -= 1;
+          return json({ message: "unavailable" }, { status: 503 });
+        }
         this.threads += 1;
         return json({ id: "card", channel_id: `20000000000000000${this.threads}` });
       }),
@@ -330,9 +336,13 @@ describe("processConversation", () => {
       world.goneThreads.add(oldThread);
       world.threadFailure = () => {
         world.threadFailure = undefined;
+        world.failPosts = 1;
         return json({ message: "Unknown Channel", code: 10003 }, { status: 404 });
       };
+      // Fail after forgetting the deleted thread, before a new post or cursor can mask a lost checkpoint.
+      await expect(sync(store, settings)).rejects.toThrow("503");
       await sync(store, settings);
+      expect(world.replies().filter((text) => text === "Completed history")).toHaveLength(1);
       const newThread = world.posts().at(-1)?.thread;
       expect(newThread).not.toBe(oldThread);
       const rebuilt = world.posts().filter((post) => post.thread === newThread);
@@ -346,7 +356,6 @@ describe("processConversation", () => {
           .filter((post) => post.thread === newThread)
           .map((post) => post.body.content),
       ).toEqual([...rebuilt.map((post) => post.body.content), "Your email?\n\n**Email:** jane@example.com"]);
-      expect(world.replies().filter((text) => text === "Completed history")).toHaveLength(1);
     });
   });
 
