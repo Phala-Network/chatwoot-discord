@@ -80,6 +80,7 @@ export class DiscordForum implements ForumClient {
             auth: false,
           });
         } catch (error) {
+          if (isUnknownWrite(error)) throw new UnknownSendError(error);
           if (
             key &&
             ((error instanceof DiscordHttpError && error.status >= 400 && error.status < 500) ||
@@ -267,4 +268,12 @@ function isUnknownChannel(error: unknown): boolean {
 
 function webhookKey(forumChannelId: string): string {
   return `forum:${forumChannelId}:webhook`;
+}
+
+function isUnknownWrite(error: unknown): boolean {
+  return (
+    (error instanceof DiscordHttpError && error.status >= 500) ||
+    error instanceof TypeError ||
+    (error instanceof DOMException && ["AbortError", "TimeoutError"].includes(error.name))
+  );
 }

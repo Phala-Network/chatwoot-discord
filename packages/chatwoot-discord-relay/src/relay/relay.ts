@@ -4,11 +4,9 @@
 // conversation.
 
 import { MessageFlags, type RESTPostAPIWebhookWithTokenJSONBody } from "discord-api-types/v10";
-import { JobDeadlineError } from "../../../../shared/budget.ts";
 import { errorFields, log } from "../../../../shared/log.ts";
 import type { LinkedAgent, RelayConversation, RelayMessage } from "../../../../shared/types.ts";
 import type { CardTicket } from "../commands/components.ts";
-import { DiscordHttpError } from "../discord/rest.ts";
 import {
   type Avatars,
   body,
@@ -46,9 +44,15 @@ export class UnknownThreadError extends Error {
 
 /** Thrown when Discord may have accepted a message but did not return its receipt. */
 export class UnknownSendError extends Error {
-  constructor() {
+  readonly status: number | undefined;
+
+  constructor(cause?: unknown) {
     super("Discord send outcome is unknown; automatic replay is prohibited");
     this.name = "UnknownSendError";
+    this.status =
+      typeof cause === "object" && cause !== null && "status" in cause && typeof cause.status === "number"
+        ? cause.status
+        : undefined;
   }
 }
 
@@ -207,7 +211,7 @@ export class Relay {
       try {
         threadId = await this.createPost(message);
       } catch (error) {
-        if (!isUnknownSend(error)) throw error;
+        if (!(error instanceof UnknownSendError)) throw error;
         this.logUnknownSend(accountId, conversation.id, message.id);
         return;
       }
@@ -458,7 +462,7 @@ export class Relay {
           `message:${accountId}:${conversationId}:${message.id}:${part}:${threadId}`,
         ));
       } catch (error) {
-        if (!isUnknownSend(error)) throw error;
+        if (!(error instanceof UnknownSendError)) throw error;
         this.logUnknownSend(accountId, conversationId, message.id, threadId, part);
         return false;
       }
@@ -537,7 +541,7 @@ export class Relay {
         store.forgetThread(accountId, conversation.id);
         return undefined;
       }
-      if (isUnknownSend(error)) {
+      if (error instanceof UnknownSendError) {
         this.logUnknownSend(accountId, conversation.id, undefined, threadId);
         return undefined;
       }
@@ -611,7 +615,7 @@ export class Relay {
       );
       store.updateConversation(accountId, conversationId, { cardId: messageId, cardCovered: 0 });
     } catch (error) {
-      if (!isUnknownSend(error)) throw error;
+      if (!(error instanceof UnknownSendError)) throw error;
       this.logUnknownSend(accountId, conversationId, undefined, threadId);
       // The guard prevents replaying this card. Keep a marker so sweeps do not submit it again.
       store.updateConversation(accountId, conversationId, { cardId: "unknown", cardCovered: 0 });
@@ -681,14 +685,4 @@ function isAfter(id: string, other: string | undefined): boolean {
  */
 function answersLatest(sourceId: string, latest: string | undefined): boolean {
   return !latest || BigInt(sourceId) >= BigInt(latest);
-}
-
-function isUnknownSend(error: unknown): boolean {
-  return (
-    error instanceof UnknownSendError ||
-    (error instanceof DiscordHttpError && error.status >= 500) ||
-    error instanceof TypeError ||
-    (error instanceof DOMException && ["AbortError", "TimeoutError"].includes(error.name)) ||
-    (error instanceof JobDeadlineError && error.requestStarted)
-  );
 }
