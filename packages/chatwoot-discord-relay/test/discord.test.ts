@@ -251,96 +251,59 @@ describe("DiscordRest", () => {
     expect(requests.map((request) => [request.url.hostname, request.redirect])).toEqual([["discord.com", "manual"]]);
   });
 
-  it("waits for retry_after on 429 and retries", async () => {
-    let calls = 0;
-    mockFetch(
-      on("GET", `${api}/channels/1`, () => {
-        calls += 1;
-        return calls === 1
-          ? json({ message: "You are being rate limited.", retry_after: 0.25, global: false }, { status: 429 })
-          : json({ id: "1" });
-      }),
-    );
-    const waits: number[] = [];
-    const rest = new DiscordRest(
-      "t",
-      (request) => fetch(request),
-      async (ms) => void waits.push(ms),
-    );
-    expect(await rest.get("/channels/1")).toEqual({ id: "1" });
-    // The wait runs until the time Discord gave, measured from when the 429 arrived.
-    expect(waits).toHaveLength(1);
-    expect(waits[0]).toBeGreaterThan(200);
-    expect(waits[0]).toBeLessThanOrEqual(250);
+  it("returns 429 immediately and retains Retry-After across client recreation", async () => {
+    const cache = new MemoryCache();
+    const { requests } = mockFetch(on("GET", `${api}/channels/1`, () => json({ retry_after: 60 }, { status: 429 })));
+    const started = Date.now();
+    await expect(new DiscordRest("t", (request) => fetch(request), cache).get("/channels/1")).rejects.toMatchObject({
+      status: 429,
+      retryAfterMs: 60_000,
+    });
+    await expect(new DiscordRest("t", (request) => fetch(request), cache).get("/channels/1")).rejects.toMatchObject({
+      status: 429,
+    });
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(requests).toHaveLength(1);
   });
 
-  it("waits out an exhausted bucket before reusing the route", async () => {
+  it("shares bucket limits across routes, but keeps major resources separate", async () => {
+    const cache = new MemoryCache();
+    let limited = false;
+    const headers = () => ({
+      "x-ratelimit-bucket": "b1",
+      ...(limited ? { "x-ratelimit-remaining": "0", "x-ratelimit-reset-after": "60" } : {}),
+    });
     mockFetch(
-      on("GET", `${api}/channels/1`, () =>
-        json({ id: "1" }, { headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset-after": "1.5" } }),
-      ),
+      on("GET", /^discord\.com\/api\/v10\/channels\/[12]$/, () => json({}, { headers: headers() })),
+      on("PATCH", /^discord\.com\/api\/v10\/channels\/[12]$/, () => json({}, { headers: headers() })),
     );
-    const waits: number[] = [];
-    const rest = new DiscordRest(
-      "t",
-      (request) => fetch(request),
-      async (ms) => void waits.push(ms),
-    );
+    const rest = new DiscordRest("t", (request) => fetch(request), cache);
     await rest.get("/channels/1");
+    await rest.patch("/channels/1", {});
+    limited = true;
     await rest.get("/channels/1");
-    expect(waits).toHaveLength(1);
-    expect(waits[0]).toBeGreaterThan(1000);
+    await expect(
+      new DiscordRest("t", (request) => fetch(request), cache).patch("/channels/1", {}),
+    ).rejects.toMatchObject({ status: 429 });
+    await expect(rest.get("/channels/2")).resolves.toEqual({});
   });
 
-  it("shares an exhausted bucket across routes that report it, per top-level resource", async () => {
-    const limited = { "x-ratelimit-bucket": "b1", "x-ratelimit-remaining": "0", "x-ratelimit-reset-after": "2" };
-    mockFetch(
-      on(
-        "DELETE",
-        /^discord\.com\/api\/v10\/webhooks\/1\/abc\/messages\/\w+$/,
-        () => new Response(null, { status: 204, headers: limited }),
-      ),
-      on(
-        "DELETE",
-        /^discord\.com\/api\/v10\/webhooks\/2\/xyz\/messages\/\w+$/,
-        () => new Response(null, { status: 204 }),
-      ),
+  it("keeps bot, unauthenticated and interaction global limits in their documented scopes", async () => {
+    const cache = new MemoryCache();
+    const { requests } = mockFetch(
+      on("GET", `${api}/channels/1`, () => json({ retry_after: 60, global: true }, { status: 429 })),
+      on("GET", `${api}/channels/2`, () => json({})),
+      on("POST", `${api}/webhooks/1/tok`, () => json({ retry_after: 60, global: true }, { status: 429 })),
+      on("PATCH", `${api}/webhooks/2/interaction/messages/@original`, () => json({})),
     );
-    const waits: number[] = [];
-    const rest = new DiscordRest(
-      "t",
-      (request) => fetch(request),
-      async (ms) => void waits.push(ms),
-    );
-    await rest.delete("/webhooks/1/abc/messages/m1");
-    await rest.delete("/webhooks/1/abc/messages/m2"); // same bucket: waits
-    await rest.delete("/webhooks/2/xyz/messages/m3"); // another webhook: does not
-    expect(waits).toHaveLength(1);
-    expect(waits[0]).toBeGreaterThan(1000);
-  });
-
-  it("pauses every route after a global rate limit", async () => {
-    let calls = 0;
-    mockFetch(
-      on("GET", `${api}/channels/1`, () => {
-        calls += 1;
-        return calls === 1
-          ? json({ message: "You are being rate limited.", retry_after: 0.5, global: true }, { status: 429 })
-          : json({ id: "1" });
-      }),
-      on("GET", `${api}/channels/2`, () => json({ id: "2" })),
-    );
-    const waits: number[] = [];
-    const rest = new DiscordRest(
-      "t",
-      (request) => fetch(request),
-      async (ms) => void waits.push(ms),
-    );
-    expect(await rest.get("/channels/1")).toEqual({ id: "1" });
-    expect(waits).toHaveLength(1);
-    // The test's sleep returns at once, so the global limit is still in force for another route.
-    await rest.get("/channels/2");
-    expect(waits).toHaveLength(2);
+    const rest = new DiscordRest("t", (request) => fetch(request), cache);
+    await expect(rest.get("/channels/1")).rejects.toMatchObject({ status: 429 });
+    await expect(rest.get("/channels/2")).rejects.toMatchObject({ status: 429 });
+    await expect(rest.post("/webhooks/1/tok", { auth: false })).rejects.toMatchObject({ status: 429 });
+    await expect(
+      rest.patch("/webhooks/2/interaction/messages/@original", { auth: false, interaction: true }),
+    ).resolves.toEqual({});
+    expect(requests).toHaveLength(3);
   });
 
   it("gives up on long rate limits and surfaces Discord's error code", async () => {
@@ -348,11 +311,7 @@ describe("DiscordRest", () => {
       on("GET", `${api}/channels/1`, () => json({ message: "slow down", retry_after: 60 }, { status: 429 })),
       on("GET", `${api}/channels/2`, () => json({ message: "Missing Access", code: 50001 }, { status: 403 })),
     );
-    const rest = new DiscordRest(
-      "t",
-      (request) => fetch(request),
-      async () => {},
-    );
+    const rest = new DiscordRest("t", (request) => fetch(request));
     // The error says how long Discord asked to wait, so the job can wait that long.
     await expect(rest.get("/channels/1")).rejects.toMatchObject({
       status: 429,

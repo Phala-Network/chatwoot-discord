@@ -124,10 +124,57 @@ export type { Job } from "../../../shared/store.ts";
 export class Store extends QueueStore implements RelayStore, Cache {
   /** A changed reply can qualify even on an already-scanned page. No notification was decided yet. */
   invalidateAnswerScans(accountId: number, conversationId: number): boolean {
+    const key = `answer-version:${accountId}:${conversationId}`;
+    this.set(key, String(Number(this.get(key) ?? 0) + 1), 24 * 60 * 60 * 1000);
     return (
       this.sql.exec("DELETE FROM cache WHERE key LIKE ?", `answer-scan:${accountId}:${conversationId}:%`).rowsWritten >
       0
     );
+  }
+
+  commandFile(interactionId: string, part: number, type: string): Blob | undefined {
+    if (
+      this.sql
+        .exec("SELECT 1 FROM command_files WHERE interaction_id = ? AND part = ? AND chunk = -1", interactionId, part)
+        .toArray().length === 0
+    )
+      return;
+    const chunks: Blob[] = [];
+    for (const row of this.sql.exec<{ bytes: ArrayBuffer }>(
+      "SELECT bytes FROM command_files WHERE interaction_id = ? AND part = ? AND chunk >= 0 ORDER BY chunk",
+      interactionId,
+      part,
+    ))
+      chunks.push(new Blob([row.bytes]));
+    return new Blob(chunks, { type });
+  }
+
+  async saveCommandFile(interactionId: string, part: number, blob: Blob): Promise<void> {
+    this.sql.exec("DELETE FROM command_files WHERE interaction_id = ? AND part = ?", interactionId, part);
+    // SQL rows are limited to 2 MiB. Keep transfers and restoration below the isolate memory cap.
+    const size = 64 * 1024;
+    for (let offset = 0; offset < blob.size; offset += size) {
+      const bytes = await blob.slice(offset, offset + size).arrayBuffer();
+      this.sql.exec(
+        "INSERT INTO command_files VALUES (?, ?, ?, ?, ?)",
+        interactionId,
+        part,
+        offset / size,
+        bytes,
+        this.now(),
+      );
+    }
+    this.sql.exec(
+      "INSERT INTO command_files VALUES (?, ?, -1, ?, ?)",
+      interactionId,
+      part,
+      new ArrayBuffer(0),
+      this.now(),
+    );
+  }
+
+  clearCommandFiles(interactionId: string): void {
+    this.sql.exec("DELETE FROM command_files WHERE interaction_id = ?", interactionId);
   }
 
   override migrate(): void {
@@ -140,6 +187,9 @@ export class Store extends QueueStore implements RelayStore, Cache {
       this.sql.exec("UPDATE schema_version SET version = ?", version + 1);
     }
     super.migrate();
+    this.sql.exec(
+      "CREATE TABLE IF NOT EXISTS command_files (interaction_id TEXT NOT NULL, part INTEGER NOT NULL, chunk INTEGER NOT NULL, bytes BLOB NOT NULL, received_at INTEGER NOT NULL, PRIMARY KEY (interaction_id, part, chunk))",
+    );
   }
 
   // Conversations
@@ -349,6 +399,8 @@ export class Store extends QueueStore implements RelayStore, Cache {
   }
 
   forgetThread(accountId: number, conversationId: number): void {
+    const key = `send:post:${accountId}:${conversationId}`;
+    if (this.get(key) !== "unknown") this.delete(key);
     this.sql.exec(
       `UPDATE conversations SET thread_id = NULL, state = NULL, announced_assignee = NULL, announce_pending = NULL,
          title_subject = NULL, title = NULL, title_message_id = NULL, card_id = NULL, card_covered = NULL, answer_id = NULL,
@@ -443,6 +495,7 @@ export class Store extends QueueStore implements RelayStore, Cache {
   override prune(): void {
     super.prune();
     const now = this.now();
+    this.sql.exec("DELETE FROM command_files WHERE received_at <= ?", now - INTERACTION_TTL_MS);
     this.sql.exec("DELETE FROM counters WHERE expires_at <= ?", now);
     this.sql.exec("DELETE FROM interactions WHERE received_at <= ?", now - INTERACTION_TTL_MS);
   }

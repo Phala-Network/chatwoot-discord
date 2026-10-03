@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Bound Hub work with per-operation deadlines and persisted continuations. Persist rate-limit cooldowns without sleeping, page hourly digests, prioritize live messages with aging, and refresh decorative metadata outside the message path.
+- Separate command execution from retryable feedback and card convergence; retain unknown send outcomes without replay. Use one bounded durable interaction RPC and only persisted drafts for modals. Keep the deployed Hub namespace, cursor and hold state intact; the command attachment table is created additively.
+
 All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),

@@ -48,6 +48,7 @@ export interface ForumClient {
     forumChannelId: string,
     message: WebhookMessage,
     threadId?: string,
+    sendKey?: string,
   ): Promise<{ channelId: string; messageId: string }>;
   /**
    * Modifies a post of the forum. Discord rejects changes to an archived post unless the same
@@ -435,7 +436,12 @@ export class Relay {
     for (let part = posted.length; part < parts.length; part += 1) {
       const payload = parts[part];
       if (!payload) break;
-      const { messageId } = await forum.execute(forumChannelId, payload, threadId);
+      const { messageId } = await forum.execute(
+        forumChannelId,
+        payload,
+        threadId,
+        `message:${accountId}:${conversationId}:${message.id}:${part}:${threadId}`,
+      );
       store.savePostedPart(accountId, conversationId, message.id, part, messageId);
       store.updateConversation(accountId, conversationId, { cardCovered: 1 });
       if (fromCustomer && part === 0) this.customerWrote(accountId, conversationId, messageId);
@@ -465,7 +471,12 @@ export class Relay {
     };
     const tags = this.postTags(accountId, conversation);
     if (tags.length > 0) post.applied_tags = tags;
-    const { channelId: threadId } = await forum.execute(target.forumChannelId, post);
+    const { channelId: threadId } = await forum.execute(
+      target.forumChannelId,
+      post,
+      undefined,
+      `post:${accountId}:${conversation.id}`,
+    );
     store.updateConversation(accountId, conversation.id, {
       threadId,
       titleSubject: subject,

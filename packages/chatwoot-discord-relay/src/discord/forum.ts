@@ -24,6 +24,9 @@ import {
   Routes,
   WebhookType,
 } from "discord-api-types/v10";
+import { BudgetExhaustedError } from "../../../../shared/budget.ts";
+import { parallel } from "../../../../shared/concurrent.ts";
+import { isRecord, parseJson } from "../../../../shared/json.ts";
 import { log } from "../../../../shared/log.ts";
 import { type ForumClient, UnknownThreadError, type WebhookMessage } from "../relay/relay.ts";
 import { DiscordHttpError, type DiscordRest } from "./rest.ts";
@@ -45,6 +48,13 @@ export interface Cache {
   delete(key: string): void;
 }
 
+export class UnknownSendError extends Error {
+  constructor() {
+    super("Discord send outcome is unknown; automatic replay is prohibited");
+    this.name = "UnknownSendError";
+  }
+}
+
 export class DiscordForum implements ForumClient {
   constructor(
     private readonly rest: DiscordRest,
@@ -55,8 +65,18 @@ export class DiscordForum implements ForumClient {
     forumChannelId: string,
     message: WebhookMessage,
     threadId?: string,
+    sendKey?: string,
   ): Promise<{ channelId: string; messageId: string }> {
+    const key = sendKey ? `send:${sendKey}` : undefined;
+    const saved = key ? this.cache.get(key) : undefined;
+    if (saved !== undefined) {
+      const receipt = parseJson(saved);
+      if (isRecord(receipt) && typeof receipt.channelId === "string" && typeof receipt.messageId === "string")
+        return { channelId: receipt.channelId, messageId: receipt.messageId };
+      throw new UnknownSendError();
+    }
     const webhook = await this.webhook(forumChannelId);
+    if (key) this.cache.set(key, "unknown");
     try {
       const sent = await this.withTags(forumChannelId, message.applied_tags, (tags) =>
         this.rest.post<
@@ -70,8 +90,14 @@ export class DiscordForum implements ForumClient {
           auth: false,
         }),
       );
-      return { channelId: sent.channel_id, messageId: sent.id };
+      if (!sent?.channel_id || !sent.id) throw new UnknownSendError();
+      const receipt = { channelId: sent.channel_id, messageId: sent.id };
+      if (key) this.cache.set(key, JSON.stringify(receipt));
+      return receipt;
     } catch (error) {
+      // An explicit rejection or an exhausted request count confirms that no send was accepted.
+      // Timeouts, cancellation and lost receipts remain unknown permanently.
+      if (key && (error instanceof DiscordHttpError || error instanceof BudgetExhaustedError)) this.cache.delete(key);
       if (threadId && isUnknownChannel(error)) throw new UnknownThreadError(threadId);
       if (error instanceof DiscordHttpError && error.status === 404) {
         if (error.code === UNKNOWN_WEBHOOK) {
@@ -213,8 +239,10 @@ export class DiscordForum implements ForumClient {
     const key = webhookKey(forumChannelId);
     const [id, token] = this.cache.get(key)?.split(":") ?? [];
     if (id && token) return { id, token };
-    const applicationId = await this.applicationId();
-    const hooks = await this.rest.get<RESTGetAPIChannelWebhooksResult>(Routes.channelWebhooks(forumChannelId));
+    const [applicationId, hooks] = await parallel(
+      this.applicationId(),
+      this.rest.get<RESTGetAPIChannelWebhooksResult>(Routes.channelWebhooks(forumChannelId)),
+    );
     const existing = hooks.find(
       (hook) => hook.type === WebhookType.Incoming && hook.application_id === applicationId && hook.token,
     );

@@ -1058,3 +1058,38 @@ describe("agent bot lifecycle", () => {
     },
   );
 });
+
+it("continues after a time slice without replaying already posted messages", async () => {
+  const world = new World();
+  world.messages = [
+    { id: 901, content: "first", message_type: 2 },
+    { id: 902, content: "second", message_type: 2 },
+  ];
+  const settings = testSettings();
+  await withStore(async (store) => {
+    store.adoptThread(3, 12, "100000000000000901");
+    store.setCursor(3, 12, 0);
+    const services = context(store, settings);
+    services.budget.startSlice(150);
+    // The first post succeeds. Reading the next message's decoration is not needed for activities;
+    // stop at the next GET after that post, then resume through a fresh invocation.
+    const realFetch = vi.mocked(globalThis.fetch).getMockImplementation();
+    if (!realFetch) throw new Error("Missing world fetch");
+    let firstPosted = false;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (request, init) => {
+      const input = new Request(request, init);
+      if (firstPosted && input.method === "GET") {
+        await new Promise<void>((_resolve, reject) =>
+          input.signal.addEventListener("abort", () => reject(input.signal.reason), { once: true }),
+        );
+      }
+      const response = await realFetch(input);
+      if (input.method === "POST" && new URL(input.url).pathname === "/api/v10/webhooks/1/tok") firstPosted = true;
+      return response;
+    });
+    await expect(processConversation(services, 3, 12)).rejects.toThrow(/time slice/);
+    vi.mocked(globalThis.fetch).mockImplementation(realFetch);
+    await sync(store, settings);
+    expect(world.replies()).toEqual(["_first_", "_second_"]);
+  });
+});

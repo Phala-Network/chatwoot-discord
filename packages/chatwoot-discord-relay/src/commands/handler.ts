@@ -380,7 +380,7 @@ async function component(context: Context, interaction: APIMessageComponentInter
     if ("text" in draft) return { response: editor(context, "reply", draft.text) };
     if (draft.missing === "none") return privately("That answer has no draft.");
     return privately(
-      `That answer's draft cannot be read here (it needs Discord's Message Content intent, or Discord did not answer in time). Right-click [the answer](https://discord.com/channels/${interaction.guild_id ?? "@me"}/${context.threadId}/${answerId}) and choose Apps → ${REPLY_WITH_THIS}.`,
+      `That answer's draft is no longer stored here. Right-click [the answer](https://discord.com/channels/${interaction.guild_id ?? "@me"}/${context.threadId}/${answerId}) and choose Apps → ${REPLY_WITH_THIS}.`,
     );
   }
   switch (data.custom_id) {

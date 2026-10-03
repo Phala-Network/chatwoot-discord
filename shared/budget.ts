@@ -24,6 +24,7 @@ export const JOB_SLICE_MS = 10_000;
 export class Budget {
   private used = 0;
   private slice: AbortSignal | undefined;
+  private sliceEnds = Number.POSITIVE_INFINITY;
 
   constructor(
     readonly limit: number,
@@ -36,7 +37,13 @@ export class Budget {
   }
 
   startSlice(ms = JOB_SLICE_MS): void {
+    this.sliceEnds = Date.now() + ms;
     this.slice = AbortSignal.timeout(ms);
+  }
+
+  requireTime(ms: number): void {
+    this.checkpoint();
+    if (Date.now() + ms > this.sliceEnds) throw new JobDeadlineError();
   }
 
   checkpoint(): void {
@@ -66,6 +73,7 @@ export class Budget {
       const response = await within(this.fetchImpl(new Request(request, { signal })), signal);
       if (!response.body) return response;
       const reader = response.body.getReader();
+      const slice = this.slice;
       const body = new ReadableStream<Uint8Array>({
         async pull(controller) {
           try {
@@ -74,7 +82,7 @@ export class Budget {
             else controller.enqueue(value);
           } catch (error) {
             await reader.cancel().catch(() => {});
-            controller.error(error);
+            controller.error(slice?.aborted ? new JobDeadlineError() : error);
           }
         },
         cancel: (reason) => reader.cancel(reason),
