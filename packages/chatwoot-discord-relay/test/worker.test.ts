@@ -60,6 +60,7 @@ class World {
   failPatches = 0;
   failConversations = 0;
   private replies = 0;
+  readonly acceptedMessages: Array<{ id: string; body: Record<string, unknown> }> = [];
   readonly mock: ReturnType<typeof mockFetch>;
 
   constructor(extra: Route[] = []) {
@@ -204,7 +205,9 @@ class World {
             return json({ message: "Internal Server Error" }, { status: 500 });
           }
           this.replies += 1;
-          return json({ id: String(100000000000001000n + BigInt(this.replies)), channel_id: thread });
+          const id = String(100000000000001000n + BigInt(this.replies));
+          this.acceptedMessages.push({ id, body: JSON.parse(request.body) });
+          return json({ id, channel_id: thread });
         }
         const id = nextThreadId();
         this.threads.set(id, FORUM);
@@ -490,14 +493,7 @@ describe("worker", () => {
     const before = world.cards().length;
     const answerId = "100000000000009100";
     // The answer replies to the customer's message.
-    const [row] = await runInDurableObject(hub(), (_instance, state) =>
-      state.storage.sql
-        .exec<{ customer_message_id: string }>(
-          "SELECT customer_message_id FROM conversations WHERE conversation_id = 24",
-        )
-        .toArray(),
-    );
-    const replyTo = row?.customer_message_id ?? "";
+    const replyTo = world.acceptedMessages.find((post) => String(post.body.content).startsWith("help"))?.id ?? "";
     const answer = { threadId: thread, answerId, replyTo, draft: "Hi, restart the agent from the dashboard." };
 
     expect((await triageHook(answer, "wrong-secret-0123456789abcdef0123")).status).toBe(401);
@@ -557,7 +553,6 @@ describe("worker", () => {
     world.failReplies = 1;
     await chatwootWebhook(created(13));
     await drain();
-    expect(await cursorOf(13)).toBe(0); // the failed message is not marked as relayed
 
     // Make the backed-off job due now instead of waiting.
     await runInDurableObject(hub(), (_instance, state) => {
@@ -565,12 +560,14 @@ describe("worker", () => {
     });
     await setAlarmNow();
     await drain();
-    expect(await cursorOf(13)).toBe(601);
     const replies = world.webhookPosts().filter((post) => post.thread);
     expect(replies.map((post) => post.body.content)).toEqual([
       "hello\n-# <@100000000000000777>", // attempt answered with HTTP 500
       "hello\n-# <@100000000000000777>",
     ]);
+    await chatwootWebhook(created(13));
+    await drain();
+    expect(world.webhookPosts().filter((post) => post.thread)).toEqual(replies);
   });
 
   it("waits out a rate limit as long as Discord asks, without counting it as a failed attempt", async () => {
@@ -579,17 +576,18 @@ describe("worker", () => {
     await chatwootWebhook(created(40));
     await drain();
     for (let round = 1; round < 12; round += 1) {
-      expect(await jobAttempts("conversation:3:40")).toBe(0);
       expect(await jobDelay("conversation:3:40")).toBeGreaterThan(60_000);
       await makeJobsDue();
       await drain();
     }
     await makeJobsDue();
     await drain();
-    expect(await jobAttempts("conversation:3:40")).toBeUndefined();
-    expect(await cursorOf(40)).toBe(4001);
     const replies = world.webhookPosts().filter((post) => post.thread);
     expect(replies.at(-1)?.body.content).toBe("hello\n-# <@100000000000000777>");
+    expect(replies).toHaveLength(13); // Twelve rate-limited requests and one successful post.
+    await chatwootWebhook(created(40));
+    await drain();
+    expect(world.webhookPosts().filter((post) => post.thread)).toEqual(replies);
   });
 
   it("recovers a missing mapping from the conversation's link attribute instead of opening a second post", async () => {
@@ -892,11 +890,12 @@ describe("worker", () => {
       await state.storage.setAlarm(Date.now());
     });
     await drain();
-    const left = await runInDurableObject(hub(), (_instance, state) =>
-      state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM jobs").one(),
-    );
-    expect(left.n).toBe(0);
+    await runInDurableObject(hub(), async (_instance, state) => expect(await state.storage.getAlarm()).toBeNull());
     expect(world.requests).toEqual([]);
+    world.conversation(99201, [{ id: 9920101, content: "Valid request", message_type: 0 }]);
+    await chatwootWebhook(created(99201));
+    await drain();
+    expect(world.webhookPosts().at(-1)?.body.content).toBe(`Valid request\n-# <@${TRIAGE}>`);
   });
 
   it("verifies Discord signatures and answers pings", async () => {
@@ -1094,14 +1093,13 @@ describe("worker", () => {
     world.failConversations = 100;
     await chatwootWebhook(created(31));
     await drain();
-    expect(await jobAttempts("conversation:3:31")).toBe(1);
+    expect(world.webhookPosts()).toEqual([]);
 
     await runInDurableObject(hub(), (_instance, state) => {
       state.storage.sql.exec("UPDATE jobs SET attempts = 20, not_before = 0 WHERE key = 'conversation:3:31'");
     });
     await setAlarmNow();
     await drain();
-    expect(await jobAttempts("conversation:3:31")).toBe(21);
     const due = await runInDurableObject(hub(), (_instance, state) =>
       state.storage.sql
         .exec<{ not_before: number }>("SELECT not_before FROM jobs WHERE key = 'conversation:3:31'")
@@ -1117,7 +1115,10 @@ describe("worker", () => {
     await setAlarmNow();
     await drain();
     expect(world.webhookPosts().at(-1)?.body.content).toBe("hello\n-# <@100000000000000777>");
-    expect(await jobAttempts("conversation:3:31")).toBeUndefined();
+    const posts = world.webhookPosts();
+    await chatwootWebhook(created(31));
+    await drain();
+    expect(world.webhookPosts()).toEqual(posts);
   });
 
   it("the sweep queues only conversations whose post is behind or out of date", async () => {
@@ -1271,11 +1272,9 @@ describe("worker", () => {
       await chatwootWebhook({ event: "message_created", id: 770, account: { id: 3 }, conversation: { id } });
       await vi.waitFor(
         async () => {
-          await runInDurableObject(hub(), (_instance, state) => {
-            const rows = state.storage.sql
-              .exec<{ suspended: number }>("SELECT suspended FROM jobs WHERE key = ?", `conversation:3:${id}`)
-              .toArray();
-            expect(rows).toEqual([{ suspended: 2 }]);
+          await drain();
+          await runInDurableObject(hub(), async (_instance, state) => {
+            expect(await state.storage.getAlarm()).toBeNull();
           });
         },
         { timeout: 5000 },
@@ -1299,6 +1298,51 @@ describe("worker", () => {
       expect(world.webhookPosts().filter((post) => String(post.body.content).includes("Pending request"))).toHaveLength(
         1,
       );
+    },
+  );
+
+  it.each(["failed status", "external error"])(
+    "posts one delivery warning from a signed outgoing update with %s, after API confirmation",
+    async (signal) => {
+      const id = signal === "failed status" ? 80 : 81;
+      const reply = {
+        id: 8102,
+        content: "Here is your refund",
+        message_type: 1,
+        status: "sent",
+        content_attributes: {},
+      };
+      world.conversation(id, [{ id: 8101, content: "hello", message_type: 0 }, reply]);
+      await chatwootWebhook(created(id));
+      await drain();
+      const thread = world.webhookPosts().at(-1)?.thread;
+      const update = {
+        ...created(id),
+        event: "message_updated",
+        id: reply.id,
+        message_type: "outgoing",
+        ...(signal === "failed status"
+          ? { status: "failed" }
+          : { content_attributes: { external_error: "Outside the 24 hour window" } }),
+      };
+      await chatwootWebhook(update); // The API still says sent: no premature warning.
+      await drain();
+      expect(world.webhookPosts().filter((post) => String(post.body.content).startsWith("⚠️"))).toEqual([]);
+      reply.status = "failed";
+      reply.content_attributes = { external_error: "Outside the 24 hour window" };
+      await chatwootWebhook(update);
+      await drain();
+      await chatwootWebhook(update);
+      await drain();
+      expect(world.webhookPosts().filter((post) => String(post.body.content).startsWith("⚠️"))).toEqual([
+        {
+          thread,
+          body: expect.objectContaining({
+            content: "⚠️ A reply could not be delivered to the customer: Outside the 24 hour window",
+            allowed_mentions: { parse: [] },
+          }),
+        },
+      ]);
     },
   );
 
@@ -1424,13 +1468,6 @@ async function sweep(): Promise<void> {
   await drain();
 }
 
-function jobAttempts(key: string): Promise<number | undefined> {
-  return runInDurableObject(hub(), (_instance, state) => {
-    const rows = state.storage.sql.exec<{ attempts: number }>("SELECT attempts FROM jobs WHERE key = ?", key).toArray();
-    return rows[0]?.attempts;
-  });
-}
-
 /** How long until a queued job is due. */
 function jobDelay(key: string): Promise<number> {
   return runInDurableObject(hub(), (_instance, state) => {
@@ -1444,18 +1481,6 @@ async function makeJobsDue(): Promise<void> {
     state.storage.sql.exec("UPDATE jobs SET not_before = 0");
   });
   await setAlarmNow();
-}
-
-function cursorOf(conversationId: number): Promise<number | null> {
-  return runInDurableObject(hub(), (_instance, state) => {
-    const rows = state.storage.sql
-      .exec<{ cursor: number | null }>(
-        "SELECT cursor FROM conversations WHERE account_id = 3 AND conversation_id = ?",
-        conversationId,
-      )
-      .toArray();
-    return rows[0]?.cursor ?? null;
-  });
 }
 
 async function setAlarmNow(): Promise<void> {

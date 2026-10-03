@@ -196,11 +196,17 @@ async function sync(store: Store, settings: Settings, limit?: number): Promise<P
 afterEach(() => vi.restoreAllMocks());
 
 describe("processConversation", () => {
-  it("keeps the existing post and cursor when upgrading a 0.1.0 database", async () => {
+  it("upgrades a 0.1.0 post without replaying history or re-notifying its unchanged owner, then notifies reassignment", async () => {
     const world = new World();
+    world.conversation.meta = {
+      ...Object(world.conversation.meta),
+      assignee: { id: 42, name: "Kim Lee" },
+      assignee_type: "User",
+    };
     world.messages = [
       { id: 500, content: "Already relayed", message_type: 0 },
-      { id: 501, content: "New request", message_type: 0 },
+      { id: 501, content: "Update from Kim", message_type: 1 },
+      { id: 502, content: "Kim updated the ticket", message_type: 2 },
     ];
     await runInDurableObject(env.HUB.getByName("legacy-processor"), async (_instance, state) => {
       // A legacy database fixture, independent of the current migration implementation.
@@ -241,12 +247,28 @@ describe("processConversation", () => {
       store.migrate();
       await sync(store, testSettings());
       await sync(store, testSettings());
-      expect(world.replies()).toEqual([`New request\n-# <@${TRIAGE}>`]);
+      expect(world.replies()).toEqual(["Update from Kim", "_Kim updated the ticket_"]);
+      expect(world.sent("PUT", `/thread-members/${ALICE}`)).toEqual([]);
       expect(world.posts().every((post) => post.thread === "100000000000000101")).toBe(true);
       expect(world.cards()).toHaveLength(1);
       expect(world.sent("POST", "/webhooks/1/tok").every((request) => request.url.searchParams.has("thread_id"))).toBe(
         true,
       );
+      world.conversation.meta = {
+        ...Object(world.conversation.meta),
+        assignee: { id: 43, name: "Bob" },
+        assignee_type: "User",
+      };
+      world.messages.push({ id: 503, content: "Assigned to Bob", message_type: 2 });
+      await sync(store, testSettings());
+      await sync(store, testSettings());
+      expect(world.replies()).toEqual([
+        "Update from Kim",
+        "_Kim updated the ticket_",
+        "_Assigned to Bob_",
+        `-# Assigned to <@${BOB}>`,
+      ]);
+      expect(world.sent("PUT", `/thread-members/${BOB}`)).toHaveLength(1);
     });
   });
 
@@ -276,16 +298,91 @@ describe("processConversation", () => {
     });
   });
 
-  it("relays an older conversation's history without calling anyone, then notifies on live messages", async () => {
+  it("rebuilds a deleted post with all unfinished parts and responses, without replaying completed history", async () => {
     const world = new World();
+    world.messages = [
+      { id: 1, content: "Completed history", message_type: 1 },
+      {
+        id: 2,
+        content: "Your email?",
+        message_type: 3,
+        content_type: "input_email",
+        content_attributes: { submitted_email: "jane@example.com" },
+      },
+    ];
+    await withStore(async (store) => {
+      const settings = testSettings();
+      await sync(store, settings);
+      const oldThread = world.posts().find((post) => post.thread)?.thread;
+      if (!oldThread) throw new Error("Test post missing");
+      const long = "a".repeat(1674) + "b".repeat(1000);
+      world.messages.push({ id: 3, content: long, message_type: 1 });
+      let parts = 0;
+      world.threadFailure = () => {
+        parts += 1;
+        return parts === 1
+          ? json({ id: "100000000000008001", channel_id: oldThread })
+          : json({ message: "unavailable" }, { status: 503 });
+      };
+      await expect(sync(store, settings)).rejects.toThrow("503");
+      expect(world.posts().at(-2)?.body.content).toBe(long.slice(0, 1674));
+      // The deleted thread invalidates unfinished parts and response digests, but not the completed cursor.
+      world.goneThreads.add(oldThread);
+      world.threadFailure = () => {
+        world.threadFailure = undefined;
+        return json({ message: "Unknown Channel", code: 10003 }, { status: 404 });
+      };
+      await sync(store, settings);
+      const newThread = world.posts().at(-1)?.thread;
+      expect(newThread).not.toBe(oldThread);
+      const rebuilt = world.posts().filter((post) => post.thread === newThread);
+      expect(rebuilt.map((post) => post.body.content).join("")).toBe(long);
+      await processMessageUpdate(context(store, settings), 3, 12, 2);
+      await processMessageUpdate(context(store, settings), 3, 12, 2);
+      await sync(store, settings);
+      expect(
+        world
+          .posts()
+          .filter((post) => post.thread === newThread)
+          .map((post) => post.body.content),
+      ).toEqual([...rebuilt.map((post) => post.body.content), "Your email?\n\n**Email:** jane@example.com"]);
+      expect(world.replies().filter((text) => text === "Completed history")).toHaveLength(1);
+    });
+  });
+
+  it("relays assigned history silently, then announces the owner only after a live message", async () => {
+    const world = new World();
+    world.conversation.meta = {
+      ...Object(world.conversation.meta),
+      assignee: { id: 42, name: "Alice" },
+      assignee_type: "User",
+    };
     world.messages = [
       { id: 1, content: "last month", message_type: 0, created_at: now() - 30 * 86400 },
       { id: 2, content: "an answer", message_type: 1, created_at: now() - 30 * 86400 },
-      { id: 3, content: "just now", message_type: 0, created_at: now() - 5 },
     ];
     await withStore(async (store) => {
-      await sync(store, testSettings());
-      expect(world.replies()).toEqual(["last month", "an answer", `just now\n-# <@${TRIAGE}>`]);
+      const settings = testSettings();
+      await sync(store, settings);
+      expect(world.replies()).toEqual(["last month", "an answer"]);
+      expect(
+        world
+          .posts()
+          .filter((post) => post.thread)
+          .map((post) => post.body.allowed_mentions),
+      ).toEqual([{ parse: [] }, { parse: [] }]);
+      expect(world.sent("PUT", `/thread-members/${ALICE}`)).toEqual([]);
+      world.messages.push({ id: 3, content: "just now", message_type: 0, created_at: now() - 5 });
+      await sync(store, settings);
+      await sync(store, settings);
+      expect(world.replies()).toEqual([
+        "last month",
+        "an answer",
+        `just now\n-# <@${TRIAGE}>`,
+        `-# Assigned to <@${ALICE}>`,
+      ]);
+      expect(world.posts().at(-1)?.body.allowed_mentions).toEqual({ parse: [], users: [ALICE] });
+      expect(world.sent("PUT", `/thread-members/${ALICE}`)).toHaveLength(1);
     });
   });
 
@@ -407,7 +504,7 @@ describe("processConversation", () => {
       expect(world.conversation.custom_attributes).toEqual({});
       // The retry, with no new message, only links.
       await sync(store, settings);
-      const link = `https://discord.com/channels/${GUILD}/${store.conversation(3, 12)?.threadId}`;
+      const link = `https://discord.com/channels/${GUILD}/${world.posts().find((post) => post.thread)?.thread}`;
       expect(world.conversation.custom_attributes).toEqual({ discord_thread: link });
       // Linked: later syncs do not write it again.
       await sync(store, settings);
@@ -424,7 +521,7 @@ describe("processConversation", () => {
       await withStore(async (store) => {
         const settings = testSettings();
         await sync(store, settings);
-        const thread = store.conversation(3, 12)?.threadId;
+        const thread = world.posts().find((post) => post.thread)?.thread;
         const link = `https://discord.com/channels/${GUILD}/${thread}`;
         world.conversation.custom_attributes = {
           unrelated: 1,
@@ -744,31 +841,6 @@ describe("agent avatars", () => {
 });
 
 describe("processMessageUpdate", () => {
-  it("says once in the post when an agent's reply could not be delivered", async () => {
-    const world = new World();
-    world.messages = [
-      { id: 1, content: "hello", message_type: 0 },
-      { id: 2, content: "Here is your refund", message_type: 1, status: "sent" },
-    ];
-    await withStore(async (store) => {
-      const settings = testSettings();
-      await sync(store, settings);
-      // Delivery fails after the reply was relayed.
-      Object.assign(world.messages[1] ?? {}, {
-        status: "failed",
-        content_attributes: { external_error: "Message outside the 24 hour window" },
-      });
-      await processMessageUpdate(context(store, settings), 3, 12, 2);
-      await processMessageUpdate(context(store, settings), 3, 12, 2);
-      const notices = world.replies().filter((content) => content?.startsWith("⚠️"));
-      expect(notices).toEqual(["⚠️ A reply could not be delivered to the customer: Message outside the 24 hour window"]);
-
-      // A delivered message posts nothing.
-      await processMessageUpdate(context(store, settings), 3, 12, 1);
-      expect(world.replies().filter((content) => content?.startsWith("⚠️"))).toHaveLength(1);
-    });
-  });
-
   it("relays a failure and a response reported before their message was relayed, with the message", async () => {
     const world = new World();
     world.messages = [
