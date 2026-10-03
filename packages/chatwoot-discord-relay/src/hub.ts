@@ -448,15 +448,17 @@ export class Hub extends DurableObject<Env> {
       if (!conversation) return undefined;
       switch (action.type) {
         case "status":
+          if (action.status === "pending" && conversation.inbox_id !== undefined) {
+            const bot = await chatwoot.inboxBot(job.accountId, conversation.inbox_id);
+            if (bot) {
+              if (conversation.meta?.assignee_type !== "AgentBot" || conversation.meta.assignee?.id !== bot.id)
+                return undefined;
+              return "Handed back to the inbox bot.";
+            }
+          }
           if (String(conversation.status) !== action.status) return undefined;
           if (action.status === "snoozed" && (conversation.snoozed_until ?? undefined) !== action.snoozedUntil)
             return undefined;
-          if (action.status === "pending" && conversation.inbox_id !== undefined) {
-            const bot = await chatwoot.inboxBot(job.accountId, conversation.inbox_id);
-            if (bot && (conversation.meta?.assignee_type !== "AgentBot" || conversation.meta.assignee?.id !== bot.id))
-              return undefined;
-            if (bot) return "Handed back to the inbox bot.";
-          }
           return statusMessage(action.status, action.snoozedUntil);
         case "priority":
           if (conversation.priority === action.priority)
