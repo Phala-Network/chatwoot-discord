@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { z } from "zod";
-import { Budget, BudgetExhaustedError } from "../../../shared/budget.ts";
+import { scheduleAlarm } from "../../../shared/alarm.ts";
+import { Budget, BudgetExhaustedError, JOB_SLICE_MS } from "../../../shared/budget.ts";
 import { ChatwootError, chatwootClient } from "../../../shared/chatwoot/api.ts";
 import { parseJson } from "../../../shared/json.ts";
 import { errorFields, log } from "../../../shared/log.ts";
@@ -59,7 +60,7 @@ export class Router extends DurableObject<Env> {
         break;
       }
       try {
-        const ctx = { settings, chatwoot, store: this.store, fetch: budget.fetch };
+        const ctx = { settings, chatwoot, store: this.store, fetch: budget.fetchWith(JOB_SLICE_MS) };
         if ((await routeConversation(ctx, payload.accountId, payload.conversationId)) === "defer") {
           this.store.deferJob(job);
           yielded = true;
@@ -98,9 +99,6 @@ export class Router extends DurableObject<Env> {
   }
 
   private async schedule(at?: number): Promise<void> {
-    const next = at ?? this.store.nextWakeup();
-    if (next === undefined) return;
-    const current = await this.ctx.storage.getAlarm();
-    if (current === null || current > next) await this.ctx.storage.setAlarm(Math.max(Date.now(), next));
+    await scheduleAlarm(this.ctx, at ?? this.store.nextWakeup());
   }
 }

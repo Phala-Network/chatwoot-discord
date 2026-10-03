@@ -56,18 +56,15 @@ export class Budget {
     this.used += 1;
   }
 
-  readonly fetch: Fetch = async (request) => {
+  fetchWith(timeoutMs: number): Fetch {
+    return (request) => this.request(request, timeoutMs);
+  }
+
+  readonly fetch: Fetch = (request) => this.request(request, this.timeoutMs ?? METADATA_TIMEOUT_MS);
+
+  private async request(request: Request, timeoutMs: number): Promise<Response> {
     this.consume();
-    const transfer =
-      request.headers.get("content-type")?.startsWith("multipart/form-data") ||
-      ["cdn.discordapp.com", "media.discordapp.net"].includes(new URL(request.url).hostname);
-    const inference =
-      request.method === "POST" &&
-      !request.headers.has("api_access_token") &&
-      new URL(request.url).hostname !== "discord.com";
-    const operation = AbortSignal.timeout(
-      this.timeoutMs ?? (transfer ? TRANSFER_TIMEOUT_MS : inference ? JOB_SLICE_MS : METADATA_TIMEOUT_MS),
-    );
+    const operation = AbortSignal.timeout(this.timeoutMs ?? timeoutMs);
     const signal = AbortSignal.any([request.signal, operation, ...(this.slice ? [this.slice] : [])]);
     try {
       const response = await within(this.fetchImpl(new Request(request, { signal })), signal);
@@ -96,5 +93,5 @@ export class Budget {
       if (this.slice?.aborted) throw new JobDeadlineError(true);
       throw error;
     }
-  };
+  }
 }

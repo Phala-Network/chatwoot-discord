@@ -18,6 +18,7 @@ import {
   Routes,
 } from "discord-api-types/v10";
 import { z } from "zod";
+import { scheduleAlarm } from "../../../shared/alarm.ts";
 import {
   Budget,
   BudgetExhaustedError,
@@ -29,12 +30,12 @@ import { ChatwootError, chatwootClient, toRelayConversation } from "../../../sha
 import { parseJson } from "../../../shared/json.ts";
 import { errorFields, log } from "../../../shared/log.ts";
 import { retryDelay } from "../../../shared/store.ts";
-import { commandFeedback, executeCommand } from "./commands/actions.ts";
+import { commandFeedback, executeCommand, statusMessage } from "./commands/actions.ts";
 import { downloadAttachment } from "./commands/attachments.ts";
 import { UNKNOWN_RESULT } from "./commands/common.ts";
 import { text } from "./commands/components.ts";
 import { type HandlerResult, handleInteraction } from "./commands/handler.ts";
-import { type CommandJob, commandJobSchema } from "./commands/job.ts";
+import { type CommandAction, type CommandJob, commandJobSchema } from "./commands/job.ts";
 import { relaysInbox, type Settings } from "./config.ts";
 import { DiscordForum } from "./discord/forum.ts";
 import { DiscordHttpError, DiscordRest } from "./discord/rest.ts";
@@ -374,7 +375,11 @@ export class Hub extends DurableObject<Env> {
         );
         this.store.set(key, "unknown", 60 * 60 * 1000);
       }
-      const response = await services.budget.fetch(request);
+      const response = await services.budget.fetchWith(
+        request.headers.get("content-type")?.startsWith("multipart/form-data")
+          ? TRANSFER_TIMEOUT_MS
+          : METADATA_TIMEOUT_MS,
+      )(request);
       if (mutation && response.status === 429 && !confirmed) this.store.delete(key);
       if (mutation && response.ok) confirmed = true;
       return response;
@@ -389,11 +394,76 @@ export class Hub extends DurableObject<Env> {
         services.budget.checkpoint();
         const cached = this.store.commandFile(job.interactionId, index, file.contentType || "application/octet-stream");
         if (cached) return { blob: cached, filename: file.filename || "attachment" };
-        const downloaded = await downloadAttachment(file, services.settings.config.attachments.maxFileBytes, fetch);
+        const downloaded = await downloadAttachment(
+          file,
+          services.settings.config.attachments.maxFileBytes,
+          services.budget.fetchWith(TRANSFER_TIMEOUT_MS),
+        );
         await this.store.saveCommandFile(job.interactionId, index, downloaded.blob);
         return downloaded;
       },
+      confirmUnknown: (chatwoot, action) => this.confirmUnknownCommand(chatwoot, job, action),
     });
+  }
+
+  private async confirmUnknownCommand(
+    chatwoot: ReturnType<typeof chatwootClient>,
+    job: CommandJob,
+    action: CommandAction,
+  ): Promise<string | undefined> {
+    try {
+      const conversation = await chatwoot.getConversation(job.accountId, job.conversationId);
+      if (!conversation) return undefined;
+      switch (action.type) {
+        case "status":
+          if (conversation.status === action.status) return statusMessage(action.status, action.snoozedUntil);
+          return undefined;
+        case "priority":
+          if (conversation.priority === action.priority)
+            return action.priority ? `Priority set to ${action.priority}.` : "Priority removed.";
+          return undefined;
+        case "assign":
+          if (conversation.meta?.assignee?.id === action.chatwootUserId && conversation.meta?.assignee_type === "User")
+            return `Assigned to the agent.`;
+          return undefined;
+        case "unassign":
+          if (
+            !conversation.meta?.assignee ||
+            (conversation.meta.assignee_type === "User" && conversation.meta.assignee.id === undefined)
+          )
+            return "Unassigned.";
+          return undefined;
+        case "label": {
+          const labels = await chatwoot.conversationLabels(job.accountId, job.conversationId);
+          const present = labels.includes(action.label);
+          if ((action.change === "add" && present) || (action.change === "remove" && !present))
+            return action.change === "add" ? `Label ${action.label} added.` : `Label ${action.label} removed.`;
+          return undefined;
+        }
+        case "labels": {
+          const labels = await chatwoot.conversationLabels(job.accountId, job.conversationId);
+          if (action.labels.every((label) => labels.includes(label)))
+            return action.labels.length > 0 ? `Label set to ${action.labels.join(", ")}.` : "Labels removed.";
+          return undefined;
+        }
+        case "message": {
+          const messages = await chatwoot.listMessages(job.accountId, job.conversationId);
+          const found = messages.some(
+            (message) =>
+              message.message_type === 1 &&
+              message.private === action.private &&
+              message.content === action.content &&
+              !message.content_attributes?.deleted,
+          );
+          if (found) return action.private ? "Note added." : "Message sent to the customer.";
+          return undefined;
+        }
+        default:
+          return undefined;
+      }
+    } catch {
+      return undefined;
+    }
   }
 
   /** Immediate live status/card convergence, independent of the activity-line job and feedback. */
@@ -514,10 +584,7 @@ export class Hub extends DurableObject<Env> {
 
   /** Sets the alarm for the earliest due job (or `at`), unless an earlier alarm is already set. */
   private async schedule(at?: number): Promise<void> {
-    const next = at ?? this.store.nextWakeup();
-    if (next === undefined) return;
-    const current = await this.ctx.storage.getAlarm();
-    if (current === null || current > next) await this.ctx.storage.setAlarm(Math.max(Date.now(), next));
+    await scheduleAlarm(this.ctx, at ?? this.store.nextWakeup());
   }
 }
 

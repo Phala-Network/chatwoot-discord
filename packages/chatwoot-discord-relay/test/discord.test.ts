@@ -111,6 +111,31 @@ describe("DiscordForum", () => {
     expect(requests).toHaveLength(1);
   });
 
+  it("keeps the send guard after a 500 that may have accepted the webhook", async () => {
+    const cache = new MemoryCache();
+    cache.set("forum:55:webhook", "1:abc");
+    let posts = 0;
+    const { requests } = mockFetch(
+      on("POST", `${api}/webhooks/1/abc`, () => {
+        posts += 1;
+        return posts === 1
+          ? json({ message: "accepted, response lost" }, { status: 500 })
+          : json({ id: "m2", channel_id: "thread-9" });
+      }),
+    );
+    const first = new DiscordForum(new DiscordRest("bot-token", new Budget(5).fetch), cache);
+    await expect(first.execute("55", { content: "hi" }, "thread-9", "send-500")).rejects.toMatchObject({ status: 500 });
+    await expect(
+      new DiscordForum(new DiscordRest("bot-token", new Budget(5).fetch), cache).execute(
+        "55",
+        { content: "hi" },
+        "thread-9",
+        "send-500",
+      ),
+    ).rejects.toThrow("outcome is unknown");
+    expect(requests).toHaveLength(1);
+  });
+
   it("retries a refused tag send after the recovery read fails", async () => {
     const cache = new MemoryCache();
     cache.set("forum:55:webhook", "1:abc");

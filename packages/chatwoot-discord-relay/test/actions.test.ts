@@ -30,8 +30,17 @@ function run(action: CommandAction, ...routes: Route[]) {
 }
 
 function runWith(given: typeof settings, action: CommandAction, ...routes: Route[]) {
+  return runWithPreparation(given, action, {}, ...routes);
+}
+
+function runWithPreparation(
+  given: typeof settings,
+  action: CommandAction,
+  preparation: Parameters<typeof executeCommand>[3],
+  ...routes: Route[]
+) {
   const mock = mockFetch(profile, ...routes);
-  const outcome = executeCommand(job(action), given, (request) => fetch(request));
+  const outcome = executeCommand(job(action), given, (request) => fetch(request), preparation);
   return { outcome, result: outcome.then(({ content }) => content), requests: mock.requests };
 }
 
@@ -46,6 +55,28 @@ describe("executeCommand", () => {
     expect(await result).toBe("✅ Resolved.");
     expect(requests.every((request) => request.headers.get("api_access_token") === "token-alice")).toBe(true);
     expect(JSON.parse(requests.at(-1)?.body ?? "")).toEqual({ status: "resolved" });
+  });
+
+  it("confirms a Chatwoot mutation accepted before a 500 response", async () => {
+    let status = "open";
+    const { result } = runWithPreparation(
+      settings,
+      { type: "status", status: "resolved" },
+      {
+        retryable: () => false,
+        confirmUnknown: async (chatwoot) => {
+          const conversation = await chatwoot.getConversation(3, 15);
+          return conversation?.status === "resolved" ? "Resolved." : undefined;
+        },
+      },
+      on("POST", `${conversation}/toggle_status`, () => {
+        status = "resolved";
+        return json({ error: "proxy lost the response" }, { status: 502 });
+      }),
+      on("GET", conversation, () => json({ id: 15, status })),
+    );
+    const outcome = await result;
+    expect(outcome).toBe("✅ Resolved.");
   });
 
   it("reopens", async () => {

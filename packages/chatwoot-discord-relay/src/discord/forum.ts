@@ -95,7 +95,7 @@ export class DiscordForum implements ForumClient {
           // a refused tag followed by a failed metadata read has never accepted a send.
           if (
             key &&
-            (error instanceof DiscordHttpError ||
+            ((error instanceof DiscordHttpError && error.status >= 400 && error.status < 500) ||
               error instanceof BudgetExhaustedError ||
               (error instanceof JobDeadlineError && !error.requestStarted))
           )

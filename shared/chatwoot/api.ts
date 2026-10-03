@@ -6,6 +6,7 @@
 import createClient from "openapi-fetch";
 import { z } from "zod";
 import { log } from "../log.ts";
+import type { RateLimitStore } from "../rate-limit.ts";
 import type { MessageType, RelayAttachment, RelayConversation, RelayItem, RelayMessage } from "../types.ts";
 import type { components, operations, paths } from "./schema.ts";
 
@@ -173,11 +174,6 @@ export type ChatwootClient = ReturnType<typeof chatwootClient>;
 type MessageQuery = NonNullable<operations["list-all-messages"]["parameters"]["query"]> & {
   filter_internal_messages?: true;
 };
-
-export interface RateLimitStore {
-  get(key: string): string | undefined;
-  set(key: string, value: string, ttlMs?: number): void;
-}
 
 export function chatwootClient(baseUrl: string, token: string, fetch: Fetch, limits?: RateLimitStore) {
   const client = createClient<paths>({

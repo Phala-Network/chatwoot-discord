@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { z } from "zod";
+import { scheduleAlarm } from "../../../shared/alarm.ts";
 import { Budget } from "../../../shared/budget.ts";
 import { chatwootClient } from "../../../shared/chatwoot/api.ts";
 import { parseJson } from "../../../shared/json.ts";
@@ -84,9 +85,6 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   private async schedule(): Promise<void> {
-    const next = this.store.nextWakeup();
-    if (next === undefined) return;
-    const current = await this.ctx.storage.getAlarm();
-    if (current === null || current > next) await this.ctx.storage.setAlarm(Math.max(Date.now(), next));
+    await scheduleAlarm(this.ctx, this.store.nextWakeup());
   }
 }

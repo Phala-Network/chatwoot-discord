@@ -9,18 +9,18 @@ import {
   chatwootClient,
   type Fetch,
   personAssignee,
-  type RateLimitStore,
   type StatusChange,
 } from "../../../../shared/chatwoot/api.ts";
 import { parallel } from "../../../../shared/concurrent.ts";
 import { errorFields, log } from "../../../../shared/log.ts";
+import type { RateLimitStore } from "../../../../shared/rate-limit.ts";
 import type { Settings } from "../config.ts";
 import { clip, defused } from "../relay/format.ts";
 import { downloadAttachment } from "./attachments.ts";
 import { FAILED, filesTooLarge, NOT_LINKED, UNKNOWN_RESULT, UserError } from "./common.ts";
 import { assigneeMenu, panel } from "./components.ts";
 import { PRIORITY_NAMES } from "./definitions.ts";
-import type { CommandJob } from "./job.ts";
+import type { CommandAction, CommandJob } from "./job.ts";
 
 export interface CommandResult {
   /** The confirmation shown to the invoker (only they see it). */
@@ -34,14 +34,25 @@ export interface CommandResult {
   conversationGone: boolean;
 }
 
-export interface CommandPreparation {
+export interface CommandRetry {
   retryable?: () => boolean;
-  limits?: RateLimitStore;
+  /** Confirms a mutation that may have been accepted before its response was lost. */
+  confirmUnknown?: (chatwoot: ChatwootClient, action: CommandAction) => Promise<string | undefined>;
+}
+
+export interface CommandPresentation {
   deferPanel?: boolean;
+}
+
+export interface CommandFiles {
   attachment?: (
     file: CommandJob["action"] & { type: "message" },
     index: number,
   ) => Promise<{ blob: Blob; filename: string }>;
+}
+
+export interface CommandPreparation extends CommandRetry, CommandPresentation, CommandFiles {
+  limits?: RateLimitStore;
 }
 
 export async function executeCommand(
@@ -220,8 +231,24 @@ export async function executeCommand(
     }
     return { content: `✅ ${message}`, conversationGone: false };
   } catch (error) {
+    const tracked = typeof preparation.retryable === "function";
+    const retryable = preparation.retryable?.() ?? false;
     if (
-      preparation.retryable?.() &&
+      tracked &&
+        tracked &&
+        !retryable &&
+      ((error instanceof ChatwootError && error.status >= 500) ||
+        error instanceof TypeError ||
+        (error instanceof DOMException && ["TimeoutError", "AbortError"].includes(error.name)) ||
+        error instanceof JobDeadlineError)
+    ) {
+      const confirmed = await preparation.confirmUnknown?.(chatwoot, action);
+      if (confirmed !== undefined) return { content: `✅ ${confirmed}`, conversationGone: false };
+      return { content: UNKNOWN_RESULT, conversationGone: false };
+    }
+    if (
+      tracked &&
+      retryable &&
       (error instanceof TypeError ||
         error instanceof BudgetExhaustedError ||
         error instanceof JobDeadlineError ||
@@ -232,10 +259,7 @@ export async function executeCommand(
     const gone = error instanceof ConversationGoneError || (error instanceof ChatwootError && error.status === 404);
     return {
       content:
-        preparation.retryable &&
-        !preparation.retryable() &&
-        !(error instanceof ChatwootError) &&
-        !(error instanceof UserError)
+        tracked && !retryable && !(error instanceof ChatwootError) && !(error instanceof UserError)
           ? UNKNOWN_RESULT
           : failure(error, job),
       conversationGone: gone,
@@ -307,7 +331,7 @@ function named(agents: Array<{ id?: number; name?: string }>): Array<{ id: numbe
   );
 }
 
-function statusMessage(status: StatusChange["status"], snoozedUntil: number | undefined): string {
+export function statusMessage(status: StatusChange["status"], snoozedUntil: number | undefined): string {
   switch (status) {
     case "open":
       return "Reopened.";

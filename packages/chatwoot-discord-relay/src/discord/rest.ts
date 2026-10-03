@@ -3,6 +3,7 @@
 
 import type { Fetch } from "../../../../shared/chatwoot/api.ts";
 import { isRecord, parseJson } from "../../../../shared/json.ts";
+import type { RateLimitStore } from "../../../../shared/rate-limit.ts";
 import manifest from "../../package.json" with { type: "json" };
 
 const API_BASE = "https://discord.com/api/v10";
@@ -50,11 +51,6 @@ interface DiscordRequest<Body = never, Query extends object = never> {
   /** Interaction original-response/follow-up endpoints have no bot global limit. */
   interaction?: boolean;
   signal?: AbortSignal;
-}
-
-export interface RateLimitStore {
-  get(key: string): string | undefined;
-  set(key: string, value: string, ttlMs?: number): void;
 }
 
 export class DiscordRest {
