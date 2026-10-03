@@ -421,7 +421,7 @@ The [How it works](#how-it-works) rules define pending holding and answering rep
 Chatwoot until the bot's turn ends. There is no per-message wait timeout. Router processing failures select
 handoff after three attempts, while Worker delivery failures use Chatwoot's fallback unless that account enables
 `keep_pending_on_bot_failure`. A native error fallback may leave open plus a bot assignee; the relay treats it as
-unassigned for normal triage/queue handling. A permission or service failure needs repair; no timer promises success.
+unassigned for normal triage/queue handling; the router releases the remaining bot assignment on a job or sweep. A permission or service failure needs repair; no timer promises success.
 
 To upgrade from relay 0.29.0/router 0.1.0, deploy this relay **first**, remove `router.accounts` and
 `router.waitSeconds`, and put every kind name in `router.keepLabels`, e.g. `["spam", "security", "beg-bounty"]`.
@@ -430,9 +430,17 @@ replacing it, then deploy the new router with its bot ids/tokens/secrets, and fi
 at a time. Never run both routers. Existing open tickets remain with people; existing pending tickets are routed.
 During the relay-first transition, open messages can go straight to triage.
 
-Keep existing `routing_*` attributes/definitions through the owner's rollback window. For rollback, **disconnect
-the bot first**, stop the new router, then restore old versions/config and the old account webhook if required.
-The relay sweep releases held jobs after disconnect. There are no pending-message timers to remove. See the
+Keep existing `routing_*` attributes/definitions through the owner's rollback window. For rollback, disconnect
+bots and keep the router running until pending/open account sweeps and durable ending retries leave no
+brand-bot-owned tickets. Pending uses native handoff; open leftovers use explicit unassignment; resolved/snoozed
+kind endings release the bot in the same turn, preserving status. Confirm cleared ownership across statuses,
+then stop router entry, cron,
+queued alarms and in-flight work, retaining its DO namespace/storage (reply attempts/observed records and turn
+guards cannot be rebuilt from history). Restore the recorded live relay 0.27 version and CONFIG_KEY with its
+original Hub. Its `kind-reply:<account>:<conversation>` ledger is independent of the Router's
+`reply:<account>:<conversation>` ledger: version/config rollback transfers no records and does not guarantee
+reply-once for Router-only replies or unknown attempts. Retain both DOs and review/isolate those tickets before
+resuming old routing. The relay sweep releases held jobs after disconnect. See the
 router's [upgrade and rollback instructions](https://github.com/Phala-Network/chatwoot-workers/tree/main/packages/chatwoot-router#upgrade-and-rollback).
 
 ## Triage bot hook

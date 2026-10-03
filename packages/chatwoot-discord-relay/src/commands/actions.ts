@@ -187,7 +187,7 @@ export async function executeCommand(job: CommandJob, settings: Settings, fetch:
       }
     }
     log.info("command done", { action: action.type, discordUserId: job.discordUserId, accountId, conversationId });
-    if (isPanel(job)) {
+    if (job.panel === true || action.type === "panel") {
       const ticket = `${settings.account(accountId)?.name ?? "Ticket"} #${conversationId}`;
       return {
         content: message ? `✅ ${message}` : ticket,
@@ -221,11 +221,6 @@ const TIMED_OUT =
 
 /** Longest customer name in the panel's title. */
 const CUSTOMER_NAME_LIMIT = 60;
-
-/** Whether the job's response is the Manage panel. */
-function isPanel(job: CommandJob): boolean {
-  return job.panel === true || job.action.type === "panel";
-}
 
 /** The Manage panel for the conversation as it is now. */
 async function drawPanel(

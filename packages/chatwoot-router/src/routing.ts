@@ -4,6 +4,7 @@ import ipRegex from "ip-regex";
 import { z } from "zod";
 import {
   type ChatwootClient,
+  type ChatwootConversation,
   type ChatwootMessage,
   chatwootClient,
   type Fetch,
@@ -11,11 +12,13 @@ import {
   toRelayConversation,
 } from "../../../shared/chatwoot/api.ts";
 import { parseJson } from "../../../shared/json.ts";
+import { errorFields, log } from "../../../shared/log.ts";
 import type { Settings } from "./config.ts";
+import { confirmedReply, replyHistory } from "./reply.ts";
 import { expectActivity, observeStatus, readTurn, requestHandoff } from "./turn.ts";
 
 /** Jev's answer when no owner fits; also the reserved route name. */
-export const UNCLEAR = "unclear";
+const UNCLEAR = "unclear";
 const UNCLEAR_CRITERION =
   "The message has no concrete request, mixes several of the other areas, concerns another product, or cannot be " +
   "assigned to exactly one of them.";
@@ -110,17 +113,38 @@ export async function routeConversation(
   const bot = chatwootClient(settings.config.chatwoot.baseUrl, token, ctx.fetch);
   const kinds = routing.kinds?.[String(accountId)] ?? {};
   const botId = routing.botIds[String(accountId)];
+  const owns = (conversation: ChatwootConversation | undefined) =>
+    conversation?.meta?.assignee_type === "AgentBot" && conversation.meta.assignee?.id === botId;
+  const release = async () => {
+    const latest = await chatwoot.getConversation(accountId, conversationId);
+    if (latest?.status !== undefined && latest.status !== "pending" && owns(latest)) {
+      await bot.unassign(accountId, conversationId);
+    }
+  };
   const snapshot = async (inboxId?: number) => {
     const raw = await chatwoot.getConversation(accountId, conversationId);
     if (!raw || raw.inbox_id === undefined || (inboxId !== undefined && raw.inbox_id !== inboxId)) return;
     if (raw.status !== "pending") {
       observeStatus(store, accountId, conversationId, raw.status ?? "open");
+      // Chatwoot's webhook failure fallback can open a ticket without releasing its bot.
+      // Explicit unassignment clears ai_assignee without changing status or claiming it as a user.
+      if (raw.status !== undefined && owns(raw)) await release();
       return;
     }
     const conversation = toRelayConversation(conversationId, raw);
-    if (conversation.contact.blocked || conversation.assignee) return;
+    if (conversation.assignee) return;
     if (raw.meta?.assignee && (raw.meta.assignee_type !== "AgentBot" || raw.meta.assignee.id !== botId)) return;
-    if ((await chatwoot.inboxBot(accountId, raw.inbox_id))?.id !== botId) return;
+    if ((await chatwoot.inboxBot(accountId, raw.inbox_id))?.id !== botId) {
+      // Disconnect is level-triggered: native bot handoff also clears ai_assignee.
+      // Re-read ownership immediately before the mutation; never touch another bot or person.
+      if (owns(raw)) {
+        const latest = await chatwoot.getConversation(accountId, conversationId);
+        if (latest?.status === "pending" && latest.inbox_id === raw.inbox_id && owns(latest))
+          await bot.setStatus(accountId, conversationId, { status: "open" });
+      }
+      return;
+    }
+    if (conversation.contact.blocked) return;
     observeStatus(store, accountId, conversationId, "pending");
     return { raw, conversation };
   };
@@ -149,13 +173,15 @@ export async function routeConversation(
   };
   const turn = await readTurn(chatwoot, store, accountId, conversationId);
   const input = inputs(turn.messages);
-  const humanReply = (messages: ChatwootMessage[]) =>
+  const requiresHandoff = (messages: ChatwootMessage[]) =>
     messages.some(
       (message) =>
         message.message_type === 1 &&
         !message.private &&
-        message.sender?.type === "user" &&
-        !message.content_attributes?.deleted,
+        ((message.sender?.type === "user" && !message.content_attributes?.deleted) ||
+          (message.sender?.type === "agent_bot" &&
+            message.sender.id === botId &&
+            (message.status === "failed" || message.content_attributes?.deleted))),
     );
 
   // A fresh read before every effect. A new input/boundary is work for a new queue run.
@@ -164,7 +190,7 @@ export async function routeConversation(
     if (!current) return;
     const latest = await readTurn(chatwoot, store, accountId, conversationId);
     if (latest.boundary !== turn.boundary || inputs(latest.messages).key !== input.key) return "defer" as const;
-    return { ...current, handoff: latest.handoff || humanReply(latest.messages) };
+    return { ...current, handoff: latest.handoff || requiresHandoff(latest.messages) };
   };
   const handoff = async (current?: Awaited<ReturnType<typeof fresh>>) => {
     requestHandoff(store, accountId, conversationId);
@@ -173,9 +199,10 @@ export async function routeConversation(
     if (current) await bot.setStatus(accountId, conversationId, { status: "open" });
     return undefined;
   };
-  if (turn.handoff || humanReply(turn.messages) || input.count === 0) return handoff();
+  if (turn.handoff || requiresHandoff(turn.messages) || input.count === 0) return handoff();
   const memoKey = `decision:${accountId}:${conversationId}:${input.key}`;
-  let decision = readDecision(store.get(memoKey));
+  const memo = decisionSchema.safeParse(parseJson(store.get(memoKey)));
+  let decision = memo.success ? memo.data : undefined;
   if (!decision) {
     decision = await decide(ctx, owners, routing.kinds?.[String(accountId)], input.text);
     store.set(memoKey, JSON.stringify(decision));
@@ -204,14 +231,32 @@ export async function routeConversation(
   ];
   if (labels.length !== current.conversation.labels.length) await bot.setLabels(accountId, conversationId, labels);
   const replyKey = `reply:${accountId}:${conversationId}`;
-  if (kind?.cannedResponse && store.get(replyKey) === undefined) {
-    const content = await chatwoot.cannedResponse(accountId, kind.cannedResponse);
-    if (!content?.trim()) return handoff();
-    current = await fresh();
-    if (current === "defer" || !current) return current;
-    if (current.handoff) return handoff(current);
-    store.set(replyKey, "attempted");
-    await bot.createMessage(accountId, conversationId, { content, private: false, files: [] });
+  if (kind?.cannedResponse) {
+    let history: Awaited<ReturnType<typeof replyHistory>>;
+    try {
+      history = await replyHistory(chatwoot, accountId, conversationId, botId);
+    } catch (error) {
+      log.warn("reply history unavailable; handing off", { accountId, conversationId, ...errorFields(error) });
+      return handoff();
+    }
+    if (history === "unknown" || (history === "complete-none" && store.get(replyKey) !== undefined)) return handoff();
+    // Preserve the once-per-conversation guard even if an observed historical reply is later removed.
+    if (history === "found" && store.get(replyKey) === undefined) store.set(replyKey, "observed");
+    if (history === "complete-none") {
+      const content = await chatwoot.cannedResponse(accountId, kind.cannedResponse);
+      if (!content?.trim()) return handoff();
+      current = await fresh();
+      if (current === "defer" || !current) return current;
+      if (current.handoff) return handoff(current);
+      store.set(replyKey, "attempted");
+      try {
+        const message = await bot.createMessage(accountId, conversationId, { content, private: false, files: [] });
+        if (!confirmedReply(message, botId) || message?.conversation_id !== conversationId) return handoff();
+      } catch (error) {
+        log.warn("reply creation unconfirmed; handing off", { accountId, conversationId, ...errorFields(error) });
+        return handoff();
+      }
+    }
   }
   if (assignee !== undefined && !kind?.status) {
     // AssignmentService silently assigns nobody for a user outside this account.
@@ -224,6 +269,8 @@ export async function routeConversation(
   if (kind?.status) {
     await bot.setStatus(accountId, conversationId, { status: kind.status });
     expectActivity(store, accountId, conversationId, { status: kind.status });
+    // Status keeps ai_assignee in Chatwoot. Finish this turn by releasing it without another activity.
+    await release();
   } else if (assignee !== undefined && current.raw.meta?.assignee_type === "AgentBot") {
     await bot.assign(accountId, conversationId, assignee);
     expectActivity(store, accountId, conversationId, { status: "open" });
@@ -244,7 +291,7 @@ function isCustomer(message: ChatwootMessage): boolean {
   );
 }
 
-export function sanitize(text: string, identities: Array<string | null | undefined>): string {
+function sanitize(text: string, identities: Array<string | null | undefined>): string {
   let value = text.normalize("NFKC");
   for (const pattern of REDACTIONS) value = value.replace(pattern, "[REDACTED]");
   const names = identities.flatMap((identity) => (identity ? [identity, ...identity.split(/\s+/)] : []));
@@ -329,9 +376,4 @@ async function decide(ctx: RoutingContext, owners: Owners, kinds: Kinds | undefi
     kindConfidence: kind.confidence,
     noRequest: request.choice === "none" && request.confidence >= routing.minConfidence,
   };
-}
-
-function readDecision(stored: string | undefined): Decision | undefined {
-  const parsed = decisionSchema.safeParse(parseJson(stored));
-  return parsed.success ? parsed.data : undefined;
 }

@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ACTIVITY_WAIT_MS, eventTarget } from "../src/chatwoot/webhook.ts";
-import { hasResponse, interactiveMessage, plainText, responseText } from "../src/relay/response.ts";
+import { interactiveMessage, responseText } from "../src/relay/response.ts";
 
 const response = (contentType: string, content: string, attributes: Record<string, unknown>) =>
   responseText(interactiveMessage(contentType, content, attributes));
@@ -63,7 +62,7 @@ describe("responses to interactive messages", () => {
     expect(response("input_email", "Email?", { submitted_email: "  " })).toBeUndefined();
     expect(response("cards", "Cards", { submitted_values: [{ title: "x" }] })).toBeUndefined();
     expect(response("text", "Hi", { submitted_email: "user@example.com" })).toBeUndefined();
-    expect(hasResponse(interactiveMessage("input_csat", "Rate us", null))).toBe(false);
+    expect(response("input_csat", "Rate us", {})).toBeUndefined();
   });
 
   it("strips markup and turns mentions into names, like Slack's sanitized content", () => {
@@ -73,69 +72,10 @@ describe("responses to interactive messages", () => {
       }),
     ).toBe("Hi @Sam, your email?\n\n**Email:** user@example.com");
     expect(response("input_email", "", { submitted_email: "user@example.com" })).toBe("**Email:** user@example.com");
-    expect(plainText("Tom &amp; Jerry &lt;3 <!-- note --><a href='x'>link</a> &#169; a < b")).toBe(
-      "Tom & Jerry <3 link © a < b",
-    );
-  });
-});
-
-describe("conversation event routing", () => {
-  it("queues message_created at once, and conversation changes after their activity message", () => {
-    expect(eventTarget({ event: "message_created", id: 1, account: { id: 3 }, conversation: { id: 12 } })).toEqual({
-      type: "conversation",
-      accountId: 3,
-      conversationId: 12,
-      delayMs: 0,
-    });
-    for (const event of ["conversation_updated", "conversation_status_changed"]) {
-      expect(eventTarget({ event, id: 12, account: { id: 3 } })).toEqual({
-        type: "conversation",
-        accountId: 3,
-        conversationId: 12,
-        delayMs: ACTIVITY_WAIT_MS,
-      });
-    }
-  });
-});
-
-describe("message_updated routing", () => {
-  const updated = (fields: Record<string, unknown>) => ({
-    event: "message_updated",
-    id: 55,
-    account: { id: 3 },
-    conversation: { id: 12 },
-    ...fields,
-  });
-  const target = { type: "message-updated", accountId: 3, conversationId: 12, messageId: 55 };
-
-  it("queues deletions and each supported content type with a response", () => {
-    expect(eventTarget(updated({ content_attributes: { deleted: true } }))).toEqual(target);
-    for (const [contentType, attributes] of [
-      ["input_select", { submitted_values: [{ title: "A", value: "a" }] }],
-      ["form", { submitted_values: [{ name: "email", value: "a@example.com" }] }],
-      ["input_csat", { submitted_values: { csat_survey_response: { rating: 4 } } }],
-      ["input_email", { submitted_email: "user@example.com" }],
-    ] as const) {
-      expect(eventTarget(updated({ content_type: contentType, content_attributes: attributes }))).toEqual(target);
-    }
-  });
-
-  it("queues outgoing updates including failed replies retried as sent", () => {
-    const failed = { message_type: "outgoing", content_attributes: { external_error: "Outside the 24 hour window" } };
-    expect(eventTarget(updated(failed))).toEqual(target);
-    expect(eventTarget(updated({ ...failed, message_type: "incoming" }))).toBeUndefined();
-    expect(eventTarget(updated({ message_type: "outgoing", status: "sent", content_attributes: {} }))).toEqual(target);
-  });
-
-  it("ignores other message updates", () => {
-    for (const fields of [
-      { content_type: "text", content: "edited", content_attributes: {} },
-      { content_type: "input_select", content_attributes: { items: [{ title: "A", value: "a" }] } },
-      { content_type: "input_email", content_attributes: { submitted_email: "" } },
-      { content_type: "cards", content_attributes: { submitted_values: [{ title: "A" }] } },
-      { content_type: "input_csat", content_attributes: { submitted_values: {} } },
-    ]) {
-      expect(eventTarget(updated(fields))).toBeUndefined();
-    }
+    expect(
+      response("input_email", "", {
+        submitted_email: "Tom &amp; Jerry &lt;3 <!-- note --><a href='x'>link</a> &#169; a < b",
+      }),
+    ).toBe("**Email:** Tom & Jerry <3 link © a < b");
   });
 });

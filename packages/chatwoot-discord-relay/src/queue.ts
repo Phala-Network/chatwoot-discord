@@ -17,6 +17,7 @@ import {
 } from "discord-api-types/v10";
 import { z } from "zod";
 import { type ChatwootClient, CONVERSATIONS_PER_PAGE, personAssignee } from "../../../shared/chatwoot/api.ts";
+import { parseJson } from "../../../shared/json.ts";
 import { log } from "../../../shared/log.ts";
 import { relaysInbox, type Settings } from "./config.ts";
 import type { DiscordRest } from "./discord/rest.ts";
@@ -68,7 +69,7 @@ const escalationsSchema = z.record(z.string(), z.object({ since: z.number(), lev
 type Escalations = z.infer<typeof escalationsSchema>;
 
 /** How many escalation steps (1, 2, 4, 8, 16 h, then every 24 h) a wait has reached. */
-export function escalationLevel(hours: number): number {
+function escalationLevel(hours: number): number {
   const last = ESCALATION_HOURS.at(-1) ?? 0;
   if (hours < last) return ESCALATION_HOURS.filter((step) => hours >= step).length;
   return ESCALATION_HOURS.length + Math.floor((hours - last) / ESCALATION_REPEAT_HOURS);
@@ -87,7 +88,8 @@ export async function postQueue(
   const queue = settings.config.queue;
   if (!queue) return;
   const nowSeconds = now / 1000;
-  const previous = readEscalations(store.get(ESCALATIONS_KEY));
+  const saved = escalationsSchema.safeParse(parseJson(store.get(ESCALATIONS_KEY)));
+  const previous = saved.success ? saved.data : {};
   const escalations: Escalations = {};
   const tickets: Ticket[] = [];
   let unread = false;
@@ -244,14 +246,4 @@ async function post(
       retry: false,
     },
   );
-}
-
-function readEscalations(stored: string | undefined): Escalations {
-  if (stored === undefined) return {};
-  try {
-    const parsed = escalationsSchema.safeParse(JSON.parse(stored));
-    return parsed.success ? parsed.data : {};
-  } catch {
-    return {};
-  }
 }

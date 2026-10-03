@@ -98,6 +98,7 @@ const emailSchema = z.object({
 
 const messageSchema = z.object({
   id: z.number(),
+  conversation_id: z.number().optional(),
   content: text,
   message_type: z.number(),
   content_type: text,
@@ -220,20 +221,6 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
     return list && messageListSchema.parse(list).payload.toSorted((a, b) => a.id - b.id);
   }
 
-  function setCustomAttributes(
-    accountId: number,
-    conversationId: number,
-    attributes: Record<string, unknown>,
-  ): Promise<void> {
-    return ensureOk(
-      "set custom attribute",
-      client.POST("/api/v1/accounts/{account_id}/conversations/{conversation_id}/custom_attributes", {
-        params: { path: { account_id: accountId, conversation_id: conversationId } },
-        body: { custom_attributes: attributes, merge: true },
-      }),
-    );
-  }
-
   return {
     /** The conversation, or undefined when it does not exist (it was deleted). */
     getConversation(accountId: number, conversationId: number): Promise<ChatwootConversation | undefined> {
@@ -268,16 +255,6 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
     ): Promise<ChatwootMessage | undefined> {
       const messages = await listMessages(accountId, conversationId, { after: messageId - 1, before: messageId + 1 });
       return messages?.find((message) => message.id === messageId);
-    },
-
-    async listInboxes(accountId: number): Promise<number[]> {
-      const list = await data(
-        "list inboxes",
-        client.GET("/api/v1/accounts/{account_id}/inboxes", {
-          params: { path: { account_id: accountId } },
-        }),
-      );
-      return (list.payload ?? []).flatMap((inbox) => (inbox.id === undefined ? [] : [inbox.id]));
     },
 
     async inboxBot(accountId: number, inboxId: number): Promise<{ id: number } | undefined> {
@@ -439,14 +416,26 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
       );
     },
 
-    setCustomAttributes,
+    setCustomAttributes(accountId: number, conversationId: number, attributes: Record<string, unknown>): Promise<void> {
+      return ensureOk(
+        "set custom attribute",
+        client.POST("/api/v1/accounts/{account_id}/conversations/{conversation_id}/custom_attributes", {
+          params: { path: { account_id: accountId, conversation_id: conversationId } },
+          body: { custom_attributes: attributes, merge: true },
+        }),
+      );
+    },
 
     /**
      * Sends an outgoing message (or private note). With files it is sent as the spec's
      * multipart/form-data body; the generated type renders its `attachments[]` binaries as
      * strings, so the serializer appends the files itself.
      */
-    createMessage(accountId: number, conversationId: number, message: NewMessage): Promise<void> {
+    async createMessage(
+      accountId: number,
+      conversationId: number,
+      message: NewMessage,
+    ): Promise<ChatwootMessage | undefined> {
       const fields = {
         content: message.content,
         message_type: "outgoing",
@@ -463,14 +452,17 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
         for (const file of message.files) form.append("attachments[]", file.blob, file.filename);
         return form;
       };
-      return ensureOk(
-        "create message",
-        client.POST("/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages", {
+      const { data, response } = await client.POST(
+        "/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages",
+        {
           params: { path: { account_id: accountId, conversation_id: conversationId } },
           body: fields,
           ...(message.files.length === 0 ? {} : { bodySerializer: () => multipart(fields) }),
-        }),
+        },
       );
+      if (!response.ok) throw new ChatwootError(response.status, "create message", notFound(response));
+      const parsed = messageSchema.safeParse(data);
+      return parsed.success ? parsed.data : undefined;
     },
   };
 }

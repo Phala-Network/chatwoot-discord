@@ -121,7 +121,7 @@ function flexValue(hash: unknown, ...keys: string[]): unknown {
  * keeps `&`, `<`, and `>` as entities, which Slack decodes; Discord does not, so entities are
  * decoded here instead.
  */
-export function plainText(value: unknown): string {
+function plainText(value: unknown): string {
   if (value === null || value === undefined) return "";
   const text = String(value)
     .replace(/<!--[\s\S]*?(?:-->|$)/g, "")

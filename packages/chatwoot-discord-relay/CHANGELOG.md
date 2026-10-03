@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Simplify the native-status design: inline the relay-only sweep continuation, remove its one-page loop and thin
+  alarm, payload, escalation, panel and notice wrappers. Keep pending holding, answering-reply pagination, queue
+  pings and Discord effects unchanged; log unavailable failure notices.
+- Remove unused inbox-list API and custom-attribute wrapper from the shared client; message creation now exposes
+  a validated Chatwoot receipt for the router while relay commands continue to use HTTP success.
+- Document waiting for router disconnect handoff before stopping it and restoring the recorded rollback baseline.
+
 ## [0.30.0] - 2026-10-03
 
 ### Changed

@@ -5,7 +5,6 @@ import { ChatwootError, chatwootClient } from "../../../shared/chatwoot/api.ts";
 import { parseJson } from "../../../shared/json.ts";
 import { errorFields, log } from "../../../shared/log.ts";
 import { QueueStore, retryDelay } from "../../../shared/store.ts";
-import type { Settings } from "./config.ts";
 import type { Env } from "./env.ts";
 import { routeConversation, routesAccount } from "./routing.ts";
 import { loadSettings } from "./settings.ts";
@@ -13,20 +12,14 @@ import { clearFailures, expectActivity, recordFailure } from "./turn.ts";
 import type { Transition } from "./webhook.ts";
 
 export const ROUTER_NAME = "global";
-export const ROUTE_BUDGET = 45;
-const BUDGET = { route: ROUTE_BUDGET, sweep: 2 };
+const BUDGET = { route: 45, sweep: 1 };
 const RUN_WALL_MS = 5 * 60 * 1000;
 const id = z.number().int().positive();
 const jobSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("route"), accountId: id, conversationId: id }),
-  z.object({ type: z.literal("sweep"), accountId: id }),
+  z.object({ type: z.literal("sweep"), accountId: id, status: z.enum(["pending", "open"]) }),
 ]);
 type Payload = z.infer<typeof jobSchema>;
-const passSchema = z.object({
-  page: z.number().int().positive(),
-  remaining: z.array(id),
-  routed: z.array(id),
-});
 
 export class Router extends DurableObject<Env> {
   private readonly store: QueueStore;
@@ -34,18 +27,7 @@ export class Router extends DurableObject<Env> {
   constructor(context: DurableObjectState, env: Env) {
     super(context, env);
     this.store = new QueueStore(context.storage.sql);
-    context.blockConcurrencyWhile(async () => {
-      this.store.migrate();
-      if (!this.store.get("migration:agent-bot")) {
-        // Old account-webhook jobs and effects cannot run against the new lifecycle. Reply
-        // attempts survive; Chatwoot attributes remain untouched throughout rollback.
-        context.storage.sql.exec("DELETE FROM jobs");
-        for (const prefix of ["seen:", "decision:", "assign:", "labels:", "status:", "sweep:"]) {
-          context.storage.sql.exec("DELETE FROM cache WHERE key >= ? AND key < ?", prefix, `${prefix.slice(0, -1)};`);
-        }
-        this.store.set("migration:agent-bot", "1");
-      }
-    });
+    this.store.migrate();
   }
 
   async enqueueConversation(accountId: number, conversationId: number, transition?: Transition): Promise<void> {
@@ -58,7 +40,8 @@ export class Router extends DurableObject<Env> {
 
   async requestSweep(): Promise<void> {
     for (const accountId of Object.keys((await loadSettings(this.env)).config.routing.accounts)) {
-      this.enqueue({ type: "sweep", accountId: Number(accountId) });
+      for (const status of ["pending", "open"] as const)
+        this.enqueue({ type: "sweep", accountId: Number(accountId), status });
     }
     await this.schedule();
   }
@@ -92,7 +75,12 @@ export class Router extends DurableObject<Env> {
           }
           clearFailures(this.store, payload.accountId, payload.conversationId);
         } else if (routesAccount(settings, payload.accountId)) {
-          await this.sweep(settings, chatwoot, payload.accountId);
+          await this.sweep(
+            chatwoot,
+            payload.accountId,
+            payload.status,
+            settings.config.routing.botIds[String(payload.accountId)],
+          );
         }
         this.store.completeJob(job);
       } catch (error) {
@@ -125,44 +113,36 @@ export class Router extends DurableObject<Env> {
   }
 
   private async sweep(
-    settings: Settings,
     chatwoot: ReturnType<typeof chatwootClient>,
     accountId: number,
+    status: "pending" | "open",
+    botId: number | undefined,
   ): Promise<void> {
-    const key = `sweep:${accountId}:pending`;
-    const saved = passSchema.safeParse(parseJson(this.store.get(key)));
-    const pass = saved.success ? saved.data : { page: 1, remaining: await chatwoot.listInboxes(accountId), routed: [] };
-    const inboxId = pass.remaining[0];
-    if (inboxId !== undefined) {
-      if ((await chatwoot.inboxBot(accountId, inboxId))?.id === settings.config.routing.botIds[String(accountId)]) {
-        pass.routed.push(inboxId);
-      }
-      pass.remaining.shift();
-    } else {
-      const conversations = await chatwoot.listConversations(accountId, pass.page, "pending");
-      for (const conversation of conversations) {
-        if (
-          conversation.id !== undefined &&
-          conversation.inbox_id !== undefined &&
-          pass.routed.includes(conversation.inbox_id)
-        ) {
-          this.enqueue({ type: "route", accountId, conversationId: conversation.id });
-        }
-      }
-      if (conversations.length === 0) {
-        this.store.delete(key);
-        return;
-      }
-      pass.page += 1;
+    const key = `sweep:${accountId}:${status}`;
+    const saved = id.safeParse(parseJson(this.store.get(key)));
+    const page = saved.success ? saved.data : 1;
+    // Route snapshots decide ownership from live state, including disconnected bot leftovers.
+    const conversations = await chatwoot.listConversations(accountId, page, status);
+    for (const conversation of conversations) {
+      if (
+        conversation.id !== undefined &&
+        (status === "pending" ||
+          (conversation.meta?.assignee_type === "AgentBot" && conversation.meta.assignee?.id === botId))
+      )
+        this.enqueue({ type: "route", accountId, conversationId: conversation.id });
     }
-    this.store.set(key, JSON.stringify(pass));
-    this.enqueue({ type: "sweep", accountId });
+    if (conversations.length === 0) {
+      this.store.delete(key);
+      return;
+    }
+    this.store.set(key, String(page + 1));
+    this.enqueue({ type: "sweep", accountId, status });
   }
 
   private enqueue(payload: Payload): void {
     const key =
       payload.type === "sweep"
-        ? `sweep:${payload.accountId}`
+        ? `sweep:${payload.accountId}:${payload.status}`
         : `${payload.type}:${payload.accountId}:${payload.conversationId}`;
     this.store.enqueue(key, payload.type === "sweep" ? 1 : 0, JSON.stringify(payload));
   }

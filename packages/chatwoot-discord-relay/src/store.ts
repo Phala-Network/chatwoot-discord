@@ -6,7 +6,7 @@ import { QueueStore } from "../../../shared/store.ts";
 import type { Cache } from "./discord/forum.ts";
 import { type PostFields, type RelayStore, unknownCards } from "./relay/relay.ts";
 
-export const MIGRATIONS: string[] = [
+const MIGRATIONS: string[] = [
   `CREATE TABLE conversations (
      account_id INTEGER NOT NULL,
      conversation_id INTEGER NOT NULL,

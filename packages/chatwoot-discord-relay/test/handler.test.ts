@@ -212,12 +212,32 @@ describe("interaction handler", () => {
     expect(privateText(await menu("疑似垃圾：广告。建议 /block"))).toMatch(/no draft/);
   });
 
+  it("'Reply with this' keeps blank lines in the draft editor", async () => {
+    expect(editorField((await menu("**Draft**:\n\n```\nHi there,\n\nThanks!\n```")).response, "content")?.value).toBe(
+      "Hi there,\n\nThanks!",
+    );
+  });
+
   it("'Reply with this' uses the last code block or the whole text from anyone else", async () => {
     const colleague = "Try this:\n```\nold\n```\nor\n```\nHi, please log in again.\n```";
     expect(editorField((await menu(colleague, BOB)).response, "content")?.value).toBe("Hi, please log in again.");
     expect(editorField((await menu(" Thanks for waiting! ", BOB)).response, "content")?.value).toBe(
       "Thanks for waiting!",
     );
+  });
+
+  it("keeps CommonMark fences, nested code and inline text intact in the draft editor", async () => {
+    const draft = "Run this:\n```sh\nagent restart\n```\nThen try again.";
+    const examples = [
+      { source: `**Draft**:\n\`\`\`\`\n${draft}\n\`\`\`\`\n-# done`, expected: draft },
+      { source: `Draft:\n~~~text\n${draft}\n~~~~\nafter`, expected: draft },
+      { source: "   ```\n   Hi,\n    indented\n   ```", expected: "Hi,\n indented" },
+      { source: "```\nHi there", expected: "Hi there" },
+      { source: "Use ```this``` inline", expected: "Use ```this``` inline" },
+    ];
+    for (const example of examples) {
+      expect(editorField((await menu(example.source, BOB)).response, "content")?.value).toBe(example.expected);
+    }
   });
 
   it("registers the slash commands and the message command", () => {
