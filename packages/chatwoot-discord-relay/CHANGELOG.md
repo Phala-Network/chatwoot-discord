@@ -7,17 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-10-03
+
 ### Changed
 
-- Partition relay execution by account and conversation. Separate thread directories, account sweeps, forum registries, triage budgets, channel digests and a scoped Discord limiter coordinate shared state without a central executor.
-- Bound operations and durable job continuations. Persist rate-limit cooldowns instead of sleeping; preserve pending holds, live-message priority, hourly digest deadlines and notification quotas. Optional inbox names, avatars, panels and card convergence do not delay message bodies or confirmed command feedback.
-- Persist each command's fixed mutation target and effect outcome separately from retryable feedback. Unknown message creation is never matched against history or automatically resent; unknown state mutations are confirmed only against the complete original target. Unattempted message tails continue without triage when context is incomplete or the hourly grant has expired.
-- Bound the whole initial interaction response and acknowledge only durable admission. Draft modals use persisted drafts; missing drafts give the explicit Reply with this fallback.
+- Partition relay execution by account and conversation, so slow upstream work does not hold unrelated tickets
+  behind the Hub. Thread ownership, account reconciliation, forum webhook discovery, triage budgets, channel
+  digests and Discord rate limits have separate Durable Objects.
+- Bound HTTP and control RPC waits and persist message parts, attachment progress, history cursors and digest
+  pages across alarms. Discord and Chatwoot cooldowns persist without sleeping; interaction feedback is outside
+  the bot's global limit. Optional inbox names, avatars, panels and card convergence do not delay message bodies
+  or confirmed command feedback. Preserve pending holds, live-message priority, hourly digest deadlines and quotas.
+- Keep native Chatwoot status coordination with chatwoot-router 0.3.0: disconnect handoff releases held customer
+  messages, and open tickets with a lingering bot assignee use normal triage and queue handling without human pings.
+- Bound the entire initial Discord interaction response and acknowledge only durable admission. Draft modals
+  read persisted drafts; a missing draft directs the agent to **Apps → Reply with this**.
+
+### Added
+
+- `chatwoot-discord-relay/operator` and packaged private operator templates for read-only legacy inventory,
+  link verification and idempotent adoption staging. There is no public HTTP importer.
+
+### Fixed
+
+- Persist commands' original mutation targets and confirmed, partial or unknown outcomes separately from
+  retryable feedback. Retries recover recorded steps before interpreting changed state, and expiry no longer
+  describes an already attempted action as unexecuted. Unknown message creation is never inferred from history
+  or automatically resent; unknown state mutations require confirmation against the complete original target.
+- Continue account scans and new full reconciliations while unavailable conversations retain independent delivery
+  retries. Full scans keep generation fences; a failed child cannot prevent later pages or healthy tickets.
+- Suppress triage on unattempted message tails when context is incomplete or the hourly grant has expired,
+  preserving ordinary content, human mentions and permanent attempted/unknown guards.
 
 ### Upgrade
 
-- Existing single-Hub installations require a genuinely drained adoption cut, verified post links and a prebuilt thread directory. See the [cutover and rollback runbook](docs/adoption.md). Drafts and hourly counters are not imported; notifications resume at the next UTC hour. Losing pre-watermark deletion/title associations requires explicit owner acceptance before cutover. Minimal response and escalation baselines are retained.
-- Keep the old Hub as a nonexecuting shell during the evidence-retention window. After separately authorized review, `retire-hub` declares only that class deleted. Once new effects or card deletions exist, use forward repair; restoring the old snapshot is not clean rollback.
+- This minor release changes deployment bindings. Keep the Worker's identity and declare the seven SQLite exports
+  `Conversation`, `ThreadDirectory`, `TriageBudget`, `AccountSweep`, `QueueDigest`, `ForumRegistry` and
+  `DiscordRateLimit`, bound as `CONVERSATION`, `THREAD_DIRECTORY`, `TRIAGE_BUDGET`, `ACCOUNT_SWEEP`, `QUEUE_DIGEST`,
+  `FORUM_REGISTRY` and `DISCORD_RATE_LIMIT`. Retain the existing Hub namespace as a nonexecuting shell.
+- Existing single-Hub installations require the separately authorized [adoption runbook](docs/adoption.md),
+  rather than an ordinary version update: complete inventory and verified post links, genuine source/request
+  drain, sealed message and interaction boundaries, verified old-executor retirement, and a prebuilt Directory
+  with every staging receipt before activation. Preserve routing guards and reconcile silent/held conversations.
+- Historical standalone ticket cards are cleaned only after ownership and webhook identity are verified;
+  cleanup resumes across pages without deleting ordinary mirrors. An unknown new card creation is not resent.
+- Drafts and hourly counters are not imported; notifications resume at the next UTC hour after old cooldowns
+  expire. Minimal CSAT/delivery response and escalation baselines are retained: unchanged responses do not repost,
+  while genuinely changed responses can still publish.
+- Pre-watermark deletion/title associations are not imported. Losing them requires explicit owner acceptance
+  recorded before cutover; acceptance and live rollout evidence remain outstanding. Without acceptance, stop
+  for a separately reviewed minimal receipt handover.
+- Before any new business effect or old-card deletion, abort requires proof of no dispatched/accepted effect and
+  a disposition for every accepted event. Once new effects, unknown outcomes or card deletions exist, use forward
+  repair; restoring the old snapshot is not clean rollback. After a separately authorized observation and evidence
+  review, `retire-hub` irreversibly deletes only Hub, retaining the seven partition classes.
 
 ## [0.30.0] - 2026-10-03
 
@@ -628,7 +671,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-invocation subrequest budget, and a cron reconciliation sweep for missed webhooks.
 - Verification of Chatwoot webhook HMAC signatures and Discord Ed25519 interaction signatures.
 
-[Unreleased]: https://github.com/Phala-Network/chatwoot-workers/compare/chatwoot-discord-relay@0.30.0...HEAD
+[Unreleased]: https://github.com/Phala-Network/chatwoot-workers/compare/chatwoot-discord-relay@0.31.0...HEAD
+[0.31.0]: https://github.com/Phala-Network/chatwoot-workers/compare/chatwoot-discord-relay@0.30.0...chatwoot-discord-relay@0.31.0
 [0.30.0]: https://github.com/Phala-Network/chatwoot-workers/compare/chatwoot-discord-relay@0.29.0...chatwoot-discord-relay@0.30.0
 [0.29.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.28.0...chatwoot-discord-relay@0.29.0
 [0.28.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.27.0...v0.28.0

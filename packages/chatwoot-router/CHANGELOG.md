@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-03
+
 ### Fixed
 
 - End a kind's turn with resolved/snoozed only after its canned reply is confirmed to exist in Chatwoot. Failed,
@@ -22,13 +24,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Reuse message pages only within one fresh phase, combine independent read-only preparation, and scope decisions to actual input/configuration without weakening side-effect checks.
-- Partition routing by account and conversation, with a separate paged sweep coordinator. No state migration is needed: 0.2.x was never deployed. Preserve each conversation namespace and its reply/turn guards for future upgrades.
-- Remove cached inbox discovery, obsolete lifecycle cleanup/coordination effects and the single-use decision reader.
-  Keep bounded turn/history reads and the existing 45-request budget.
-- Document relay-first bootstrap, disconnect-and-drain rollback to the recorded live 0.27 version/config, and the
-  distinction between Chatwoot message creation and channel delivery. Preserve Router DO reply/turn guards during
-  rollback and describe the independent relay 0.27 ledger and cross-version reply-once limit.
+- Partition routing by account and conversation, with a separate paged `Coordinator`. Each conversation owns its
+  queue, decisions and reply/turn guards; slow conversations no longer occupy another conversation's executor.
+- Bound webhook admission and sweep child RPC waits. Persist scan progress independently of failed child
+  deliveries, so retries retain unavailable targets while later pages and healthy conversations continue.
+- Reuse message pages only within one fresh phase, combine independent read-only preparation, and scope cached
+  decisions to actual redacted input and routing configuration/model. Preserve fresh side-effect checks and the
+  existing bounded history reads and 45-request budget; inbox-bot ownership is read fresh instead of cached.
+
+### Upgrade
+
+- This minor release changes deployment bindings. Export and declare SQLite `Router` and `Coordinator`, bound as
+  `ROUTER` and `COORDINATOR`, and keep the five-minute reconciliation trigger. Conversation Router identities are
+  now `<account>:<conversation>`; account for any existing global Router guards before enabling
+  new owners. Keep Worker identities, namespaces/storage and immutable configuration keys.
+- Deploy chatwoot-discord-relay 0.31.0 first, completing its separately authorized
+  [partition adoption](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/docs/adoption.md)
+  when upgrading an existing Hub. Verify the sole routing owner before connecting bots one account at a time;
+  health checks and webhook acknowledgements do not establish successful routing or channel delivery.
+- To stop routing, disconnect bots but retain credentials and keep this router running until pending/open account
+  passes and durable ending retries clear all brand-bot ownership. Verify resolved/snoozed endings too, preserving
+  human and other-bot owners. Only then stop ingress, cron, queued alarms and in-flight work.
+- Preserve permanent reply attempts, observed/deleted-reply records, unknown guards and turn boundaries. Empty
+  history cannot reconstruct lost guards or justify another send. The legacy relay's reply ledger is independent;
+  restoring old code/configuration does not transfer Router-only replies or unknown attempts. Once new effects
+  exist, use forward repair in the current namespaces; direct version rollback to relay 0.27 is not a safe handover
+  and Cloudflare rollback cannot cross Durable Object class/lifecycle changes.
 
 ## [0.2.0] - 2026-10-03
 
@@ -69,6 +90,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `routing_kind`.
 - The `chatwoot-router-store-config` command and `chatwoot-router/stored-config`, for a configuration in KV.
 
-[Unreleased]: https://github.com/Phala-Network/chatwoot-workers/compare/chatwoot-router@0.2.0...HEAD
+[Unreleased]: https://github.com/Phala-Network/chatwoot-workers/compare/chatwoot-router@0.3.0...HEAD
+[0.3.0]: https://github.com/Phala-Network/chatwoot-workers/compare/chatwoot-router@0.2.0...chatwoot-router@0.3.0
 [0.2.0]: https://github.com/Phala-Network/chatwoot-workers/compare/chatwoot-router@0.1.0...chatwoot-router@0.2.0
 [0.1.0]: https://github.com/Phala-Network/chatwoot-workers/releases/tag/chatwoot-router@0.1.0
