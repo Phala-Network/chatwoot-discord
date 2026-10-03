@@ -1,10 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { Budget, JobDeadlineError } from "../../../shared/budget.ts";
 import manifest from "../package.json" with { type: "json" };
-import { DiscordForum } from "../src/discord/forum.ts";
+import { DiscordLimiter } from "../src/discord/limiter.ts";
 import { DiscordHttpError, DiscordRest } from "../src/discord/rest.ts";
 import { avatarUrl } from "../src/discord/users.ts";
 import { UnknownThreadError } from "../src/relay/relay.ts";
-import { json, mockFetch, on } from "./helpers.ts";
+import { TestForum as DiscordForum, mockFetch as fetchRoutes, json, on, type Route } from "./helpers.ts";
+
+function mockFetch(...routes: Route[]) {
+  return fetchRoutes(
+    ...routes,
+    on("GET", `${api}/channels/55`, () => json({ id: "55", guild_id: "100000000000000044" })),
+  );
+}
 
 class MemoryCache {
   values = new Map<string, string>();
@@ -35,6 +43,46 @@ const forumChannel = on("GET", `${api}/channels/55`, () =>
 
 const application = on("GET", `${api}/applications/@me`, () => json({ id: "100000000000000001" }));
 
+it("expires triage only at actual dispatch after a refused permit, without replaying an attempted send", async () => {
+  let now = Date.parse("2026-09-27T20:59:59.950Z");
+  const expiresAt = Date.parse("2026-09-27T21:00:00Z");
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  const cache = new MemoryCache();
+  cache.set("forum:55:webhook", "1:abc");
+  let allowed = false;
+  const limiter = new DiscordLimiter(cache, {
+    DISCORD_RATE_LIMIT: {
+      getByName() {
+        return {
+          async reserve() {
+            if (!allowed) return { allowed: false, retryAfterMs: 50 };
+            now = expiresAt;
+            return { allowed: true, validForMs: 100 };
+          },
+          async report() {},
+        };
+      },
+    },
+  });
+  const { requests } = mockFetch(
+    on("POST", `${api}/webhooks/1/abc`, () => json({ id: "101", channel_id: "100000000000000009" })),
+  );
+  const client = () => new DiscordForum(new DiscordRest("fixture", fetch, limiter), cache);
+  const body = { content: "Customer body\n-# <@triage> <@42>", allowed_mentions: { parse: [] as [], users: ["42"] } };
+  const expiry = { expiresAt, contentWithoutTriage: "Customer body\n-# <@42>" };
+  await expect(
+    client().execute("55", body, "100000000000000009", "expired-grant", undefined, expiry),
+  ).rejects.toMatchObject({ status: 429 });
+  allowed = true;
+  await client().execute("55", body, "100000000000000009", "expired-grant", undefined, expiry);
+  await client().execute("55", body, "100000000000000009", "expired-grant", undefined, expiry);
+  expect(requests).toHaveLength(1);
+  expect(JSON.parse(requests[0]?.body ?? "{}")).toMatchObject({
+    content: expiry.contentWithoutTriage,
+    allowed_mentions: { users: ["42"] },
+  });
+});
+
 it("identifies the relay with Discord's documented bot user agent", async () => {
   const { requests } = mockFetch(application);
   await new DiscordRest("bot-token", (request) => fetch(request)).get("/applications/@me");
@@ -50,6 +98,158 @@ function forum() {
 afterEach(() => vi.restoreAllMocks());
 
 describe("DiscordForum", () => {
+  it("resumes a send when its time slice ended before dispatch", async () => {
+    const cache = new MemoryCache();
+    cache.set("forum:55:webhook", "1:abc");
+    const { requests } = mockFetch(
+      on("POST", `${api}/webhooks/1/abc`, () => json({ id: "101", channel_id: "100000000000000009" })),
+    );
+    const budget = new Budget(5);
+    budget.startSlice(10);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await expect(
+      new DiscordForum(new DiscordRest("bot-token", budget.fetch), cache).execute(
+        "55",
+        { content: "hi" },
+        "100000000000000009",
+        "send-1",
+      ),
+    ).rejects.toBeInstanceOf(JobDeadlineError);
+    expect(
+      await new DiscordForum(new DiscordRest("bot-token", new Budget(5).fetch), cache).execute(
+        "55",
+        { content: "hi" },
+        "100000000000000009",
+        "send-1",
+      ),
+    ).toEqual({ state: "confirmed", channelId: "100000000000000009", messageId: "101" });
+    expect(requests).toHaveLength(1);
+  });
+
+  it("never replays an in-flight send after its time slice expires", async () => {
+    const cache = new MemoryCache();
+    cache.set("forum:55:webhook", "1:abc");
+    const { requests } = mockFetch(
+      on("POST", `${api}/webhooks/1/abc`, async (request) => {
+        await new Promise<void>((_resolve, reject) =>
+          request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true }),
+        );
+        return json({ id: "101", channel_id: "100000000000000009" });
+      }),
+      on("GET", `${api}/channels/100000000000000009/messages`, () => json([])),
+    );
+    const budget = new Budget(5);
+    budget.startSlice(30);
+    await expect(
+      new DiscordForum(new DiscordRest("bot-token", budget.fetch), cache).execute(
+        "55",
+        { content: "hi" },
+        "100000000000000009",
+        "send-2",
+      ),
+    ).resolves.toEqual({ state: "unknown" });
+    await expect(
+      new DiscordForum(new DiscordRest("bot-token", new Budget(5).fetch), cache).execute(
+        "55",
+        { content: "hi" },
+        "100000000000000009",
+        "send-2",
+      ),
+    ).resolves.toEqual({ state: "unknown" });
+    expect(requests.filter((request) => request.method === "POST")).toHaveLength(1);
+  });
+
+  it("keeps the send guard after a 500 that may have accepted the webhook", async () => {
+    const cache = new MemoryCache();
+    cache.set("forum:55:webhook", "1:abc");
+    let posts = 0;
+    const { requests } = mockFetch(
+      on("POST", `${api}/webhooks/1/abc`, () => {
+        posts += 1;
+        return posts === 1
+          ? json({ message: "accepted, response lost" }, { status: 500 })
+          : json({ id: "102", channel_id: "100000000000000009" });
+      }),
+      on("GET", `${api}/channels/100000000000000009/messages`, () => json([])),
+    );
+    const first = new DiscordForum(new DiscordRest("bot-token", new Budget(5).fetch), cache);
+    await expect(first.execute("55", { content: "hi" }, "100000000000000009", "send-500")).resolves.toEqual({
+      state: "unknown",
+    });
+    await expect(
+      new DiscordForum(new DiscordRest("bot-token", new Budget(5).fetch), cache).execute(
+        "55",
+        { content: "hi" },
+        "100000000000000009",
+        "send-500",
+      ),
+    ).resolves.toEqual({ state: "unknown" });
+    expect(posts).toBe(1);
+    expect(requests.filter((request) => request.method === "POST")).toHaveLength(1);
+    expect(requests.filter((request) => request.method === "GET")).toHaveLength(0);
+  });
+
+  it("keeps an accepted unknown send unknown without reading or posting again", async () => {
+    const cache = new MemoryCache();
+    cache.set("forum:55:webhook", "1:abc");
+    const { requests } = mockFetch(
+      on("POST", `${api}/webhooks/1/abc`, () => json({ message: "accepted, response lost" }, { status: 500 })),
+    );
+    const client = new DiscordForum(new DiscordRest("bot-token", new Budget(5).fetch), cache);
+    await expect(client.execute("55", { content: "hi" }, "100000000000000009", "send-recover")).resolves.toEqual({
+      state: "unknown",
+    });
+    await expect(client.execute("55", { content: "hi" }, "100000000000000009", "send-recover")).resolves.toEqual({
+      state: "unknown",
+    });
+    expect(requests.filter((request) => request.method === "POST")).toHaveLength(1);
+    expect(requests.filter((request) => request.method === "GET")).toHaveLength(0);
+  });
+
+  it("does not mistake a clock-skewed identical message for an unknown send", async () => {
+    const cache = new MemoryCache();
+    cache.set("forum:55:webhook", "1:abc");
+    const oldMessage = String(((BigInt(Date.now() + 5 * 60 * 1000) - 1_420_070_400_000n) << 22n) + 1n);
+    const { requests } = mockFetch(
+      on("POST", `${api}/webhooks/1/abc`, () => json({ message: "accepted, response lost" }, { status: 500 })),
+      on("GET", `${api}/channels/100000000000000009/messages`, () =>
+        json([{ id: oldMessage, webhook_id: "1", content: "hi", flags: 0 }]),
+      ),
+    );
+    const client = new DiscordForum(new DiscordRest("bot-token", new Budget(5).fetch), cache);
+    await expect(client.execute("55", { content: "hi" }, "100000000000000009", "send-old-match")).resolves.toEqual({
+      state: "unknown",
+    });
+    await expect(client.execute("55", { content: "hi" }, "100000000000000009", "send-old-match")).resolves.toEqual({
+      state: "unknown",
+    });
+    expect(requests.filter((request) => request.method === "POST")).toHaveLength(1);
+    expect(requests.filter((request) => request.method === "GET")).toHaveLength(0);
+  });
+
+  it("retries a refused tag send after the recovery read fails", async () => {
+    const cache = new MemoryCache();
+    cache.set("forum:55:webhook", "1:abc");
+    let reads = 0;
+    let accepted = 0;
+    mockFetch(
+      on("POST", `${api}/webhooks/1/abc`, (request) => {
+        if (JSON.parse(request.body).applied_tags?.length) return json({ code: 10087 }, { status: 400 });
+        accepted += 1;
+        return json({ id: "101", channel_id: "100000000000000009" });
+      }),
+      on("GET", `${api}/channels/55`, () => (++reads === 1 ? json({}, { status: 500 }) : json({ available_tags: [] }))),
+    );
+    const client = new DiscordForum(new DiscordRest("bot-token", new Budget(10).fetch), cache);
+    await expect(
+      client.execute("55", { content: "hi", applied_tags: ["deleted"] }, "100000000000000009", "send-3"),
+    ).rejects.toMatchObject({ status: 500 });
+    await expect(
+      client.execute("55", { content: "hi", applied_tags: ["deleted"] }, "100000000000000009", "send-3"),
+    ).resolves.toEqual({ state: "confirmed", channelId: "100000000000000009", messageId: "101" });
+    expect(accepted).toBe(1);
+  });
+
   it("takes Discord's Unknown Channel for a post that no longer exists", async () => {
     mockFetch(
       application,
@@ -63,28 +263,10 @@ describe("DiscordForum", () => {
       ),
     );
     const client = forum();
-    await expect(client.execute("55", { content: "hi" }, "thread-9")).rejects.toBeInstanceOf(UnknownThreadError);
-    await expect(client.deleteMessage("55", "thread-9", "m1")).resolves.toBeUndefined();
-  });
-
-  it("finds the webhook's cards in a page of a post's messages after one, and where the next page starts", async () => {
-    const id = (n: number) => String(200000000000000000n + BigInt(n));
-    const page = Array.from({ length: 100 }, (_, index) => ({
-      id: id(200 - index), // newest first
-      webhook_id: index === 3 || index === 5 ? "1" : index === 4 ? "2" : undefined,
-      flags: index === 3 || index === 4 ? 1 << 15 : 0,
-    }));
-    const { requests } = mockFetch(
-      application,
-      on("GET", `${api}/channels/55/webhooks`, () =>
-        json([{ id: "1", token: "abc", type: 1, name: "Chatwoot", application_id: "100000000000000001" }]),
-      ),
-      on("GET", `${api}/channels/thread-9/messages`, () => json(page)),
+    await expect(client.execute("55", { content: "hi" }, "100000000000000009")).rejects.toBeInstanceOf(
+      UnknownThreadError,
     );
-    // Only this webhook's Components V2 messages are cards; a full page has a next one.
-    expect(await forum().cardsAfter("55", "thread-9", id(100))).toEqual({ cards: [id(197)], next: id(200) });
-    const read = requests.find((request) => request.url.pathname.endsWith("/messages"));
-    expect(read?.url.search).toBe(`?after=${id(100)}&limit=100`);
+    await expect(client.deleteMessage("55", "100000000000000009", "m1")).resolves.toBeUndefined();
   });
 
   it("reuses the existing Chatwoot webhook and posts without the bot token", async () => {
@@ -93,20 +275,21 @@ describe("DiscordForum", () => {
       on("GET", `${api}/channels/55/webhooks`, () =>
         json([{ id: "1", token: "abc", type: 1, name: "Chatwoot", application_id: "100000000000000001" }]),
       ),
-      on("POST", `${api}/webhooks/1/abc`, () => json({ id: "m1", channel_id: "thread-9" })),
+      on("POST", `${api}/webhooks/1/abc`, () => json({ id: "101", channel_id: "100000000000000009" })),
     );
     const client = forum();
     expect(await client.execute("55", { content: "hi", thread_name: "Ticket" })).toEqual({
-      channelId: "thread-9",
-      messageId: "m1",
+      channelId: "100000000000000009",
+      messageId: "101",
+      state: "confirmed",
     });
-    await client.execute("55", { content: "again" }, "thread-9");
+    await client.execute("55", { content: "again" }, "100000000000000009");
     // The application id and the webhook are looked up once, then cached.
-    expect(requests.filter((request) => request.method === "GET")).toHaveLength(2);
+    expect(requests.filter((request) => request.method === "GET")).toHaveLength(3);
     const posts = requests.filter((request) => request.url.pathname.startsWith("/api/v10/webhooks/"));
     expect(posts.map((request) => request.url.search)).toEqual([
       "?wait=true&with_components=true",
-      "?wait=true&with_components=true&thread_id=thread-9",
+      "?wait=true&with_components=true&thread_id=100000000000000009",
     ]);
     expect(posts.every((request) => request.headers.get("authorization") === null)).toBe(true);
     expect(requests[1]?.headers.get("authorization")).toBe("Bot bot-token");
@@ -121,7 +304,7 @@ describe("DiscordForum", () => {
       on("POST", `${api}/channels/55/webhooks`, () =>
         json({ id: "900", token: "new-token", type: 1, name: "Chatwoot", application_id: "100000000000000001" }),
       ),
-      on("POST", `${api}/webhooks/900/new-token`, () => json({ id: "m1", channel_id: "thread-1" })),
+      on("POST", `${api}/webhooks/900/new-token`, () => json({ id: "101", channel_id: "100000000000000010" })),
     );
     await forum().execute("55", { content: "hi", thread_name: "Ticket" });
     expect(
@@ -131,11 +314,17 @@ describe("DiscordForum", () => {
   });
 
   it("links a post in its forum's guild, looking the guild up once", async () => {
-    const { requests } = mockFetch(forumChannel);
+    const { requests } = mockFetch(
+      application,
+      on("GET", `${api}/channels/55/webhooks`, () =>
+        json([{ id: "1", token: "tok", type: 1, application_id: "100000000000000001" }]),
+      ),
+      forumChannel,
+    );
     const client = forum();
     expect(await client.postUrl("55", "123")).toBe("https://discord.com/channels/44/123");
     expect(await client.postUrl("55", "124")).toBe("https://discord.com/channels/44/124");
-    expect(requests).toHaveLength(1);
+    expect(requests).toHaveLength(3);
   });
 
   it.each([
@@ -183,12 +372,13 @@ describe("DiscordForum", () => {
       on("POST", `${api}/webhooks/1/abc`, (request) =>
         JSON.parse(request.body).applied_tags?.length
           ? json({ message: "Invalid Form Body", code: 50035 }, { status: 400 })
-          : json({ id: "m1", channel_id: "thread-9" }),
+          : json({ id: "101", channel_id: "100000000000000009" }),
       ),
     );
     expect(await forum().execute("55", { content: "card", thread_name: "Ticket", applied_tags: ["t-gone"] })).toEqual({
-      channelId: "thread-9",
-      messageId: "m1",
+      channelId: "100000000000000009",
+      messageId: "101",
+      state: "confirmed",
     });
     const posts = requests.filter((request) => request.method === "POST").map((request) => JSON.parse(request.body));
     expect(posts.map((post) => post.applied_tags)).toEqual([["t-gone"], []]);
@@ -202,7 +392,9 @@ describe("DiscordForum", () => {
       ),
       on("POST", `${api}/webhooks/1/abc`, () => json({ message: "Unknown Channel", code: 10003 }, { status: 404 })),
     );
-    await expect(forum().execute("55", { content: "hi" }, "thread-1")).rejects.toBeInstanceOf(UnknownThreadError);
+    await expect(forum().execute("55", { content: "hi" }, "100000000000000010")).rejects.toBeInstanceOf(
+      UnknownThreadError,
+    );
   });
 
   it("deletes a webhook message in its thread, treating an already deleted one as done", async () => {
@@ -217,10 +409,13 @@ describe("DiscordForum", () => {
       ),
     );
     const client = forum();
-    await client.deleteMessage("55", "thread-1", "m1");
-    await client.deleteMessage("55", "thread-1", "m2");
+    await client.deleteMessage("55", "100000000000000010", "m1");
+    await client.deleteMessage("55", "100000000000000010", "m2");
     const deletes = requests.filter((request) => request.method === "DELETE");
-    expect(deletes.map((request) => request.url.search)).toEqual(["?thread_id=thread-1", "?thread_id=thread-1"]);
+    expect(deletes.map((request) => request.url.search)).toEqual([
+      "?thread_id=100000000000000010",
+      "?thread_id=100000000000000010",
+    ]);
     expect(deletes.every((request) => request.headers.get("authorization") === null)).toBe(true);
   });
 
@@ -251,96 +446,62 @@ describe("DiscordRest", () => {
     expect(requests.map((request) => [request.url.hostname, request.redirect])).toEqual([["discord.com", "manual"]]);
   });
 
-  it("waits for retry_after on 429 and retries", async () => {
-    let calls = 0;
-    mockFetch(
-      on("GET", `${api}/channels/1`, () => {
-        calls += 1;
-        return calls === 1
-          ? json({ message: "You are being rate limited.", retry_after: 0.25, global: false }, { status: 429 })
-          : json({ id: "1" });
-      }),
-    );
-    const waits: number[] = [];
-    const rest = new DiscordRest(
-      "t",
-      (request) => fetch(request),
-      async (ms) => void waits.push(ms),
-    );
-    expect(await rest.get("/channels/1")).toEqual({ id: "1" });
-    // The wait runs until the time Discord gave, measured from when the 429 arrived.
-    expect(waits).toHaveLength(1);
-    expect(waits[0]).toBeGreaterThan(200);
-    expect(waits[0]).toBeLessThanOrEqual(250);
+  it("returns 429 immediately and retains Retry-After across client recreation", async () => {
+    const cache = new MemoryCache();
+    const { requests } = mockFetch(on("GET", `${api}/channels/1`, () => json({ retry_after: 60 }, { status: 429 })));
+    const started = Date.now();
+    const limited = await new DiscordRest("t", (request) => fetch(request), cache)
+      .get("/channels/1")
+      .catch((error: unknown) => error);
+    if (!(limited instanceof DiscordHttpError)) throw new Error("Expected a rate-limit response");
+    expect(limited.status).toBe(429);
+    expect(limited.retryAfterMs).toBeGreaterThanOrEqual(59_500);
+    expect(limited.retryAfterMs).toBeLessThanOrEqual(60_000);
+    await expect(new DiscordRest("t", (request) => fetch(request), cache).get("/channels/1")).rejects.toMatchObject({
+      status: 429,
+    });
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(requests).toHaveLength(1);
   });
 
-  it("waits out an exhausted bucket before reusing the route", async () => {
+  it("shares bucket limits across routes, but keeps major resources separate", async () => {
+    const cache = new MemoryCache();
+    let limited = false;
+    const headers = () => ({
+      "x-ratelimit-bucket": "b1",
+      ...(limited ? { "x-ratelimit-remaining": "0", "x-ratelimit-reset-after": "60" } : {}),
+    });
     mockFetch(
-      on("GET", `${api}/channels/1`, () =>
-        json({ id: "1" }, { headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset-after": "1.5" } }),
-      ),
+      on("GET", /^discord\.com\/api\/v10\/channels\/[12]$/, () => json({}, { headers: headers() })),
+      on("PATCH", /^discord\.com\/api\/v10\/channels\/[12]$/, () => json({}, { headers: headers() })),
     );
-    const waits: number[] = [];
-    const rest = new DiscordRest(
-      "t",
-      (request) => fetch(request),
-      async (ms) => void waits.push(ms),
-    );
+    const rest = new DiscordRest("t", (request) => fetch(request), cache);
     await rest.get("/channels/1");
+    await rest.patch("/channels/1", {});
+    limited = true;
     await rest.get("/channels/1");
-    expect(waits).toHaveLength(1);
-    expect(waits[0]).toBeGreaterThan(1000);
+    await expect(
+      new DiscordRest("t", (request) => fetch(request), cache).patch("/channels/1", {}),
+    ).rejects.toMatchObject({ status: 429 });
+    await expect(rest.get("/channels/2")).resolves.toEqual({});
   });
 
-  it("shares an exhausted bucket across routes that report it, per top-level resource", async () => {
-    const limited = { "x-ratelimit-bucket": "b1", "x-ratelimit-remaining": "0", "x-ratelimit-reset-after": "2" };
-    mockFetch(
-      on(
-        "DELETE",
-        /^discord\.com\/api\/v10\/webhooks\/1\/abc\/messages\/\w+$/,
-        () => new Response(null, { status: 204, headers: limited }),
-      ),
-      on(
-        "DELETE",
-        /^discord\.com\/api\/v10\/webhooks\/2\/xyz\/messages\/\w+$/,
-        () => new Response(null, { status: 204 }),
-      ),
+  it("keeps bot, unauthenticated and interaction global limits in their documented scopes", async () => {
+    const cache = new MemoryCache();
+    const { requests } = mockFetch(
+      on("GET", `${api}/channels/1`, () => json({ retry_after: 60, global: true }, { status: 429 })),
+      on("GET", `${api}/channels/2`, () => json({})),
+      on("POST", `${api}/webhooks/1/tok`, () => json({ retry_after: 60, global: true }, { status: 429 })),
+      on("PATCH", `${api}/webhooks/2/interaction/messages/@original`, () => json({})),
     );
-    const waits: number[] = [];
-    const rest = new DiscordRest(
-      "t",
-      (request) => fetch(request),
-      async (ms) => void waits.push(ms),
-    );
-    await rest.delete("/webhooks/1/abc/messages/m1");
-    await rest.delete("/webhooks/1/abc/messages/m2"); // same bucket: waits
-    await rest.delete("/webhooks/2/xyz/messages/m3"); // another webhook: does not
-    expect(waits).toHaveLength(1);
-    expect(waits[0]).toBeGreaterThan(1000);
-  });
-
-  it("pauses every route after a global rate limit", async () => {
-    let calls = 0;
-    mockFetch(
-      on("GET", `${api}/channels/1`, () => {
-        calls += 1;
-        return calls === 1
-          ? json({ message: "You are being rate limited.", retry_after: 0.5, global: true }, { status: 429 })
-          : json({ id: "1" });
-      }),
-      on("GET", `${api}/channels/2`, () => json({ id: "2" })),
-    );
-    const waits: number[] = [];
-    const rest = new DiscordRest(
-      "t",
-      (request) => fetch(request),
-      async (ms) => void waits.push(ms),
-    );
-    expect(await rest.get("/channels/1")).toEqual({ id: "1" });
-    expect(waits).toHaveLength(1);
-    // The test's sleep returns at once, so the global limit is still in force for another route.
-    await rest.get("/channels/2");
-    expect(waits).toHaveLength(2);
+    const rest = new DiscordRest("t", (request) => fetch(request), cache);
+    await expect(rest.get("/channels/1")).rejects.toMatchObject({ status: 429 });
+    await expect(rest.get("/channels/2")).rejects.toMatchObject({ status: 429 });
+    await expect(rest.post("/webhooks/1/tok", { auth: false })).rejects.toMatchObject({ status: 429 });
+    await expect(
+      rest.patch("/webhooks/2/interaction/messages/@original", { auth: false, interaction: true }),
+    ).resolves.toEqual({});
+    expect(requests).toHaveLength(3);
   });
 
   it("gives up on long rate limits and surfaces Discord's error code", async () => {
@@ -348,11 +509,7 @@ describe("DiscordRest", () => {
       on("GET", `${api}/channels/1`, () => json({ message: "slow down", retry_after: 60 }, { status: 429 })),
       on("GET", `${api}/channels/2`, () => json({ message: "Missing Access", code: 50001 }, { status: 403 })),
     );
-    const rest = new DiscordRest(
-      "t",
-      (request) => fetch(request),
-      async () => {},
-    );
+    const rest = new DiscordRest("t", (request) => fetch(request));
     // The error says how long Discord asked to wait, so the job can wait that long.
     await expect(rest.get("/channels/1")).rejects.toMatchObject({
       status: 429,

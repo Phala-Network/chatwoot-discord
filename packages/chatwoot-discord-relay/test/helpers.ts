@@ -47,6 +47,15 @@ export function snowflake(): string {
 }
 
 export class MemoryStore implements RelayStore {
+  get(key: string) {
+    return this.decisions.get(key);
+  }
+  set(key: string, value: string) {
+    this.decisions.set(key, value);
+  }
+  delete(key: string) {
+    this.decisions.delete(key);
+  }
   rows = new Map<string, Partial<PostFields>>();
   parts = new Map<string, string[]>();
   counters = new Map<string, number>();
@@ -61,6 +70,7 @@ export class MemoryStore implements RelayStore {
       threadId,
       state,
       announcedAssignee,
+      assigneeNoticeId: row.assigneeNoticeId,
       announcePending,
       titleSubject,
       title,
@@ -93,6 +103,7 @@ export class MemoryStore implements RelayStore {
     this.parts.set(`${a}:${c}:${messageId}`, parts);
   }
   forgetThread(a: number, c: number) {
+    this.set("generation", String(Number(this.get("generation") ?? 1) + 1));
     this.rows.delete(`${a}:${c}`);
     for (const key of this.parts.keys()) if (key.startsWith(`${a}:${c}:`)) this.parts.delete(key);
   }
@@ -141,12 +152,26 @@ export class FakeForum implements ForumClient {
   failAfter: number | undefined;
   /** Posts the next message into a thread but loses Discord's answer. */
   loseAnswer = false;
+  private readonly unknownSends = new Set<string>();
+  private readonly confirmedSends = new Map<string, { state: "confirmed"; channelId: string; messageId: string }>();
   /** Fails the next request that archives a post. */
   failArchive = false;
 
   constructor(public guildId = "100000000000000044") {}
 
-  async execute(_forum: string, payload: WebhookMessage, threadId?: string) {
+  async execute(
+    _forum: string,
+    payload: WebhookMessage,
+    threadId?: string,
+    sendKey?: string,
+    checkpoint?: (receipt: { channelId: string; messageId: string }) => void,
+  ) {
+    const confirmed = sendKey ? this.confirmedSends.get(sendKey) : undefined;
+    if (confirmed) {
+      checkpoint?.(confirmed);
+      return confirmed;
+    }
+    if (sendKey && this.unknownSends.has(sendKey)) return { state: "unknown" as const };
     if (threadId && this.failAfter !== undefined) {
       if (this.failAfter === 0) {
         this.failAfter = undefined;
@@ -165,9 +190,13 @@ export class FakeForum implements ForumClient {
     this.ids.push(messageId);
     if (threadId && this.loseAnswer) {
       this.loseAnswer = false;
-      throw new Error("Discord's answer was lost");
+      if (sendKey) this.unknownSends.add(sendKey);
+      return { state: "unknown" as const };
     }
-    return { channelId: threadId ?? `thread-${this.calls.length}`, messageId };
+    const receipt = { state: "confirmed" as const, channelId: threadId ?? `thread-${this.calls.length}`, messageId };
+    if (sendKey) this.confirmedSends.set(sendKey, receipt);
+    checkpoint?.(receipt);
+    return receipt;
   }
 
   async updateThread(_forum: string, threadId: string, patch: ThreadPatch) {
@@ -193,15 +222,6 @@ export class FakeForum implements ForumClient {
     if (this.deleted.includes(messageId)) return false;
     this.edits.push([messageId, payload]);
     return true;
-  }
-
-  async cardsAfter(_forum: string, threadId: string, after: string) {
-    const cards = this.calls.flatMap(([thread, payload], index) => {
-      const id = this.ids[index] ?? "";
-      const live = thread === threadId && payload.flags === 1 << 15 && !this.deleted.includes(id);
-      return live && BigInt(id) > BigInt(after) ? [id] : [];
-    });
-    return { cards };
   }
 
   async deleteMessage(_forum: string, _threadId: string, messageId: string) {
@@ -262,4 +282,59 @@ export function testSettings(
   return buildSettings(config, secrets);
 }
 
-export { json, mockFetch, on, type Recorded, type Route, takeUnmatched } from "../../../shared/test/http.ts";
+export { json, on, type Recorded, type Route, takeUnmatched } from "../../../shared/test/http.ts";
+
+import { mockFetch as httpFetch, type Route } from "../../../shared/test/http.ts";
+import { type Cache, DiscordForum } from "../src/discord/forum.ts";
+import type { DiscordRest } from "../src/discord/rest.ts";
+import { discoverForum, type ForumSnapshot } from "../src/registry.ts";
+
+// Fakes advertise capacity. Explicit rate-limit headers and lost response bodies stay untouched.
+export function mockFetch(...routes: Route[]) {
+  const wrapped: Route[] = routes.map((route) => (request) => {
+    const decorate = (response: Response): Response => {
+      if (request.url.hostname !== "discord.com") return response;
+      const headers = new Headers(response.headers);
+      if (!headers.has("x-ratelimit-bucket"))
+        headers.set(
+          "x-ratelimit-bucket",
+          `${request.method}:${request.url.pathname.replace(/\/messages\/[^/]+/, "/messages/:id")}`,
+        );
+      if (!headers.has("x-ratelimit-limit")) headers.set("x-ratelimit-limit", "10001");
+      if (!headers.has("x-ratelimit-remaining")) headers.set("x-ratelimit-remaining", "10000");
+      if (!headers.has("x-ratelimit-reset-after")) headers.set("x-ratelimit-reset-after", "0.01");
+      return new Response(response.body, { status: response.status, headers });
+    };
+    const response = route(request);
+    return response instanceof Promise ? response.then(decorate) : response ? decorate(response) : undefined;
+  });
+  return httpFetch(...wrapped);
+}
+
+/** Domain tests use a local registry fixture; Worker tests exercise the real Registry DO. */
+export class TestForum extends DiscordForum {
+  constructor(rest: DiscordRest, cache: Cache) {
+    super(rest, cache, {
+      lookup: async (forumId) => {
+        const saved = cache.get(`test:forum:${forumId}`);
+        if (saved) return JSON.parse(saved) as ForumSnapshot;
+        const legacy = cache.get(`forum:${forumId}:webhook`)?.split(":");
+        const snapshot =
+          legacy?.[0] && legacy[1]
+            ? {
+                id: legacy[0],
+                token: legacy[1],
+                guildId: cache.get(`forum:${forumId}:guild`) ?? "100000000000000044",
+                version: 1,
+              }
+            : await discoverForum(rest, cache, forumId);
+        if (snapshot) cache.set(`test:forum:${forumId}`, JSON.stringify(snapshot));
+        return snapshot;
+      },
+      invalidate: async (forumId) => {
+        cache.delete(`test:forum:${forumId}`);
+        cache.delete(`forum:${forumId}:webhook`);
+      },
+    });
+  }
+}

@@ -16,13 +16,16 @@ import {
   Routes,
 } from "discord-api-types/v10";
 import { z } from "zod";
+import type { Budget } from "../../../shared/budget.ts";
 import { type ChatwootClient, CONVERSATIONS_PER_PAGE, personAssignee } from "../../../shared/chatwoot/api.ts";
 import { parseJson } from "../../../shared/json.ts";
 import { log } from "../../../shared/log.ts";
 import { relaysInbox, type Settings } from "./config.ts";
 import type { DiscordRest } from "./discord/rest.ts";
+import { Effects } from "./effects.ts";
 import { PENDING_PAGES, QUEUE_MESSAGES, QUEUE_PAGES, SNOOZED_PAGES } from "./queue-limits.ts";
 import { clip, conversationUrl, defused } from "./relay/format.ts";
+import { threadIdFromUrl } from "./relay/processor.ts";
 
 const ESCALATION_HOURS = [1, 2, 4, 8, 16];
 const ESCALATION_REPEAT_HOURS = 24;
@@ -36,8 +39,8 @@ const ESCALATIONS_KEY = "queue:escalations";
 
 export interface QueueStore {
   get(key: string): string | undefined;
-  set(key: string, value: string): void;
-  conversation(accountId: number, conversationId: number): { threadId?: string | undefined } | undefined;
+  set(key: string, value: string, ttlMs?: number): void;
+  conversation?(accountId: number, conversationId: number): { threadId?: string | undefined } | undefined;
 }
 
 export interface QueueContext {
@@ -45,19 +48,28 @@ export interface QueueContext {
   store: QueueStore;
   chatwoot: ChatwootClient;
   rest: DiscordRest;
+  budget?: Budget;
 }
 
-interface Ticket {
-  accountId: number;
-  accountName: string;
-  conversationId: number;
-  /** Unix seconds since the customer has waited for a reply; 0 when they do not. */
-  waitingSince: number;
-  assignee: { id: number; name: string } | null;
-  escalate: boolean;
-  snoozed: boolean;
-  pending: boolean;
-}
+const ticketSchema = z.object({
+  accountId: z.number(),
+  accountName: z.string(),
+  conversationId: z.number(),
+  waitingSince: z.number(),
+  assignee: z.object({ id: z.number(), name: z.string() }).nullable(),
+  escalate: z.boolean(),
+  snoozed: z.boolean(),
+  pending: z.boolean(),
+  threadId: z.string().optional(),
+});
+type Ticket = z.infer<typeof ticketSchema>;
+const passSchema = z.object({
+  source: z.number().int().nonnegative(),
+  page: z.number().int().positive(),
+  tickets: z.array(ticketSchema),
+  unread: z.boolean(),
+  part: z.number().int().min(0),
+});
 
 interface Chunk {
   content: string;
@@ -65,7 +77,7 @@ interface Chunk {
   role: boolean;
 }
 
-const escalationsSchema = z.record(z.string(), z.object({ since: z.number(), level: z.number() }));
+export const escalationsSchema = z.record(z.string(), z.object({ since: z.number(), level: z.number() }));
 type Escalations = z.infer<typeof escalationsSchema>;
 
 /** How many escalation steps (1, 2, 4, 8, 16 h, then every 24 h) a wait has reached. */
@@ -77,63 +89,95 @@ function escalationLevel(hours: number): number {
 
 /**
  * Posts the queue as of `now`. Nothing is posted after `deadline`: a run past it is dropped,
- * whole or from the message it reached (see Hub).
+ * whole or from the message it reached (see QueueDigest).
  */
 export async function postQueue(
   ctx: QueueContext,
   now = Date.now(),
   deadline = Number.POSITIVE_INFINITY,
-): Promise<void> {
-  const { settings, store, chatwoot, rest } = ctx;
+): Promise<"done" | "yield"> {
+  const { settings, store, chatwoot, rest, budget } = ctx;
   const queue = settings.config.queue;
-  if (!queue) return;
+  if (!queue || Date.now() > deadline) return "done";
   const nowSeconds = now / 1000;
   const saved = escalationsSchema.safeParse(parseJson(store.get(ESCALATIONS_KEY)));
   const previous = saved.success ? saved.data : {};
-  const escalations: Escalations = {};
-  const tickets: Ticket[] = [];
-  let unread = false;
-
+  const key = `queue:pass:${now}`;
+  const savedPass = passSchema.safeParse(parseJson(store.get(key)));
   const reads = [
     { status: "open", pages: QUEUE_PAGES },
     { status: "snoozed", pages: SNOOZED_PAGES },
     { status: "pending", pages: PENDING_PAGES },
   ] as const;
-  for (const account of settings.config.accounts) {
-    for (const { status, pages } of reads) {
-      for (let page = 1; page <= pages; page += 1) {
-        const conversations = await chatwoot.listConversations(account.id, page, status);
-        for (const conversation of conversations) {
-          const conversationId = conversation.id;
-          if (conversationId === undefined || !relaysInbox(account, conversation.inbox_id)) continue;
-          const assignee = personAssignee(conversation);
-          const waitingSince = conversation.waiting_since ?? 0;
-          if (status !== "pending" && assignee && !waitingSince) continue;
-          const snoozed = status === "snoozed";
-          let escalate = false;
-          if (status === "open" && !assignee && waitingSince && (queue.escalationRoleId ?? queue.escalationUserId)) {
-            const key = `${account.id}:${conversationId}`;
-            const level = escalationLevel((nowSeconds - waitingSince) / 3600);
-            const reached = previous[key]?.since === waitingSince ? previous[key].level : 0;
-            escalate = level > reached;
-            escalations[key] = { since: waitingSince, level };
-          }
-          tickets.push({
-            accountId: account.id,
-            accountName: account.name,
-            conversationId,
-            waitingSince,
-            assignee: assignee?.id ? { id: assignee.id, name: assignee.name ?? "" } : null,
-            escalate,
-            snoozed,
-            pending: status === "pending",
-          });
-        }
-        if (conversations.length < CONVERSATIONS_PER_PAGE) break;
-        if (page === pages) unread = true;
-      }
+  const pass = savedPass.success
+    ? savedPass.data
+    : {
+        source: 0,
+        page: 1,
+        tickets: [],
+        unread: false,
+        part: 0,
+      };
+  const save = () => store.set(key, JSON.stringify(pass), 3 * 60 * 1000);
+  const sources = settings.config.accounts.flatMap((account) => reads.map((read) => ({ account, ...read })));
+  let read = 0;
+  while (pass.source < sources.length) {
+    if (Date.now() >= deadline) return "done";
+    budget?.checkpoint();
+    if (budget && (read >= 1 || budget.remaining < 8)) {
+      save();
+      return "yield";
     }
+    const source = sources[pass.source];
+    if (!source) break;
+    const { account, status, pages } = source;
+    const conversations = await chatwoot.listConversations(account.id, pass.page, status);
+    for (const conversation of conversations) {
+      const conversationId = conversation.id;
+      if (conversationId === undefined || !relaysInbox(account, conversation.inbox_id)) continue;
+      const assignee = personAssignee(conversation);
+      const waitingSince = conversation.waiting_since ?? 0;
+      if (status !== "pending" && assignee && !waitingSince) continue;
+      const threadId = threadIdFromUrl(conversation.custom_attributes?.[settings.config.relay.linkAttribute]);
+      pass.tickets.push({
+        accountId: account.id,
+        accountName: account.name,
+        conversationId,
+        waitingSince,
+        assignee: assignee?.id ? { id: assignee.id, name: assignee.name ?? "" } : null,
+        escalate: false,
+        snoozed: status === "snoozed",
+        pending: status === "pending",
+        ...(threadId ? { threadId } : {}),
+      });
+    }
+    if (conversations.length < CONVERSATIONS_PER_PAGE || pass.page >= pages) {
+      if (pass.page >= pages && conversations.length === CONVERSATIONS_PER_PAGE) pass.unread = true;
+      pass.source += 1;
+      pass.page = 1;
+    } else pass.page += 1;
+    read += 1;
+    save();
   }
+  const tickets = pass.tickets;
+  const unread = pass.unread;
+  const escalations: Escalations = {};
+  for (const ticket of tickets) {
+    if (
+      ticket.snoozed ||
+      ticket.pending ||
+      ticket.assignee ||
+      !ticket.waitingSince ||
+      !(queue.escalationRoleId ?? queue.escalationUserId)
+    )
+      continue;
+    const escalationKey = `${ticket.accountId}:${ticket.conversationId}`;
+    const level = escalationLevel((nowSeconds - ticket.waitingSince) / 3600);
+    const reached = previous[escalationKey]?.since === ticket.waitingSince ? previous[escalationKey].level : 0;
+    if (pass.part === 0) ticket.escalate = level > reached;
+    escalations[escalationKey] = { since: ticket.waitingSince, level };
+  }
+  save();
 
   const wait = (ticket: Ticket) => ticket.waitingSince || Number.POSITIVE_INFINITY;
   tickets.sort((a, b) => Number(a.snoozed || a.pending) - Number(b.snoozed || b.pending) || wait(a) - wait(b));
@@ -145,24 +189,41 @@ export async function postQueue(
     if (over) log.warn("support queue past its deadline; not posted", { messages: chunks.length });
     return over;
   };
-  const [first, ...more] = chunks;
-  if (first) {
-    if (late()) return;
-    await post(rest, queue.channelId, first, queue.escalationRoleId, nonce(0));
+  for (let index = pass.part; index < chunks.length; index += 1) {
+    if (late()) return "done";
+    budget?.checkpoint();
+    if (budget && budget.remaining < 8) return "yield";
+    const chunk = chunks[index];
+    if (!chunk) break;
+    const effect = await new Effects(store).run(
+      `digest:${queue.channelId}:${Math.floor(nowSeconds / 3600)}:${index}`,
+      { content: chunk.content, users: [...chunk.users], role: chunk.role },
+      async (frozen) => {
+        const receipt = await post(
+          rest,
+          queue.channelId,
+          { ...frozen, users: new Set(frozen.users) },
+          queue.escalationRoleId,
+          nonce(index),
+        );
+        if (!receipt?.id || !/^\d+$/.test(receipt.id)) throw new TypeError("Missing digest receipt");
+        return { messageId: receipt.id };
+      },
+    );
+    if (effect.state === "UNKNOWN")
+      log.warn("digest part unknown", { part: index, hour: Math.floor(nowSeconds / 3600) });
+    if (index === 0) store.set(ESCALATIONS_KEY, JSON.stringify(unread ? { ...previous, ...escalations } : escalations));
+    pass.part = index + 1;
+    save();
   }
-  // The first message carries any escalation ping: record it at once, so a later part that fails
-  // does not ping again when the job is retried. Tickets beyond the pages read keep their record
-  // until a complete run no longer sees them.
-  store.set(ESCALATIONS_KEY, JSON.stringify(unread ? { ...previous, ...escalations } : escalations));
-  for (const [index, chunk] of more.entries()) {
-    if (late()) return;
-    await post(rest, queue.channelId, chunk, queue.escalationRoleId, nonce(index + 1));
-  }
+  if (chunks.length === 0)
+    store.set(ESCALATIONS_KEY, JSON.stringify(unread ? { ...previous, ...escalations } : escalations));
   log.info("support queue", {
     tickets: tickets.length,
     escalated: tickets.filter((ticket) => ticket.escalate).length,
     messages: chunks.length,
   });
+  return "done";
 }
 
 function messages(ctx: QueueContext, tickets: Ticket[], nowSeconds: number, unread: boolean): Chunk[] {
@@ -205,7 +266,7 @@ function messages(ctx: QueueContext, tickets: Ticket[], nowSeconds: number, unre
 
 function line(ctx: QueueContext, ticket: Ticket, nowSeconds: number): string {
   const { settings, store } = ctx;
-  const threadId = store.conversation(ticket.accountId, ticket.conversationId)?.threadId;
+  const threadId = ticket.threadId ?? store.conversation?.(ticket.accountId, ticket.conversationId)?.threadId;
   const url = conversationUrl(settings.frontendUrl, ticket.accountId, ticket.conversationId);
   const post = threadId ? `<#${threadId}>` : `[${ticket.accountName} #${ticket.conversationId}](<${url}>)`;
   const waiting = ticket.waitingSince ? `waiting ${duration(nowSeconds - ticket.waitingSince)}` : "replied";
@@ -232,8 +293,8 @@ async function post(
   chunk: Chunk,
   roleId: string | undefined,
   nonce: string,
-): Promise<void> {
-  await rest.post<RESTPostAPIChannelMessageResult, RESTPostAPIChannelMessageJSONBody>(
+): Promise<RESTPostAPIChannelMessageResult> {
+  return rest.post<RESTPostAPIChannelMessageResult, RESTPostAPIChannelMessageJSONBody>(
     Routes.channelMessages(channelId),
     {
       body: {
@@ -243,7 +304,6 @@ async function post(
         allowed_mentions: { parse: [], users: [...chunk.users].sort(), roles: chunk.role && roleId ? [roleId] : [] },
       },
       // A rate limit goes back to the job, which waits and checks the queue's deadline first.
-      retry: false,
     },
   );
 }

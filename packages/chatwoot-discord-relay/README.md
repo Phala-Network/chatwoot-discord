@@ -66,10 +66,18 @@ with fictional data.*
 ## How it works
 
 ```
-Chatwoot ──webhook──▶ Worker ──▶ Hub Durable Object ──▶ Discord forum post (via webhook)
-Discord ─/command───▶ Worker ──▶ Hub Durable Object ──▶ Chatwoot REST API (as that agent)
-Cron (every 5 min) ─▶ Worker ──▶ Hub Durable Object ──▶ sweep: catch up messages and conversation state
+Chatwoot ──webhook──▶ Worker ──▶ Conversation(account, conversation) ──▶ Discord post
+Discord ─/command───▶ Worker ──▶ ThreadDirectory(thread) ──▶ Conversation ──▶ Chatwoot
+Cron (every 5 min) ─▶ Worker ──▶ AccountSweep(account) ──enqueue──▶ Conversation
+Cron (hourly) ──────▶ Worker ──▶ QueueDigest(channel) ──▶ support queue
 ```
+
+Each Conversation owns its durable queue, receipts, cursor, drafts, thread generation and effects.
+Slow upstream work in one conversation does not occupy another conversation's executor. Directory,
+TriageBudget and DiscordRateLimit perform short local transactions; they never execute business HTTP.
+ForumRegistry owns webhook discovery. Discord requests fetch directly from their caller after scoped
+reservation/report; shared limits remain shared. Existing single-Hub installations require the
+[adoption and rollback runbook](docs/adoption.md) and a quiesced cut before enabling the new owners.
 
 - Each conversation gets one forum post, titled `[<Account> #<id>] <customer> — <subject or first message>`.
   It opens with a ticket header (channel, inbox, customer email, phone number on phone channels,
@@ -83,8 +91,8 @@ Cron (every 5 min) ─▶ Worker ──▶ Hub Durable Object ──▶ sweep: c
   token, so Chatwoot's permissions and audit trail apply. Talking in a post never reaches the
   customer; only commands do.
 - A customer message on a pending conversation with a linked inbox bot is held before posting, in the existing
-  deduplicated conversation job. The status webhook and five-minute sweep wake it; one 1-second re-read covers
-  a racing webhook, then the job waits without polling. Sweep wakes held jobs even outside the normal lookback.
+  deduplicated conversation job. Status webhooks, the local five-minute alarm and the account sweep
+  wake it, including held conversations outside the normal lookback.
   A fresh read releases the message when the conversation leaves pending or the bot is disconnected.
 - Live customer messages ping the linked human assignee. Bots are never people: `assignee_type: AgentBot` shows
   as Unassigned, without a human tag or ping, even when its id matches a user's. For open conversations only,
@@ -146,9 +154,22 @@ Design choices:
   per conversation and `triage.perHour` (30) in total call the agent each hour; beyond that a
   visible note replaces the mention, as it does on a customer message a routing kind's reply
   already answered. Messages from blocked contacts are never relayed.
+- **Bounded background work.** Each job has a 10-second slice; metadata requests have a 1.5-second deadline,
+  uploads/downloads 8 seconds, including response bodies and the job's signal. Completed message parts,
+  history cursors, downloaded command attachments and digest pages persist before continuation. Unknown
+  sends are retained and never automatically replayed. Commands durably record their attempt and confirmed
+  result; feedback PATCH and live card convergence run as separate retryable jobs.
+  Discord bucket/major-resource and global cooldowns, and Chatwoot Retry-After, persist across alarms without
+  sleeping. Interaction feedback is outside the bot global limit. New messages precede sweep pages;
+  waiting jobs gain priority every 30 seconds. The hourly digest reads two independent pages at a time and
+  checks its three-minute deadline before reading or posting. Status/card updates are immediate, while
+  activity lines retain their delayed completion and pending messages retain their hold.
+  Inbox names and avatars use cache-aside refresh jobs with a 300 ms deadline and fallback; they never
+  occupy the customer body's path. Initial interactions have one 2.5-second budget and a short Directory lookup and durable Conversation admission.
+  An unconfirmed enqueue returns HTTP 503, never a premature Discord acknowledgement.
 - **Reliable by construction.** Chatwoot sends each webhook once, without retry, so webhooks are
   only triggers: the Worker queues the work durably in one Durable Object, which reads Chatwoot's
-  API, retries failed work until it succeeds, and sweeps every 5 minutes for missed messages and conversation state
+  API, retries confirmed failures, and sweeps every 5 minutes for missed messages and conversation state
   ([Internals](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/docs/internals.md) says what the sweep does not cover).
 
 ## Deploy
@@ -220,7 +241,7 @@ npx cf deploy --secrets-file <secrets file>
 [`chatwoot-discord-relay`](https://www.npmjs.com/package/chatwoot-discord-relay) package,
 published from this repository's releases with npm provenance, at an exact version. Your project
 needs `cf`, `vite`, and `@cloudflare/vite-plugin` as dev dependencies, a `vite.config.ts` like this
-repository's, `src/index.ts` with `export { default, Hub } from "chatwoot-discord-relay";`, the
+repository's, `src/index.ts` exporting the default Worker, all seven partition classes, and the retained read-only `Hub` from `chatwoot-discord-relay`, the
 configuration as JSON with comments in a file of its own (`config.jsonc`), and a
 `cloudflare.config.ts` that binds a [KV namespace](https://developers.cloudflare.com/kv/) and the
 configuration's key instead of `CONFIG`:
@@ -237,15 +258,36 @@ export default defineConfig({
     compatibilityDate: "2026-08-15",
     domains: ["<worker host>"],
     triggers: [triggers.scheduled({ schedule: "*/5 * * * *" })],
-    exports: { Hub: exports.durableObject({ storage: "sqlite" }) },
+    exports: {
+      // Preserve the existing Hub namespace during the adoption/rollback window.
+      Hub: exports.durableObject({ storage: "sqlite" }),
+      Conversation: exports.durableObject({ storage: "sqlite" }),
+      ThreadDirectory: exports.durableObject({ storage: "sqlite" }),
+      TriageBudget: exports.durableObject({ storage: "sqlite" }),
+      AccountSweep: exports.durableObject({ storage: "sqlite" }),
+      QueueDigest: exports.durableObject({ storage: "sqlite" }),
+      ForumRegistry: exports.durableObject({ storage: "sqlite" }),
+      DiscordRateLimit: exports.durableObject({ storage: "sqlite" }),
+    },
     env: {
-      HUB: bindings.durableObject({ worker: "chatwoot-discord-relay", exportName: "Hub" }),
+      CONVERSATION: bindings.durableObject({ worker: "chatwoot-discord-relay", exportName: "Conversation" }),
+      THREAD_DIRECTORY: bindings.durableObject({ worker: "chatwoot-discord-relay", exportName: "ThreadDirectory" }),
+      TRIAGE_BUDGET: bindings.durableObject({ worker: "chatwoot-discord-relay", exportName: "TriageBudget" }),
+      ACCOUNT_SWEEP: bindings.durableObject({ worker: "chatwoot-discord-relay", exportName: "AccountSweep" }),
+      QUEUE_DIGEST: bindings.durableObject({ worker: "chatwoot-discord-relay", exportName: "QueueDigest" }),
+      FORUM_REGISTRY: bindings.durableObject({ worker: "chatwoot-discord-relay", exportName: "ForumRegistry" }),
+      DISCORD_RATE_LIMIT: bindings.durableObject({ worker: "chatwoot-discord-relay", exportName: "DiscordRateLimit" }),
       CONFIG_STORE: bindings.kv({ id: "<namespace id>" }),
       CONFIG_KEY: bindings.text(storedConfig(new URL("config.jsonc", import.meta.url)).key),
     },
   },
 });
 ```
+
+The separate private operator binds `LEGACY_HUB` to this retained class; see
+[the adoption runbook](docs/adoption.md). After the rollback window and the runbook's gates,
+remove `Hub` from the entrypoint and declare `Hub: exports.durableObject({ state: "deleted" })`.
+Do not remove or recreate any of the seven partition classes.
 
 Store the configuration, then deploy. In CI, follow [Use cf in CI](https://developers.cloudflare.com/cf/ci/)
 without `--mode` (this configuration has no modes): `npx cf build`, then `npx cf deploy --prebuilt` after storing
@@ -311,7 +353,7 @@ working, and the commands work everywhere.
 | Command | Card button | Effect in Chatwoot |
 |---|---|---|
 | `/reply [message] [attachment]` | **Write reply** | Without options, an editor with a message field and an optional upload field; with either option, sends it at once. Sends to the customer; an unassigned conversation is assigned to the sender. Refused when the channel does not accept a reply (Chatwoot's `can_reply`, e.g. after WhatsApp's 24-hour window). With `chatwoot.sendAsAgent`, the editor's **Send from my email address** sends an email reply from the agent's own mailbox name on the inbox's domain (alice@corp.example answering support@acme.example sends as alice@acme.example); it needs a Chatwoot build that reads `content_attributes.send_as_agent` ([Phala-Network/chatwoot](https://github.com/Phala-Network/chatwoot), `phala/*` branches), so it is off by default. |
-| Apps → **Reply with this** (message menu) | **Reply with draft** | The `/reply` editor, prefilled. **Reply with this**: from the triage bot, the last code block of its message (none: no draft); from anyone else, the last code block or the whole message. **Reply with draft**: the draft the hook sent, or else the answer's last code block read from Discord, which needs the Message Content intent; without it, it links to the answer for **Reply with this**. |
+| Apps → **Reply with this** (message menu) | **Reply with draft** | The `/reply` editor, prefilled. **Reply with this**: from the triage bot, the last code block of its message (none: no draft); from anyone else, the last code block or the whole message. **Reply with draft**: the persisted draft the hook sent; a missing draft links to the answer for **Reply with this**, without an upstream read while Discord waits for the modal. |
 | `/note [message] [attachment]` | | Like `/reply`, for a private note. |
 | `/resolve`, `/reopen` | **Resolve**, **Reopen** | Change the status. |
 | `/pending` | | Hand back to the inbox bot; ordinary pending status when no bot is linked. |
@@ -376,10 +418,10 @@ a larger configuration goes in a [KV namespace](https://developers.cloudflare.co
 | `relay.linkAttribute` | string | `discord_thread` | Conversation custom attribute that receives the post URL (`""` disables it). |
 | `relay.startAfterMessageId` | integer ≥ 0 | `0` | Messages with an id at or below this are never relayed (cutover watermark, see [Operations](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/docs/operations.md)). |
 | `relay.maxAttempts` | integer ≥ 1 | `5` | Attempts before a message Discord refuses as invalid is skipped with a notice. |
-| `relay.subrequestBudget` | integer 20–1000, and ≥ `relay.maxChunks` + 30 | `45` | Outbound requests per alarm invocation (Free plan limit: 50). The minimum fits a run's setup and one message's worst case (`src/relay/limits.ts`). |
+| `relay.subrequestBudget` | integer 20–1000 | `45` | Outbound requests per alarm invocation (Free plan limit: 50). HTTP and coordinator RPCs count; preparations and message parts continue across alarms. |
 | `avatars.chatwoot` | https URL | `<publicUrl>/favicon-512x512.png` | Avatar of activity lines, cards, notices, agent bots without an https Chatwoot avatar, and agents with neither a linked Discord user nor an https Chatwoot avatar. |
 | `avatars.contact` | https URL | Gravatar "mystery person" | Avatar of customers without an https avatar in Chatwoot. |
-| `queue` | object | unset | The hourly [support queue](#support-queue). Unset: off. Requires `relay.subrequestBudget` ≥ 6 × accounts + 4. |
+| `queue` | object | unset | The hourly [support queue](#support-queue). Unset: off. Pages and message parts continue within the invocation budget. |
 | `queue.channelId` | Discord id (17–20 digits) | required | Channel or forum post the queue is posted in. The bot needs *Send Messages* there (*Send Messages in Threads* for a post). |
 | `queue.escalationRoleId` | Discord id (17–20 digits) | unset | Role pinged for tickets unassigned too long. To ping a role that is not mentionable, the bot needs *Mention @everyone, @here, and All Roles* in the channel. Unset: no escalation. |
 | `queue.escalationUserId` | Discord id (17–20 digits) | unset | A user pinged instead of a role (set one of the two). |
@@ -503,7 +545,7 @@ See [SECURITY.md](https://github.com/Phala-Network/chatwoot-workers/blob/main/SE
 | Free plan limit | How this service stays within it |
 |---|---|
 | 10 ms CPU per Worker request | The Worker verifies a signature, parses JSON, and makes one Durable Object call. Bodies over 2 MB are rejected; a very large webhook that fails is relayed by the next sweep. |
-| 50 subrequests per invocation | Alarms count requests against `relay.subrequestBudget` and yield to a fresh invocation before it runs out. A conversation run needs 6 requests to set up; it starts a message only while `relay.maxChunks` + 24 requests remain (its parts, 13 for everything else a message may need, and 11 to finish the run), so the budget must be at least `relay.maxChunks` + 30 (`src/relay/limits.ts`). A command starts only with 20 left, a sweep page with 1. |
+| 50 subrequests per invocation | Alarms count HTTP and control RPCs against `relay.subrequestBudget`. Preparation, message parts, attachment downloads and digest pages persist progress; a whole message or account sweep need not fit in one invocation. Metadata deadlines are 1.5 seconds, transfers 8 seconds, each job slice 10 seconds. |
 | 128 MB memory | Attachments are capped at 25 MB each / 50 MB per command. |
 | 100,000 Worker requests/day | See the estimate below. |
 | Durable Objects (SQLite): 100,000 requests/day, 100,000 rows written/day | See the estimate below. |

@@ -1,17 +1,24 @@
 import {
   createExecutionContext,
   createScheduledController,
+  listDurableObjectIds,
   runInDurableObject,
   waitOnExecutionContext,
 } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { COORDINATOR_NAME, Coordinator } from "../src/coordinator.ts";
 import worker from "../src/index.ts";
-import { ROUTER_NAME } from "../src/router.ts";
+import { conversationName } from "../src/router.ts";
 import { json, mockFetch, on } from "./helpers.ts";
 import { activity, CW, incoming as customer, JEV, sent, world } from "./world.ts";
 
-const stub = () => env.ROUTER.getByName(ROUTER_NAME);
+const coordinator = () => env.COORDINATOR.getByName(COORDINATOR_NAME);
+const stub = (accountId = 1, conversationId = 5) => env.ROUTER.getByName(conversationName(accountId, conversationId));
+const objects = async () => [
+  coordinator(),
+  ...(await listDurableObjectIds(env.ROUTER)).map((id) => env.ROUTER.get(id)),
+];
 const base = "chatwoot.example.com/api/v1/accounts/1/conversations";
 const incoming = (conversationId: number, accountId = 1) => ({
   event: "message_created",
@@ -46,14 +53,18 @@ async function webhook(payload: unknown, secret = "secret-acme", age = 0): Promi
 async function drain(timeout = 5000): Promise<void> {
   await vi.waitFor(
     async () => {
-      const due = await runInDurableObject(
-        stub(),
-        (_instance, state) =>
-          state.storage.sql
-            .exec<{ count: number }>("SELECT COUNT(*) AS count FROM jobs WHERE not_before <= ?", Date.now())
-            .one().count,
+      const counts = await Promise.all(
+        (await objects()).map((object) =>
+          runInDurableObject(
+            object,
+            (_instance, state) =>
+              state.storage.sql
+                .exec<{ count: number }>("SELECT COUNT(*) AS count FROM jobs WHERE not_before <= ?", Date.now())
+                .one().count,
+          ),
+        ),
       );
-      expect(due).toBe(0);
+      expect(counts.reduce((total, count) => total + count, 0)).toBe(0);
     },
     { timeout, interval: 20 },
   );
@@ -61,18 +72,26 @@ async function drain(timeout = 5000): Promise<void> {
 
 afterEach(async () => {
   await drain();
-  await runInDurableObject(stub(), async (_instance, state) => {
-    state.storage.sql.exec("DELETE FROM jobs; DELETE FROM cache");
-    await state.storage.deleteAlarm();
-  });
+  await Promise.all(
+    (await objects()).map((object) =>
+      runInDurableObject(object, async (_instance, state) => {
+        state.storage.sql.exec("DELETE FROM jobs; DELETE FROM cache");
+        await state.storage.deleteAlarm();
+      }),
+    ),
+  );
   vi.restoreAllMocks();
 });
 
 async function retryNow() {
-  await runInDurableObject(stub(), async (_instance, state) => {
-    state.storage.sql.exec("UPDATE jobs SET not_before = 0");
-    await state.storage.setAlarm(Date.now());
-  });
+  await Promise.all(
+    (await objects()).map((object) =>
+      runInDurableObject(object, async (_instance, state) => {
+        state.storage.sql.exec("UPDATE jobs SET not_before = 0");
+        await state.storage.setAlarm(Date.now());
+      }),
+    ),
+  );
   await drain();
 }
 
@@ -321,6 +340,134 @@ function sweepWorld(failPage = false, disconnect = false) {
 }
 
 describe("account sweep", () => {
+  it("keeps scanning and delivering behind a failed batch, then recovers durable children", async () => {
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const failed = Array.from({ length: 15 }, (_, index) => 101 + index);
+    const delivered: number[] = [];
+    const pages: number[] = [];
+    let unavailable = true;
+    let pageUnavailable = true;
+    let laterScan = false;
+    mockFetch(
+      on("GET", /^chatwoot\.example\.com\/api\/v1\/accounts\/\d+\/conversations$/, (request) => {
+        if (!request.url.pathname.includes("/accounts/1/") || request.url.searchParams.get("status") !== "pending")
+          return json({ data: { payload: [] } });
+        const page = Number(request.url.searchParams.get("page"));
+        pages.push(page);
+        if (page === 2 && pageUnavailable) return json({}, { status: 503 });
+        return json({
+          data: {
+            payload: (page === 1 ? [...failed, 199] : page === 2 ? [laterScan ? 399 : 299] : []).map((id) => ({ id })),
+          },
+        });
+      }),
+    );
+    const namespace = new Proxy(env.ROUTER, {
+      get(target, key, receiver) {
+        if (key === "getByName")
+          return () => ({
+            enqueueConversation: async (_account: number, id: number) => {
+              if (unavailable && failed.includes(id)) {
+                if (id === 101) await new Promise<never>(() => {});
+                throw new Error("Child unavailable");
+              }
+              delivered.push(id);
+            },
+          });
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    await runInDurableObject(coordinator(), async (_instance, state) => {
+      vi.spyOn(state.storage, "setAlarm").mockResolvedValue();
+      const bindings = { ...env, ROUTER: namespace };
+      let executor = new Coordinator(state, bindings);
+      await executor.requestSweep();
+      for (let alarm = 0; alarm < 3; alarm++) {
+        await executor.alarm();
+        now++;
+        executor = new Coordinator(state, bindings);
+      }
+      // Already queued healthy work survives a page-read outage and a full failed batch.
+      expect(delivered).toContain(199);
+      expect(pages).toContain(2);
+      pageUnavailable = false;
+      now += 5001;
+      for (let alarm = 0; alarm < 8; alarm++) await executor.alarm();
+      expect(pages).toContain(3);
+      expect(delivered).toContain(299);
+      expect(delivered.some((id) => failed.includes(id))).toBe(false);
+
+      // Enumeration can start a new pass while failed deliveries remain backed off.
+      laterScan = true;
+      await executor.requestSweep();
+      for (let alarm = 0; alarm < 8; alarm++) await executor.alarm();
+      expect(pages.filter((page) => page === 1)).toHaveLength(2);
+      expect(delivered).toContain(399);
+      unavailable = false;
+      now += 30 * 60 * 1000 + 1;
+      executor = new Coordinator(state, bindings);
+      for (let alarm = 0; alarm < 3; alarm++) await executor.alarm();
+      for (const id of failed) expect(delivered.filter((sent) => sent === id)).toHaveLength(1);
+    });
+  });
+
+  it("enqueues healthy children before a stalled child settles and retries only the failed delivery", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let stalled = true;
+    const delivered: number[] = [];
+    mockFetch(
+      on("GET", base, (request) =>
+        json({
+          data: { payload: request.url.searchParams.get("page") === "1" ? [{ id: 991 }, { id: 992 }] : [] },
+        }),
+      ),
+    );
+    const namespace = new Proxy(env.ROUTER, {
+      get(target, key, receiver) {
+        if (key === "getByName")
+          return (name: string) =>
+            new Proxy(target.getByName(name), {
+              get(stub, property, owner) {
+                if (property === "enqueueConversation")
+                  return async (_account: number, id: number) => {
+                    if (id === 991 && stalled) await gate;
+                    delivered.push(id);
+                  };
+                return Reflect.get(stub, property, owner);
+              },
+            });
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    await runInDurableObject(coordinator(), async (_instance, state) => {
+      vi.spyOn(state.storage, "setAlarm").mockResolvedValue();
+      state.storage.sql.exec(
+        "INSERT INTO jobs (key, priority, payload, not_before, created_at) VALUES (?, 0, ?, 0, ?)",
+        "sweep:1:pending",
+        JSON.stringify({ accountId: 1, status: "pending" }),
+        Date.now(),
+      );
+      const executor = new Coordinator(state, { ...env, ROUTER: namespace });
+      const work = executor.alarm();
+      try {
+        await vi.waitFor(() => expect(delivered).toContain(992), { timeout: 1000 });
+        await work;
+      } finally {
+        release();
+        await work;
+      }
+      // The first RPC may commit late; retry is the same idempotent conversation enqueue.
+      stalled = false;
+      state.storage.sql.exec("UPDATE jobs SET not_before = 0");
+      await executor.alarm();
+      expect(delivered.filter((id) => id === 992)).toHaveLength(1);
+      state.storage.sql.exec("DELETE FROM jobs");
+    });
+  });
   it("scans only pending and open, releasing open bot leftovers and preserving closed history and other owners", async () => {
     const conversations = [
       { id: 11, status: "open", meta: { assignee_type: "AgentBot", assignee: { id: 1 } } },
@@ -355,9 +502,9 @@ describe("account sweep", () => {
         return json({});
       }),
     );
-    await stub().requestSweep();
+    await coordinator().requestSweep();
     await drain();
-    await stub().requestSweep();
+    await coordinator().requestSweep();
     await drain();
     expect(conversations.map((row) => row.status)).toEqual(["open", "resolved", "snoozed", "open", "open", "open"]);
     expect(conversations.slice(0, 3).map((row) => row.meta.assignee)).toEqual([null, { id: 1 }, { id: 1 }]);
@@ -374,7 +521,7 @@ describe("account sweep", () => {
     await drain(15000);
     expect(mock.pending.size).toBe(25);
     expect(mock.pages).toEqual([1, 2]);
-    await stub().requestSweep();
+    await coordinator().requestSweep();
     await drain(15000);
     expect(mock.pending.size).toBe(0);
     expect(mock.pages).toEqual([1, 2, 1, 2]);
@@ -383,22 +530,22 @@ describe("account sweep", () => {
 
   it("retries the same failed page without delaying already queued routing", async () => {
     const mock = sweepWorld(true);
-    await stub().requestSweep();
+    await coordinator().requestSweep();
     await drain(15000);
     expect(mock.pending.size).toBe(25);
     await retryNow();
     expect(mock.pages).toEqual([1, 2, 2]);
-    await stub().requestSweep();
+    await coordinator().requestSweep();
     await drain(15000);
     expect(mock.pending.size).toBe(0);
   }, 30000);
 
   it("hands off disconnected bot leftovers across page shifts without Jev", async () => {
     const mock = sweepWorld(false, true);
-    await stub().requestSweep();
+    await coordinator().requestSweep();
     await drain(15000);
     expect(mock.pending.size).toBe(25);
-    await stub().requestSweep();
+    await coordinator().requestSweep();
     await drain(15000);
     expect(mock.pending.size).toBe(0);
     expect(sent(mock.requests, "POST", JEV)).toEqual([]);
@@ -413,4 +560,36 @@ describe("account sweep", () => {
       ),
     ).toBe(true);
   }, 20000);
+});
+
+it("measures routing behind a slow conversation", async () => {
+  let startedSlow = false;
+  let finished = 0;
+  let releaseSlow = () => {};
+  const slow = new Promise<void>((resolve) => {
+    releaseSlow = resolve;
+  });
+  const base = "chatwoot.example.com/api/v1/accounts/1";
+  mockFetch(
+    on("GET", `${base}/conversations/801`, async () => {
+      startedSlow = true;
+      await slow;
+      return json({}, { status: 503 });
+    }),
+    on("GET", `${base}/conversations/802`, () => {
+      return json({ id: 802, status: "pending", inbox_id: 2 });
+    }),
+    on("GET", `${base}/inboxes/2/agent_bot`, () => json({ agent_bot: { id: 1, account_id: 1 } })),
+    on("GET", `${base}/conversations/802/messages`, () => json({ payload: [] })),
+    on("POST", `${base}/conversations/802/toggle_status`, () => {
+      finished = Date.now();
+      return json({});
+    }),
+  );
+  await stub(1, 801).enqueueConversation(1, 801);
+  await vi.waitFor(() => expect(startedSlow).toBe(true));
+  await stub(1, 802).enqueueConversation(1, 802);
+  await vi.waitFor(() => expect(finished).toBeGreaterThan(0));
+  releaseSlow();
+  await drain();
 });

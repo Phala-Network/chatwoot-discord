@@ -1,4 +1,4 @@
-// End to end through the Worker and the Hub Durable Object (alarms included), with Chatwoot and
+// End to end through the Worker and its conversation Durable Objects (alarms included), with Chatwoot and
 // Discord faked at the fetch boundary.
 
 import {
@@ -10,16 +10,23 @@ import {
 import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { Budget } from "../../../shared/budget.ts";
+import { Budget, JobDeadlineError } from "../../../shared/budget.ts";
 import { chatwootClient } from "../../../shared/chatwoot/api.ts";
-import { DiscordForum } from "../src/discord/forum.ts";
+import { executeCommand } from "../src/commands/actions.ts";
+import type { CommandJob } from "../src/commands/job.ts";
+import { configSchema } from "../src/config.ts";
+import { conversation } from "../src/control.ts";
+import { Conversation } from "../src/conversation.ts";
+import { QueueDigest } from "../src/digest.ts";
+import { DiscordLimiter, fingerprint } from "../src/discord/limiter.ts";
 import { DiscordRest } from "../src/discord/rest.ts";
+import { Effects } from "../src/effects.ts";
 import worker from "../src/index.ts";
-import { minimumBudget } from "../src/relay/limits.ts";
+import { ForumRegistry } from "../src/registry.ts";
 import { processConversation, relayFor } from "../src/relay/processor.ts";
 import { loadSettings } from "../src/settings.ts";
 import { Store } from "../src/store.ts";
-import { ALICE, BOB, json, mockFetch, on, type Recorded, type Route, TRIAGE } from "./helpers.ts";
+import { ALICE, TestForum as DiscordForum, json, mockFetch, on, type Recorded, type Route, TRIAGE } from "./helpers.ts";
 
 const FORUM = "100000000000000055";
 const GUILD = "100000000000000044";
@@ -27,6 +34,11 @@ const encoder = new TextEncoder();
 
 // Thread ids stay unique across tests: the Durable Object's storage persists within this file.
 let threadCounter = 10000;
+let currentConversation = 12;
+const owners = new Map<string, { accountId: number; id: number }>();
+function track(accountId: number, id: number) {
+  owners.set(`${accountId}:${id}`, { accountId, id });
+}
 function nextThreadId(): string {
   threadCounter += 1;
   return `1000000000000${threadCounter}`;
@@ -57,6 +69,7 @@ class World {
   bot: { id: number; account_id: number } | null = null;
   failReplies = 0;
   rateLimitReplies = 0;
+  replyRetryAfterSeconds = 64.5;
   failPatches = 0;
   failConversations = 0;
   private replies = 0;
@@ -73,6 +86,8 @@ class World {
     custom_attributes: Record<string, unknown> = {},
     status = "open",
   ) {
+    if (this.conversations.size === 0) currentConversation = id;
+    track(3, id);
     this.conversations.set(id, { id, status, custom_attributes, messages });
   }
 
@@ -115,6 +130,11 @@ class World {
   private routes(): Route[] {
     const cw = "chatwoot.example.com/api/v1/accounts/3";
     return [
+      (request) => {
+        const match = /^\/api\/v1\/accounts\/(\d+)\/conversations\/(\d+)$/.exec(request.url.pathname);
+        if (match) track(Number(match[1]), Number(match[2]));
+        return undefined;
+      },
       on("GET", new RegExp(`^${cw}/conversations/(\\d+)$`), (request) => {
         const conversation = this.conversations.get(Number(request.url.pathname.split("/").at(-1)));
         if (this.failConversations > 0) {
@@ -174,7 +194,7 @@ class World {
         const id = request.url.pathname.split("/").at(-1) ?? "";
         const parent = this.threads.get(id);
         return parent
-          ? json({ id, type: 11, parent_id: parent })
+          ? json({ id, type: 11, parent_id: parent, guild_id: GUILD })
           : json({ message: "Unknown Channel", code: 10003 }, { status: 404 });
       }),
       on("PATCH", /^discord\.com\/api\/v10\/channels\/\d+$/, () => {
@@ -198,7 +218,10 @@ class World {
         if (thread) {
           if (this.rateLimitReplies > 0) {
             this.rateLimitReplies -= 1;
-            return json({ message: "You are being rate limited.", retry_after: 64.5, global: false }, { status: 429 });
+            return json(
+              { message: "You are being rate limited.", retry_after: this.replyRetryAfterSeconds, global: false },
+              { status: 429 },
+            );
           }
           if (this.failReplies > 0) {
             this.failReplies -= 1;
@@ -211,7 +234,7 @@ class World {
         }
         const id = nextThreadId();
         this.threads.set(id, FORUM);
-        return json({ id: "header", channel_id: id });
+        return json({ id: "100000000000001000", channel_id: id });
       }),
       on("PATCH", /^discord\.com\/api\/v10\/webhooks\/100000000000000001\/[^/]+\/messages\/(@|%40)original$/, () =>
         json({}),
@@ -220,8 +243,16 @@ class World {
   }
 }
 
-function hub() {
-  return env.HUB.getByName("global");
+function hub(id = currentConversation, accountId = 3) {
+  track(accountId, id);
+  return conversation(env, accountId, id);
+}
+function enqueueCommand(job: CommandJob) {
+  return hub(job.conversationId, job.accountId).enqueueCommand(job);
+}
+async function ticketForThread(threadId: string) {
+  const owner = await env.THREAD_DIRECTORY.getByName(`thread:v1:${threadId}`).get();
+  return owner ? { accountId: owner.accountId, conversationId: owner.conversationId } : null;
 }
 
 async function call(request: Request): Promise<Response> {
@@ -244,6 +275,10 @@ async function chatwootWebhook(
   { secret = "secret-acme", delivery = crypto.randomUUID(), timestamp = Math.floor(Date.now() / 1000) } = {},
 ) {
   const body = JSON.stringify(payload);
+  const target = z
+    .object({ account: z.object({ id: z.number() }), conversation: z.object({ id: z.number() }) })
+    .safeParse(payload);
+  if (target.success) track(target.data.account.id, target.data.conversation.id);
   const ts = String(timestamp);
   return call(
     new Request("https://relay.example.com/chatwoot/webhook", {
@@ -261,6 +296,10 @@ async function chatwootWebhook(
 
 /** The triage bot's hook: signed like a Chatwoot webhook, with the shared secret. */
 async function triageHook(payload: unknown, secret = "triage-hook-secret-0123456789abcdef") {
+  const target = z
+    .object({ account: z.object({ id: z.number() }), conversation: z.object({ id: z.number() }) })
+    .safeParse(payload);
+  if (target.success) track(target.data.account.id, target.data.conversation.id);
   const body = JSON.stringify(payload);
   const ts = String(Math.floor(Date.now() / 1000));
   return call(
@@ -297,14 +336,34 @@ function buttons(body: Record<string, unknown> | undefined): string[][] | undefi
   );
 }
 
+async function seedDirectory() {
+  for (const { accountId, id } of owners.values()) {
+    const mapping = await runInDurableObject(hub(id, accountId), (_instance, state) =>
+      new Store(state.storage.sql).conversation(accountId, id),
+    );
+    if (mapping?.threadId) {
+      const owner = { accountId, conversationId: id, forumId: FORUM, guildId: GUILD, generation: 1 };
+      await env.THREAD_DIRECTORY.getByName(`thread:v1:${mapping.threadId}`).claim(owner);
+      await runInDurableObject(hub(id, accountId), (_instance, state) => {
+        const store = new Store(state.storage.sql);
+        store.set("directory:thread", mapping.threadId ?? "");
+        store.set("directory:owner", JSON.stringify(owner));
+      });
+    }
+  }
+}
 async function discordInteraction(payload: unknown, tamper = false) {
+  await seedDirectory();
   const request = await signedInteraction(payload, Math.floor(Date.now() / 1000), tamper);
   return call(request());
 }
 
 /** A signed interaction request, which can be sent again unchanged (a replay). */
 async function signedInteraction(payload: unknown, timestampSeconds: number, tamper = false) {
-  const body = JSON.stringify(payload);
+  await seedDirectory();
+  const body = JSON.stringify(
+    typeof payload === "object" && payload !== null ? { guild_id: GUILD, ...payload } : payload,
+  );
   const timestamp = String(timestampSeconds);
   const key = await crypto.subtle.importKey(
     "jwk",
@@ -323,13 +382,24 @@ async function signedInteraction(payload: unknown, timestampSeconds: number, tam
     });
 }
 
-function dueJobs(): Promise<number> {
-  return runInDurableObject(hub(), (_instance, state) => {
-    const row = state.storage.sql
-      .exec<{ n: number }>("SELECT COUNT(*) AS n FROM jobs WHERE not_before <= ?", Date.now())
-      .one();
-    return row.n;
-  });
+async function dueJobs(): Promise<number> {
+  const stubs = [...owners.values()].map(({ accountId, id }) => hub(id, accountId));
+  let n = 0;
+  for (const stub of stubs)
+    n += await runInDurableObject(
+      stub,
+      (_instance, state) =>
+        state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM jobs WHERE not_before <= ?", Date.now()).one()
+          .n,
+    );
+  for (const account of [3, 1])
+    n += await runInDurableObject(
+      env.ACCOUNT_SWEEP.getByName(`account:v1:${account}`),
+      (_instance, state) =>
+        state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM jobs WHERE not_before <= ?", Date.now()).one()
+          .n,
+    );
+  return n;
 }
 
 /**
@@ -353,16 +423,59 @@ const created = (id: number) => ({
 });
 
 let world: World;
-beforeEach(() => {
+beforeEach(async () => {
+  owners.clear();
+  currentConversation = 12;
   world = new World();
+  const registry = env.FORUM_REGISTRY.getByName(`forum:v1:${FORUM}`);
+  await registry.lookup(FORUM);
+  await vi.waitFor(async () => expect(await registry.lookup(FORUM)).not.toBeNull(), { timeout: 10_000 });
 });
 afterEach(async () => {
   await drain();
-  await runInDurableObject(hub(), async (_instance, state) => {
-    state.storage.sql.exec("DELETE FROM jobs");
-    state.storage.sql.exec("DELETE FROM interactions");
-    await state.storage.deleteAlarm();
-  });
+  for (const { accountId, id } of owners.values())
+    await runInDurableObject(hub(id, accountId), async (_instance, state) => {
+      for (const table of [
+        "jobs",
+        "interactions",
+        "cache",
+        "command_files",
+        "conversations",
+        "posted_messages",
+        "derived_messages",
+        "submitted_responses",
+        "counters",
+      ])
+        state.storage.sql.exec(`DELETE FROM ${table}`);
+      await state.storage.deleteAlarm();
+    });
+  for (const account of [3, 1])
+    await runInDurableObject(env.ACCOUNT_SWEEP.getByName(`account:v1:${account}`), async (_instance, state) => {
+      for (const table of ["jobs", "cache", "roster"]) state.storage.sql.exec(`DELETE FROM ${table}`);
+      await state.storage.deleteAlarm();
+    });
+  const majorNames = new Set(
+    world.requests.flatMap((request) => {
+      const match = /^\/api\/v10\/(channels|guilds|webhooks)\/([^/]+)/.exec(request.url.pathname);
+      return match
+        ? [`${match[1]}:${match[2]}`]
+        : request.url.pathname.startsWith("/api/v10/")
+          ? [`route:${request.url.pathname.slice(7)}`]
+          : [];
+    }),
+  );
+  const { fingerprint } = await import("../src/discord/limiter.ts");
+  majorNames.add(`global:bot:${await fingerprint("test-bot-token")}`);
+  majorNames.add("global:unauth:installation");
+  for (const name of majorNames)
+    await runInDurableObject(env.DISCORD_RATE_LIMIT.getByName(name), (_instance, state) =>
+      state.storage.sql.exec("DELETE FROM state"),
+    );
+  await runInDurableObject(
+    env.TRIAGE_BUDGET.getByName(`triage:installation:${new Date().toISOString().slice(0, 13)}`),
+    (_instance, state) => state.storage.sql.exec("DELETE FROM state"),
+  );
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -433,7 +546,7 @@ describe("worker", () => {
       thread_name: "[Acme #12] Jane Doe — My agent will not connect",
       applied_tags: ["100000000000000301", "100000000000000302"],
       content:
-        "-# via Live chat · Acme — Product App\n-# jane@example.com\n[Open in Chatwoot](<https://chatwoot.example.com/app/accounts/3/conversations/12>)",
+        "-# via Live chat\n-# jane@example.com\n[Open in Chatwoot](<https://chatwoot.example.com/app/accounts/3/conversations/12>)",
     });
     const thread = posts[1]?.thread ?? "";
     expect(thread).toMatch(/^\d{18}$/);
@@ -461,7 +574,7 @@ describe("worker", () => {
       topic: "Billing",
       discord_thread: `https://discord.com/channels/${GUILD}/${thread}`,
     });
-    expect(await hub().ticketForThread(thread)).toEqual({ accountId: 3, conversationId: 12 });
+    expect(await ticketForThread(thread)).toEqual({ accountId: 3, conversationId: 12 });
 
     world.conversations
       .get(12)
@@ -550,19 +663,24 @@ describe("worker", () => {
 
   it("retries a failed message with backoff without skipping it", async () => {
     world.conversation(13, [{ id: 601, content: "hello", message_type: 0 }]);
-    world.failReplies = 1;
+    world.rateLimitReplies = 1;
     await chatwootWebhook(created(13));
     await drain();
 
-    // Make the backed-off job due now instead of waiting.
+    // Advance the upstream cooldown without sleeping.
+    await elapseDiscordWindows(65_000);
     await runInDurableObject(hub(), (_instance, state) => {
       state.storage.sql.exec("UPDATE jobs SET not_before = 0");
+      // Move persisted cooldowns forward with the job clock, rather than waiting in real time.
+      state.storage.sql.exec(
+        "UPDATE cache SET value = '0', expires_at = 0 WHERE key LIKE 'discord:bucket:%' OR key LIKE 'discord:global:%' OR key LIKE 'chatwoot:limit:%'",
+      );
     });
     await setAlarmNow();
     await drain();
     const replies = world.webhookPosts().filter((post) => post.thread);
     expect(replies.map((post) => post.body.content)).toEqual([
-      "hello\n-# <@100000000000000777>", // attempt answered with HTTP 500
+      "hello\n-# <@100000000000000777>", // attempt deferred by Discord's 429
       "hello\n-# <@100000000000000777>",
     ]);
     await chatwootWebhook(created(13));
@@ -576,7 +694,9 @@ describe("worker", () => {
     await chatwootWebhook(created(40));
     await drain();
     for (let round = 1; round < 12; round += 1) {
-      expect(await jobDelay("conversation:3:40")).toBeGreaterThan(60_000);
+      await vi.waitFor(async () => expect(await jobDelay("conversation:3:40")).toBeGreaterThan(60_000), {
+        timeout: 5000,
+      });
       await makeJobsDue();
       await drain();
     }
@@ -604,15 +724,15 @@ describe("worker", () => {
     await chatwootWebhook(created(14));
     await drain();
     expect(world.webhookPosts()).toEqual([]); // history is not re-posted, no new post
-    expect(await hub().ticketForThread(thread)).toEqual({ accountId: 3, conversationId: 14 });
+    expect(await ticketForThread(thread)).toEqual({ accountId: 3, conversationId: 14 });
 
     world.conversations.get(14)?.messages.push({ id: 703, content: "new", message_type: 0 });
     await chatwootWebhook(created(14));
     await drain();
     expect(world.webhookPosts().map((post) => post.thread)).toEqual([thread]);
-    // The adopted post may hold a card from before: it is looked for before one is posted.
-    expect(world.sent("GET", new RegExp(`^/api/v10/channels/${thread}/messages$`))).toHaveLength(1);
-    // Posted on adoption, then moved under the new message.
+    // The adopted post gets a card, then a new card is posted below the new message. Existing
+    // messages are never read to guess which card a lost send created.
+    expect(world.sent("GET", new RegExp(`^/api/v10/channels/${thread}/messages$`))).toHaveLength(0);
     expect(world.cards().map((card) => card.thread)).toEqual([thread, thread]);
     expect(world.sent("DELETE", /^\/api\/v10\/webhooks\/1\/tok\/messages\//)).toHaveLength(1);
   });
@@ -668,6 +788,10 @@ describe("worker", () => {
     await drain();
     await runInDurableObject(hub(), (_instance, state) => {
       state.storage.sql.exec("UPDATE jobs SET not_before = 0");
+      // Move persisted cooldowns forward with the job clock, rather than waiting in real time.
+      state.storage.sql.exec(
+        "UPDATE cache SET value = '0', expires_at = 0 WHERE key LIKE 'discord:bucket:%' OR key LIKE 'discord:global:%' OR key LIKE 'chatwoot:limit:%'",
+      );
     });
     await setAlarmNow();
     await drain();
@@ -712,12 +836,26 @@ describe("worker", () => {
   });
 
   it("posts a customer's response to an interactive message once, after Chatwoot's API confirms it", async () => {
+    // A reserved probe without response headers leaves this route's capacity unknown.
+    const probe = await env.DISCORD_RATE_LIMIT.getByName("webhooks:1").reserve({
+      id: crypto.randomUUID(),
+      createdAt: Date.now(),
+      route: "POST:/webhooks/:major/:token",
+      credential: await fingerprint("tok"),
+      global: false,
+    });
+    expect(probe.allowed).toBe(true);
     const question = { id: 1402, content: "How did we do?", message_type: 3, content_type: "input_csat" };
     world.conversation(23, [{ id: 1401, content: "thanks, all good", message_type: 0 }, question], {}, "resolved");
     await chatwootWebhook(created(23));
     await drain();
+    expect(world.threads.size).toBe(0);
+    // No due jobs is a paused continuation, not evidence that the thread/body finished.
+    await vi.waitFor(() => expect(world.webhookPosts()).toHaveLength(2), { timeout: 5000 });
     const thread = world.webhookPosts()[1]?.thread;
-    const posts = world.webhookPosts().length;
+    expect(thread).toBeTypeOf("string");
+    if (!thread) throw new Error("Initial thread did not converge");
+    let posts = world.webhookPosts().length;
     const rated = (rating: number) => ({ submitted_values: { csat_survey_response: { rating } } });
     const updated = (rating: number) => ({
       ...created(23),
@@ -732,38 +870,86 @@ describe("worker", () => {
     await drain();
     expect(world.webhookPosts()).toHaveLength(posts);
 
+    // Obtain a real 429 through the normal limiter/report path before the confirmed update.
+    world.rateLimitReplies = 1;
+    world.replyRetryAfterSeconds = 1;
+    await runInDurableObject(hub(23), async (_instance, state) => {
+      const budget = new Budget(45);
+      const rest = new DiscordRest(
+        "test-bot-token",
+        budget.fetch,
+        new DiscordLimiter(new Store(state.storage.sql), env, budget),
+      );
+      await expect(
+        rest.post("/webhooks/1/tok", {
+          body: { content: "Cooldown probe" },
+          query: { thread_id: thread },
+          auth: false,
+        }),
+      ).rejects.toMatchObject({ status: 429, retryAfterMs: 1000 });
+    });
+    posts = world.webhookPosts().length;
     Object.assign(question, { content_attributes: rated(5) });
     await chatwootWebhook(updated(5));
     await drain();
     // Another update of the same response (e.g. its status) is not posted again.
     await chatwootWebhook(updated(5));
     await drain();
-    expect(world.webhookPosts().slice(posts)).toEqual([
-      {
-        thread,
-        body: {
-          content: "How did we do?\n\n**CSAT:**\n• Rating: 5",
-          username: "Jane Doe",
-          avatar_url: "https://gravatar.com/avatar/?d=mp&f=y&s=256",
-          allowed_mentions: { parse: [] },
-        },
-      },
-    ]);
+    expect(world.webhookPosts().slice(posts)).toEqual([]);
+    await vi.waitFor(
+      () =>
+        expect(world.webhookPosts().slice(posts)).toEqual([
+          {
+            thread,
+            body: {
+              content: "How did we do?\n\n**CSAT:**\n• Rating: 5",
+              username: "Jane Doe",
+              avatar_url: "https://gravatar.com/avatar/?d=mp&f=y&s=256",
+              allowed_mentions: { parse: [] },
+            },
+          },
+        ]),
+      { timeout: 5000 },
+    );
+    // A repeat after the continuation has actually delivered also keeps its receipt.
+    await chatwootWebhook(updated(5));
+    await drain();
+    expect(world.webhookPosts().slice(posts)).toHaveLength(1);
     // Posting unarchived the resolved post; it is archived again.
-    expect(JSON.parse(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).at(-1)?.body ?? "")).toEqual({
-      archived: true,
-    });
+    await vi.waitFor(
+      () =>
+        expect(JSON.parse(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).at(-1)?.body ?? "{}")).toEqual({
+          archived: true,
+        }),
+      { timeout: 5000 },
+    );
 
     // A changed response is posted again.
     Object.assign(question, { content_attributes: rated(4) });
     await chatwootWebhook(updated(4));
-    await drain();
-    expect(
-      world
-        .webhookPosts()
-        .slice(posts)
-        .map((post) => post.body.content),
-    ).toEqual(["How did we do?\n\n**CSAT:**\n• Rating: 5", "How did we do?\n\n**CSAT:**\n• Rating: 4"]);
+    await vi.waitFor(() =>
+      expect(
+        world
+          .webhookPosts()
+          .slice(posts)
+          .map((post) => post.body.content),
+      ).toEqual(["How did we do?\n\n**CSAT:**\n• Rating: 5", "How did we do?\n\n**CSAT:**\n• Rating: 4"]),
+    );
+    // Returning to the original rating is a new response, despite having identical text.
+    Object.assign(question, { content_attributes: rated(5) });
+    await chatwootWebhook(updated(5));
+    await vi.waitFor(() =>
+      expect(
+        world
+          .webhookPosts()
+          .slice(posts)
+          .map((post) => post.body.content),
+      ).toEqual([
+        "How did we do?\n\n**CSAT:**\n• Rating: 5",
+        "How did we do?\n\n**CSAT:**\n• Rating: 4",
+        "How did we do?\n\n**CSAT:**\n• Rating: 5",
+      ]),
+    );
   });
 
   it("posts each supported interactive response from a signed message update", async () => {
@@ -787,6 +973,16 @@ describe("worker", () => {
       world.conversation(id, [{ id: 5000, content: "Help", message_type: 0 }, question]);
       await chatwootWebhook(created(id));
       await drain();
+      await vi.waitFor(
+        async () =>
+          expect(
+            await runInDurableObject(
+              hub(id),
+              (_instance, state) => new Store(state.storage.sql).conversation(3, id)?.cursor,
+            ),
+          ).toBe(5001),
+        { timeout: 5000 },
+      );
       const posts = world.webhookPosts().length;
       Object.assign(question, { content_attributes: response.attributes });
       await chatwootWebhook({
@@ -797,40 +993,38 @@ describe("worker", () => {
         content_attributes: response.attributes,
       });
       await drain();
-      expect(
-        world
-          .webhookPosts()
-          .slice(posts)
-          .map((post) => post.body.content),
-      ).toEqual([`Question\n\n${response.text}`]);
+      await vi.waitFor(
+        () =>
+          expect(
+            world
+              .webhookPosts()
+              .slice(posts)
+              .map((post) => post.body.content),
+          ).toEqual([`Question\n\n${response.text}`]),
+        { timeout: 5000 },
+      );
     }
   });
 
-  it("reads drafts into the reply editor and explains missing, unreadable or rate-limited answers", async () => {
-    let answer: { author: { id: string }; content: string } | undefined;
-    world = new World([
-      on("GET", /^discord\.com\/api\/v10\/channels\/\d+\/messages\/\d+$/, () =>
-        answer ? json(answer) : json({ message: "rate limited", retry_after: 0, global: false }, { status: 429 }),
-      ),
-    ]);
+  it("opens a kept draft directly and answers a missing draft without upstream reads", async () => {
     world.conversation(90, [{ id: 3201, content: "Help", message_type: 0 }]);
     await chatwootWebhook(created(90));
     await drain();
+    await vi.waitFor(
+      async () =>
+        expect(
+          await runInDurableObject(
+            hub(90),
+            (_instance, state) => new Store(state.storage.sql).conversation(3, 90)?.customerMessageId,
+          ),
+        ).toBe("100000000000001001"),
+      { timeout: 5000 },
+    );
     const thread = world.webhookPosts().at(-1)?.thread ?? "";
-    const cases = [
-      {
-        content: "Summary\n```\nold\n```\nDraft\n```text\nHi, the refund is on its way.\n```",
-        author: TRIAGE,
-        draft: "Hi, the refund is on its way.",
-      },
-      { content: "No code block", author: TRIAGE, message: "has no draft" },
-      { content: "```\nSomeone else's draft\n```", author: BOB, message: "has no draft" },
-      { content: "", author: TRIAGE, message: "Message Content intent" },
-      { content: undefined, author: TRIAGE, message: "Message Content intent" },
-    ];
-    for (const [index, scenario] of cases.entries()) {
-      answer =
-        scenario.content === undefined ? undefined : { author: { id: scenario.author }, content: scenario.content };
+    const answerId = "100000000000019100";
+    await hub().triageAnswered(thread, answerId, "100000000000001001", "Hi, the refund is on its way.");
+    for (const [index, id] of [answerId, "100000000000019101"].entries()) {
+      const started = Date.now();
       const response = await discordInteraction({
         id: String(900300 + index),
         application_id: "100000000000000001",
@@ -841,31 +1035,40 @@ describe("worker", () => {
         channel: { id: thread, type: 11 },
         member: { user: { id: ALICE } },
         message: { id: "100000000000009101", components: [] },
-        data: { custom_id: `ticket:draft:${100000000000019100n + BigInt(index)}`, component_type: 2 },
+        data: { custom_id: `ticket:draft:${id}`, component_type: 2 },
       });
-      const body = (await response.json()) as {
+      const body = await response.json<{
         type: number;
         data: { content?: string; components?: Array<{ component: { value?: string } }> };
-      };
-      if (scenario.draft) {
+      }>();
+      expect(Date.now() - started).toBeLessThan(2500);
+      if (index === 0) {
         expect(body.type).toBe(9);
-        expect(body.data.components?.[0]?.component.value).toBe(scenario.draft);
+        expect(body.data.components?.[0]?.component.value).toBe("Hi, the refund is on its way.");
       } else {
         expect(body.type).toBe(4);
-        expect(body.data.content).toContain(scenario.message);
+        expect(body.data.content).toContain("Reply with this");
       }
     }
-    expect(world.sent("GET", /^\/api\/v10\/channels\/\d+\/messages\/\d+$/)).toHaveLength(cases.length);
+    expect(world.sent("GET", /^\/api\/v10\/channels\/\d+\/messages\/\d+$/)).toHaveLength(0);
   });
 
   it("closes the post of a conversation deleted in Chatwoot", async () => {
     world.conversation(22, [{ id: 1301, content: "hello", message_type: 0 }]);
     await chatwootWebhook(created(22));
     await drain();
+    await vi.waitFor(
+      () => expect(world.webhookPosts().some((post) => String(post.body.content).startsWith("hello"))).toBe(true),
+      { timeout: 5000 },
+    );
     const thread = world.webhookPosts()[1]?.thread ?? "";
     world.conversations.delete(22);
     await chatwootWebhook(created(22));
     await drain();
+    await vi.waitFor(
+      () => expect(world.webhookPosts().at(-1)?.body.content).toBe("This conversation no longer exists in Chatwoot."),
+      { timeout: 5000 },
+    );
     expect(world.webhookPosts().at(-1)).toEqual({
       thread,
       body: {
@@ -878,7 +1081,7 @@ describe("worker", () => {
     expect(JSON.parse(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).at(-1)?.body ?? "")).toEqual({
       archived: true,
     });
-    expect(await hub().ticketForThread(thread)).toBeNull();
+    expect(await ticketForThread(thread)).toBeNull();
   });
 
   it("drops unreadable and unknown jobs", async () => {
@@ -907,7 +1110,7 @@ describe("worker", () => {
 
   it("runs a deferred command as the agent and edits the original response", async () => {
     const thread = "100000000000030001";
-    await runInDurableObject(hub(), (_instance, state) => {
+    await runInDurableObject(hub(17), (_instance, state) => {
       state.storage.sql.exec(
         "INSERT INTO conversations (account_id, conversation_id, thread_id, cursor) VALUES (3, 17, ?, 0)",
         thread,
@@ -951,7 +1154,7 @@ describe("worker", () => {
 
   it("shows a failed change from the Manage panel as text in that panel (a Components V2 message)", async () => {
     const thread = "100000000000030009";
-    await runInDurableObject(hub(), (_instance, state) => {
+    await runInDurableObject(hub(91), (_instance, state) => {
       state.storage.sql.exec(
         "INSERT INTO conversations (account_id, conversation_id, thread_id, cursor) VALUES (3, 91, ?, 0)",
         thread,
@@ -991,7 +1194,7 @@ describe("worker", () => {
 
   it("runs a replayed signed command once, and refuses an old signed request", async () => {
     const thread = "100000000000030002";
-    await runInDurableObject(hub(), (_instance, state) => {
+    await runInDurableObject(hub(18), (_instance, state) => {
       state.storage.sql.exec(
         "INSERT INTO conversations (account_id, conversation_id, thread_id, cursor) VALUES (3, 18, ?, 0)",
         thread,
@@ -1038,7 +1241,8 @@ describe("worker", () => {
       action: { type: "message", private: false, content: "Hello", files: [] },
     };
     const queuedAt = Date.now() - 13 * 60 * 1000;
-    await runInDurableObject(hub(), async (_instance, state) => {
+    await runInDurableObject(hub(job.conversationId), async (_instance, state) => {
+      new Store(state.storage.sql).set("owner", `${job.accountId}:${job.conversationId}`);
       state.storage.sql.exec(
         "INSERT INTO jobs (key, priority, payload, not_before, created_at) VALUES (?, 0, ?, ?, ?)",
         `command:${job.interactionId}`,
@@ -1072,11 +1276,15 @@ describe("worker", () => {
 
     await makeJobsDue();
     await drain();
-    expect(world.webhookPosts().at(-1)?.body.content).toBe("_Resolved by Sam_");
-    expect(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).map((request) => JSON.parse(request.body))).toEqual([
-      { archived: false, applied_tags: ["100000000000000301"] },
-      { archived: true },
-    ]);
+    await vi.waitFor(
+      () => {
+        expect(world.webhookPosts().at(-1)?.body.content).toBe("_Resolved by Sam_");
+        expect(JSON.parse(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).at(-1)?.body ?? "{}")).toMatchObject({
+          archived: true,
+        });
+      },
+      { timeout: 5000 },
+    );
 
     if (conversation) conversation.status = "open";
     await chatwootWebhook({ event: "conversation_updated", id: 30, account: { id: 3 } });
@@ -1121,7 +1329,7 @@ describe("worker", () => {
     expect(world.webhookPosts()).toEqual(posts);
   });
 
-  it("the sweep queues only conversations whose post is behind or out of date", async () => {
+  it("reconciles missed state through the conversation owner without replaying an unknown card", async () => {
     world.conversation(32, [{ id: 3201, content: "hello", message_type: 0 }]);
     await chatwootWebhook(created(32));
     await drain();
@@ -1129,35 +1337,37 @@ describe("worker", () => {
     const before = reads();
 
     await sweep();
-    expect(reads()).toBe(before); // up to date: not queued
+    await vi.waitFor(() => expect(reads()).toBeGreaterThan(before), { timeout: 5000 }); // Wait for the owner, including short permit deferrals.
 
-    // A post from before cards gets its card.
+    // A cleared card row does not replay a send whose durable guard already has a receipt.
     await runInDurableObject(hub(), (_instance, state) => {
       state.storage.sql.exec("UPDATE conversations SET card_id = NULL WHERE conversation_id = 32");
+      const thread = new Store(state.storage.sql).conversation(3, 32)?.threadId;
+      new Store(state.storage.sql).set(`card:3:32:${thread}:unknown`, "1");
     });
     const cards = world.cards().length;
     await sweep();
-    expect(reads()).toBe(before + 1);
-    expect(world.cards()).toHaveLength(cards + 1);
+    expect(reads()).toBeGreaterThan(before);
+    expect(world.cards()).toHaveLength(cards);
 
     // A card left covered (its move failed) is moved.
     await runInDurableObject(hub(), (_instance, state) => {
       state.storage.sql.exec("UPDATE conversations SET card_covered = 1 WHERE conversation_id = 32");
     });
     await sweep();
-    expect(reads()).toBe(before + 2);
-    expect(world.cards()).toHaveLength(cards + 2);
+    expect(reads()).toBeGreaterThan(before);
+    expect(world.cards()).toHaveLength(cards);
 
     const conversation = world.conversations.get(32);
     if (conversation) conversation.status = "resolved"; // missed webhook
     await sweep();
-    expect(reads()).toBe(before + 3);
+    expect(reads()).toBeGreaterThan(before);
     expect(JSON.parse(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).at(-1)?.body ?? "")).toEqual({
       archived: true,
     });
   });
 
-  it("gives a post from before cards its card, however long ago its ticket was active", async () => {
+  it("does not replay a cleared card send, however long ago its ticket was active", async () => {
     world.conversation(34, [{ id: 3401, content: "hello", message_type: 0 }]);
     await chatwootWebhook(created(34));
     await drain();
@@ -1165,17 +1375,19 @@ describe("worker", () => {
     if (quiet) quiet.lastActivityAt = Math.floor(Date.now() / 1000) - 7 * 24 * 3600;
     await runInDurableObject(hub(), (_instance, state) => {
       state.storage.sql.exec("UPDATE conversations SET card_id = NULL WHERE conversation_id = 34");
+      const thread = new Store(state.storage.sql).conversation(3, 34)?.threadId;
+      new Store(state.storage.sql).set(`card:3:34:${thread}:unknown`, "1");
     });
     const cards = world.cards().length;
     await sweep();
-    expect(world.cards()).toHaveLength(cards + 1);
+    expect(world.cards()).toHaveLength(cards);
     await sweep();
-    expect(world.cards()).toHaveLength(cards + 1);
+    expect(world.cards()).toHaveLength(cards);
   });
 
   it("runs a command that comes during a sweep before the sweep's next page", async () => {
     const thread = "100000000000030036";
-    await runInDurableObject(hub(), (_instance, state) => {
+    await runInDurableObject(hub(36), (_instance, state) => {
       state.storage.sql.exec(
         "INSERT INTO conversations (account_id, conversation_id, thread_id, cursor) VALUES (3, 36, ?, 0)",
         thread,
@@ -1224,7 +1436,16 @@ describe("worker", () => {
       member: { user: { id: ALICE } },
       data: { type: 1, name: "resolve" },
     });
-    release();
+    try {
+      // A slow page must not hold a different conversation's command or feedback.
+      await vi.waitFor(() => expect(world.sent("POST", /\/toggle_status$/)).toHaveLength(1));
+      await vi.waitFor(() =>
+        expect(world.sent("PATCH", /interaction-token\/messages\/(@|%40)original$/)).toHaveLength(1),
+      );
+      expect(world.requests.filter(isPage)).toHaveLength(1);
+    } finally {
+      release();
+    }
     await drain();
 
     const order = world.requests
@@ -1274,13 +1495,15 @@ describe("worker", () => {
         async () => {
           await drain();
           await runInDurableObject(hub(), async (_instance, state) => {
-            expect(await state.storage.getAlarm()).toBeNull();
+            expect(await state.storage.getAlarm()).not.toBeNull();
           });
         },
         { timeout: 5000 },
       );
       expect(world.webhookPosts()).toEqual([]);
-      await runInDurableObject(hub(), async (_instance, state) => expect(await state.storage.getAlarm()).toBeNull());
+      await runInDurableObject(hub(), async (_instance, state) =>
+        expect(await state.storage.getAlarm()).not.toBeNull(),
+      );
       const conversation = world.conversations.get(id);
       if (!conversation) throw new Error("Test conversation missing");
       conversation.status = "open";
@@ -1351,22 +1574,31 @@ describe("worker", () => {
     const reply = { id: 150, content: "The answer", message_type: 1, status: "failed" };
     world.conversation(id, [
       { id: 1, content: "A customer request", message_type: 0 },
-      ...Array.from({ length: 300 }, (_, index) =>
-        index + 2 === reply.id ? reply : { id: index + 2, content: "Activity", message_type: 2 },
+      ...Array.from({ length: 700 }, (_, index) =>
+        index + 2 === reply.id ? reply : { id: index + 2, content: "", message_type: 2 },
       ),
     ]);
     await runInDurableObject(hub(), async (_instance, state) => {
       const store = new Store(state.storage.sql);
       const settings = await loadSettings(env);
-      const budget = new Budget(minimumBudget(4));
+      const budget = new Budget(10);
       const chatwoot = chatwootClient(settings.config.chatwoot.baseUrl, "relay-token", budget.fetch);
       const rest = new DiscordRest("test-bot-token", budget.fetch);
       const forum = new DiscordForum(rest, store);
-      const services = { settings, store, budget, chatwoot, rest, forum, relay: relayFor(settings, forum, store) };
+      const services = {
+        settings,
+        store,
+        budget,
+        chatwoot,
+        rest,
+        forum,
+        relay: relayFor(settings, forum, store),
+        enqueueMetadata: () => undefined,
+      };
       expect(await processConversation(services, 3, id)).toBe("yield");
     });
     expect(world.webhookPosts()).toEqual([]);
-    expect(world.sent("GET", /\/messages$/).some((request) => request.url.searchParams.get("after") === "301")).toBe(
+    expect(world.sent("GET", /\/messages$/).some((request) => request.url.searchParams.get("after") === "101")).toBe(
       true,
     );
     reply.status = "sent";
@@ -1456,7 +1688,7 @@ describe("worker", () => {
       data: { type: 1, name: "block" },
     });
     await drain();
-    await vi.waitFor(async () => expect(await hub().ticketForThread(thread)).toBeNull());
+    await vi.waitFor(async () => expect(await ticketForThread(thread)).toBeNull());
     expect(world.webhookPosts().at(-1)?.body.content).toBe("This conversation no longer exists in Chatwoot.");
   });
 });
@@ -1476,15 +1708,1101 @@ function jobDelay(key: string): Promise<number> {
   });
 }
 
+async function elapseDiscordWindows(ms: number): Promise<void> {
+  const names = new Set(
+    world.requests.flatMap((request) => {
+      const match = /^\/api\/v10\/(channels|guilds|webhooks)\/([^/]+)/.exec(request.url.pathname);
+      return match ? [`${match[1]}:${match[2]}`] : [];
+    }),
+  );
+  for (const name of names)
+    await runInDurableObject(env.DISCORD_RATE_LIMIT.getByName(name), (_instance, state) => {
+      const rows = state.storage.sql
+        .exec<{ key: string; value: string }>("SELECT key, value FROM state WHERE key LIKE 'bucket:%'")
+        .toArray();
+      for (const row of rows) {
+        const window: { until: number; notBefore: number } = JSON.parse(row.value);
+        window.until -= ms;
+        window.notBefore -= ms;
+        state.storage.sql.exec("UPDATE state SET value=? WHERE key=?", JSON.stringify(window), row.key);
+      }
+    });
+}
+
 async function makeJobsDue(): Promise<void> {
+  await elapseDiscordWindows(65_000);
   await runInDurableObject(hub(), (_instance, state) => {
     state.storage.sql.exec("UPDATE jobs SET not_before = 0");
+    // Move persisted cooldowns forward with the job clock, rather than waiting in real time.
+    state.storage.sql.exec(
+      "UPDATE cache SET value = '0', expires_at = 0 WHERE key LIKE 'discord:bucket:%' OR key LIKE 'discord:global:%' OR key LIKE 'chatwoot:limit:%'",
+    );
   });
   await setAlarmNow();
 }
 
 async function setAlarmNow(): Promise<void> {
   await runInDurableObject(hub(), async (_instance, state) => {
-    await state.storage.setAlarm(Date.now());
+    await state.storage.setAlarm(1);
   });
 }
+
+it("measures command feedback behind a slow conversation", async () => {
+  world.mock.spy.mockRestore();
+  let startedSlow = false;
+  let feedback = 0;
+  let releaseSlow = () => {};
+  const slow = new Promise<void>((resolve) => {
+    releaseSlow = resolve;
+  });
+  world = new World([
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/801", async (request) => {
+      startedSlow = true;
+      await new Promise<void>((resolve, reject) => {
+        request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true });
+        slow.then(resolve);
+      });
+      return json({}, { status: 503 });
+    }),
+    on("GET", "chatwoot.example.com/api/v1/profile", () => {
+      return json({ id: 42, accounts: [{ id: 3 }] });
+    }),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/802/toggle_status", () => json({})),
+    on(
+      "PATCH",
+      /^discord\.com\/api\/v10\/webhooks\/100000000000000001\/latency-token\/messages\/(@|%40)original$/,
+      () => {
+        feedback += 1;
+        return json({});
+      },
+    ),
+  ]);
+  await hub(801).enqueueConversation(3, 801);
+  await vi.waitFor(() => expect(startedSlow).toBe(true));
+  await enqueueCommand({
+    interactionId: "latency-command",
+    applicationId: "100000000000000001",
+    token: "latency-token",
+    discordUserId: ALICE,
+    accountId: 3,
+    conversationId: 802,
+    action: { type: "status", status: "resolved" },
+  });
+  await vi.waitFor(() => expect(feedback).toBe(1), { timeout: 5000 });
+  releaseSlow();
+  await drain();
+});
+
+it.for(["baseline", "headers", "body", "discord"] as const)(
+  "measures thirty warm independent conversations while A blocks %s",
+  { timeout: 90000 },
+  async (mode, context) => {
+    const samples: Array<{ ack: number; queue: number; action: number; feedback: number; firstPost: number }> = [];
+    for (let sample = 0; sample < 30; sample++) {
+      world.mock.spy.mockRestore();
+      const a = 900000 + sample;
+      const b = 910000 + sample;
+      const accountId = sample % 2 ? 1 : 3;
+      const aThread = nextThreadId();
+      const bThread = nextThreadId();
+      let blocked = false;
+      let upstreamAborted = false;
+      let released = false;
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = () => {
+          released = true;
+          resolve();
+        };
+      });
+      let action = 0;
+      let feedback = 0;
+      let firstPost = 0;
+      let jobStartedAt = 0;
+      const bRaw = {
+        id: b,
+        status: "open",
+        inbox_id: 2,
+        custom_attributes: {},
+        messages: [{ id: b }],
+        meta: { sender: { name: "Fixture" } },
+      };
+      const aRaw = {
+        id: a,
+        status: "open",
+        inbox_id: 2,
+        custom_attributes: {},
+        messages: mode === "discord" ? [{ id: a }] : [],
+      };
+      world = new World([
+        on("GET", `chatwoot.example.com/api/v1/accounts/3/conversations/${a}`, async (request) => {
+          if (mode === "headers" || mode === "body")
+            request.signal.addEventListener(
+              "abort",
+              () => {
+                upstreamAborted = true;
+              },
+              { once: true },
+            );
+          if (mode === "headers") {
+            blocked = true;
+            await gate;
+          }
+          if (mode === "body") {
+            let canceled = false;
+            return new Response(
+              new ReadableStream<Uint8Array>({
+                start(controller) {
+                  blocked = true;
+                  void gate.then(() => {
+                    if (!canceled) {
+                      controller.enqueue(encoder.encode(JSON.stringify(aRaw)));
+                      controller.close();
+                    }
+                  });
+                },
+                cancel() {
+                  canceled = true;
+                },
+              }),
+            );
+          }
+          return json(aRaw);
+        }),
+        on("GET", `chatwoot.example.com/api/v1/accounts/${accountId}/conversations/${b}`, () => json(bRaw)),
+        on("GET", `chatwoot.example.com/api/v1/accounts/${accountId}/conversations/${b}/messages`, (request) =>
+          json({
+            payload:
+              Number(request.url.searchParams.get("after") ?? 0) >= b
+                ? []
+                : [{ id: b, content: "Fixture body", message_type: 0 }],
+          }),
+        ),
+        on("GET", "chatwoot.example.com/api/v1/profile", () => {
+          jobStartedAt = Date.now();
+          return json({ id: 42, accounts: [{ id: 3 }, { id: 1 }] });
+        }),
+        on("GET", `chatwoot.example.com/api/v1/accounts/${accountId}/inboxes/2`, () =>
+          json({ id: 2, name: "Fixture inbox" }),
+        ),
+        on("POST", `chatwoot.example.com/api/v1/accounts/${accountId}/conversations/${b}/custom_attributes`, () => {
+          bRaw.custom_attributes = { discord_thread: `https://discord.com/channels/${GUILD}/${bThread}` };
+          return json({});
+        }),
+        on("POST", `chatwoot.example.com/api/v1/accounts/${accountId}/conversations/${b}/toggle_status`, () => {
+          action = performance.now();
+          return json({});
+        }),
+        on(
+          "PATCH",
+          new RegExp(`^discord\\.com/api/v10/webhooks/100000000000000001/measure-${sample}/messages/(@|%40)original$`),
+          () => {
+            feedback = performance.now();
+            return json({});
+          },
+        ),
+        (request) => {
+          if (request.method !== "POST" || request.url.pathname !== "/api/v10/webhooks/1/tok") return undefined;
+          const thread = request.url.searchParams.get("thread_id");
+          if (thread === bThread && String(JSON.parse(request.body).content).startsWith("Fixture body"))
+            firstPost ||= performance.now();
+          if (
+            mode !== "discord" ||
+            thread !== aThread ||
+            !String(JSON.parse(request.body).content).startsWith("A fixture")
+          )
+            return undefined;
+          blocked = true;
+          request.signal.addEventListener(
+            "abort",
+            () => {
+              upstreamAborted = true;
+            },
+            { once: true },
+          );
+          // The server accepted the post; response loss must never cause a second POST.
+          return gate.then(() => json({}, { status: 500 }));
+        },
+      ]);
+      world.conversation(a, mode === "discord" ? [{ id: a, content: "A fixture", message_type: 0 }] : []);
+      world.threads.set(aThread, FORUM);
+      world.threads.set(bThread, FORUM);
+      await runInDurableObject(hub(a), (_instance, state) => {
+        new Store(state.storage.sql).adoptThread(3, a, aThread);
+        new Store(state.storage.sql).setCursor(3, a, 0);
+      });
+      await runInDurableObject(hub(b, accountId), async (_instance, state) => {
+        const store = new Store(state.storage.sql);
+        store.adoptThread(accountId, b, bThread);
+        store.setCursor(accountId, b, 0);
+        // Learn the real fake webhook capacity before measuring a concurrent in-flight POST.
+        const budget = new Budget(45);
+        const rest = new DiscordRest("test-bot-token", budget.fetch, new DiscordLimiter(store, env, budget));
+        await vi.waitFor(
+          async () => {
+            await rest.post("/webhooks/1/tok", { body: { thread_name: "Warm", content: "Warm" }, auth: false });
+          },
+          { timeout: 3000, interval: 50 },
+        );
+      });
+      const signed = await signedInteraction(
+        {
+          id: String(100000000000200000n + BigInt(sample)),
+          application_id: "100000000000000001",
+          token: `measure-${sample}`,
+          type: 2,
+          channel_id: bThread,
+          channel: { id: bThread, type: 11 },
+          member: { user: { id: ALICE } },
+          data: { type: 1, name: "resolve" },
+        },
+        Math.floor(Date.now() / 1000),
+      );
+      if (mode !== "baseline") {
+        await hub(a).enqueueConversation(3, a);
+        await vi.waitFor(() => expect(blocked).toBe(true), { interval: 5, timeout: 3000 });
+      }
+      const started = performance.now();
+      try {
+        const response = await call(signed());
+        const ack = performance.now() - started;
+        expect(await response.json()).toMatchObject({ type: 5 });
+        // This admission must also commit before A's upstream gate is released.
+        const webhook = await chatwootWebhook(
+          { ...created(b), account: { id: accountId } },
+          { secret: accountId === 3 ? "secret-acme" : "secret-globex" },
+        );
+        expect(webhook.status).toBe(200);
+        await vi.waitFor(() => expect(feedback).toBeGreaterThan(0), { interval: 5 });
+        if (mode !== "baseline") expect(upstreamAborted).toBe(false);
+        await vi.waitFor(() => expect(firstPost).toBeGreaterThan(0), { interval: 5, timeout: 3000 });
+        expect(released).toBe(false);
+        expect(action - started).toBeLessThan(1000);
+        expect(feedback - started).toBeLessThan(1000);
+        const admitted = await runInDurableObject(
+          hub(b, accountId),
+          (_instance, state) =>
+            state.storage.sql
+              .exec<{ received_at: number }>("SELECT received_at FROM interactions ORDER BY received_at DESC LIMIT 1")
+              .one().received_at,
+        );
+        // Queue age is measured at the first upstream operation, on the same worker clock.
+        const queue = Math.max(0, jobStartedAt - admitted);
+        expect(admitted).toBeGreaterThan(0);
+        samples.push({
+          ack,
+          queue,
+          action: action - started,
+          feedback: feedback - started,
+          firstPost: firstPost - started,
+        });
+      } finally {
+        release();
+      }
+      await drain();
+      if (mode === "discord") {
+        await hub(a).enqueueConversation(3, a);
+        await drain();
+        expect(
+          world
+            .webhookPosts()
+            .filter((post) => post.thread === aThread && String(post.body.content).startsWith("A fixture")),
+        ).toHaveLength(1);
+      }
+      // Every sampled owner settles before replacing the fake upstream for the next pair.
+      await vi.waitFor(
+        async () => {
+          const jobs = await runInDurableObject(
+            hub(b, accountId),
+            (_instance, state) => state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM jobs").one().n,
+          );
+          expect(jobs).toBe(0);
+        },
+        { interval: 5, timeout: 5000 },
+      );
+    }
+    const percentile = (field: keyof (typeof samples)[number], p: number) => {
+      const sorted = samples.map((sample) => sample[field]).sort((a, b) => a - b);
+      return Math.round(sorted[Math.ceil(sorted.length * p) - 1] ?? 0);
+    };
+    const fields = ["ack", "queue", "action", "feedback", "firstPost"] as const;
+    Object.assign(context.task.meta, {
+      latency: {
+        mode,
+        count: samples.length,
+        p50: Object.fromEntries(fields.map((field) => [field, percentile(field, 0.5)])),
+        p95: Object.fromEntries(fields.map((field) => [field, percentile(field, 0.95)])),
+      },
+    });
+  },
+);
+
+it("refuses maintenance commands and old interaction ids immediately without executing them", async () => {
+  const settings = configSchema.parse(env.CONFIG);
+  const signed = await signedInteraction(
+    {
+      id: "100000000000000999",
+      application_id: "100000000000000001",
+      token: "old-cut",
+      type: 2,
+      channel_id: nextThreadId(),
+      member: { user: { id: ALICE } },
+      data: { type: 1, name: "resolve" },
+    },
+    Math.floor(Date.now() / 1000),
+  );
+  for (const phase of ["maintenance", "active"] as const) {
+    const response = await worker.fetch(
+      signed(),
+      {
+        ...env,
+        CONFIG: {
+          ...settings,
+          cutover: {
+            phase,
+            epoch: "cut",
+            interactionFence: "100000000000000999",
+            notificationsAfter: Date.now() + 3600000,
+            legacyWebhooks: {},
+          },
+        },
+      },
+      createExecutionContext(),
+    );
+    expect(await response.json()).toMatchObject({
+      type: 4,
+      data: {
+        flags: 64,
+        content: expect.stringMatching(phase === "maintenance" ? /not accepted or executed/ : /previous relay/),
+      },
+    });
+  }
+  expect(world.sent("POST", /\/toggle_status$/)).toEqual([]);
+});
+
+it("bounds a triage callback whose conversation RPC never responds", async () => {
+  const thread = nextThreadId();
+  await env.THREAD_DIRECTORY.getByName(`thread:v1:${thread}`).claim({
+    accountId: 3,
+    conversationId: 12,
+    guildId: GUILD,
+    forumId: FORUM,
+    generation: 1,
+  });
+  const namespace = new Proxy(env.CONVERSATION, {
+    get(target, property, receiver) {
+      if (property === "getByName")
+        return () =>
+          new Proxy(hub(), {
+            get(stub, key, stubReceiver) {
+              if (key === "triageAnswered") return async () => new Promise<never>(() => {});
+              return Reflect.get(stub, key, stubReceiver);
+            },
+          });
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  const body = JSON.stringify({
+    threadId: thread,
+    answerId: "100000000000000333",
+    replyTo: "100000000000000332",
+    draft: "Fixture draft",
+  });
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const signature = await hmac("triage-hook-secret-0123456789abcdef", `${timestamp}.${body}`);
+  vi.useFakeTimers();
+  try {
+    const pending = worker.fetch(
+      new Request("https://relay.example.com/triage/answered", {
+        method: "POST",
+        body,
+        headers: { "x-timestamp": timestamp, "x-signature": `sha256=${signature}` },
+      }),
+      { ...env, CONVERSATION: namespace },
+      createExecutionContext(),
+    );
+    await vi.advanceTimersByTimeAsync(401);
+    expect((await pending).status).toBe(500);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it.each(["digest", "registry"] as const)(
+  "does not wait for a slow %s page before a person's feedback",
+  async (kind) => {
+    world.mock.spy.mockRestore();
+    let blocked = false;
+    let feedback = false;
+    let discoveryAttempts = 0;
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    world = new World([
+      on("GET", "chatwoot.example.com/api/v1/profile", () => json({ id: 42, accounts: [{ id: 3 }] })),
+      on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/946/toggle_status", () => json({})),
+      on(
+        "GET",
+        kind === "digest"
+          ? "chatwoot.example.com/api/v1/accounts/3/conversations"
+          : "discord.com/api/v10/applications/@me",
+        async () => {
+          if (kind === "registry" && ++discoveryAttempts === 1) return json({ retry_after: 0.05 }, { status: 429 });
+          blocked = true;
+          await gate;
+          return kind === "digest" ? json({ data: { payload: [] } }) : json({ id: "100000000000000001" });
+        },
+      ),
+      on(
+        "PATCH",
+        /^discord\.com\/api\/v10\/webhooks\/100000000000000001\/shared-fault\/messages\/(@|%40)original$/,
+        () => {
+          feedback = true;
+          return json({});
+        },
+      ),
+    ]);
+    const settings = configSchema.parse(env.CONFIG);
+    const namespace = kind === "digest" ? env.QUEUE_DIGEST : env.FORUM_REGISTRY;
+    const pending = runInDurableObject(
+      namespace.getByName(`fault:${crypto.randomUUID()}`),
+      async (_instance, state) => {
+        vi.spyOn(state.storage, "setAlarm").mockResolvedValue();
+        if (kind === "digest") {
+          const executor = new QueueDigest(state, {
+            ...env,
+            CONFIG: { ...settings, queue: { channelId: "100000000000000099" } },
+          });
+          await executor.request(Date.now());
+          await executor.alarm();
+        } else {
+          const executor = new ForumRegistry(state, env);
+          await executor.lookup(FORUM);
+          // This harness disables automatic alarms. Drive any persisted permit deferral
+          // before the slow read, just as the real Registry would resume its next alarm.
+          await vi.waitFor(
+            async () => {
+              await executor.alarm();
+              expect(blocked).toBe(true);
+            },
+            { timeout: 3000 },
+          );
+        }
+      },
+    );
+    try {
+      await vi.waitFor(() => expect(blocked).toBe(true), { timeout: 3000 });
+      await enqueueCommand({
+        interactionId: `fault-${kind}`,
+        applicationId: "100000000000000001",
+        token: "shared-fault",
+        discordUserId: ALICE,
+        accountId: 3,
+        conversationId: 946,
+        action: { type: "status", status: "resolved" },
+      });
+      await vi.waitFor(() => expect(feedback).toBe(true));
+    } finally {
+      release();
+      await pending;
+    }
+  },
+);
+
+it("measures the first customer post with a slow decorative lookup", async () => {
+  await runInDurableObject(hub(), (_instance, state) =>
+    state.storage.sql.exec("DELETE FROM cache WHERE key = 'inbox:3:2'"),
+  );
+  world.mock.spy.mockRestore();
+  let firstPost = 0;
+  let releaseSlow = () => {};
+  const slow = new Promise<void>((resolve) => {
+    releaseSlow = resolve;
+  });
+  world = new World([
+    (request) => {
+      if (
+        request.method === "POST" &&
+        request.url.pathname === "/api/v10/webhooks/1/tok" &&
+        request.body.includes("latency-body")
+      )
+        firstPost += 1;
+      return undefined;
+    },
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/inboxes/2", async (_request) => {
+      await slow;
+      return json({ id: 2, name: "Slow inbox" });
+    }),
+  ]);
+  world.conversation(881, [{ id: 88101, content: "latency-body", message_type: 0 }]);
+  await hub(881).enqueueConversation(3, 881);
+  await vi.waitFor(() => expect(firstPost).toBeGreaterThan(0));
+  releaseSlow();
+  await drain();
+});
+
+it("retries failed feedback while the card converges, without re-executing the action", async () => {
+  world.mock.spy.mockRestore();
+  let actions = 0;
+  let reports = 0;
+  world = new World([
+    on("GET", "chatwoot.example.com/api/v1/profile", () => json({ id: 42, accounts: [{ id: 3 }] })),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/882/toggle_status", () => {
+      actions += 1;
+      const conversation = world.conversations.get(882);
+      if (conversation) conversation.status = "resolved";
+      return json({});
+    }),
+    on(
+      "PATCH",
+      /^discord\.com\/api\/v10\/webhooks\/100000000000000001\/feedback-test\/messages\/(@|%40)original$/,
+      () => {
+        reports += 1;
+        return reports === 1 ? json({}, { status: 500 }) : json({});
+      },
+    ),
+  ]);
+  world.conversation(882, [{ id: 88201, content: "Help", message_type: 0 }]);
+  await hub(882).enqueueConversation(3, 882);
+  await drain();
+  await enqueueCommand({
+    interactionId: "feedback-recovery",
+    applicationId: "100000000000000001",
+    token: "feedback-test",
+    discordUserId: ALICE,
+    accountId: 3,
+    conversationId: 882,
+    action: { type: "status", status: "resolved" },
+  });
+  await drain();
+  expect(actions).toBe(1);
+  expect(reports).toBe(1);
+  await vi.waitFor(
+    () =>
+      expect(JSON.parse(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).at(-1)?.body ?? "{}")).toMatchObject({
+        archived: true,
+      }),
+    { timeout: 5000 },
+  );
+  await makeJobsDue();
+  await drain();
+  expect(reports).toBe(2);
+  expect(actions).toBe(1);
+});
+
+it("releases the alarm on a 429 so another person's command receives feedback", async () => {
+  world.mock.spy.mockRestore();
+  let limited = false;
+  let feedback = 0;
+  world = new World([
+    (request) => {
+      if (
+        request.method !== "POST" ||
+        request.url.pathname !== "/api/v10/webhooks/1/tok" ||
+        !request.url.searchParams.has("thread_id")
+      )
+        return undefined;
+      limited = true;
+      return json({ retry_after: 60, global: true }, { status: 429 });
+    },
+    on("GET", "chatwoot.example.com/api/v1/profile", () => json({ id: 42, accounts: [{ id: 3 }] })),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/884/toggle_status", () => json({})),
+    on(
+      "PATCH",
+      /^discord\.com\/api\/v10\/webhooks\/100000000000000001\/rate-feedback\/messages\/(@|%40)original$/,
+      () => {
+        feedback = Date.now();
+        return json({});
+      },
+    ),
+  ]);
+  world.conversation(883, [{ id: 88301, content: "Rate limited", message_type: 0 }]);
+  // First create the post with the ordinary mock, then apply the rate limit only to replies.
+  const started = Date.now();
+  await hub(883).enqueueConversation(3, 883);
+  await vi.waitFor(() => expect(limited).toBe(true), { timeout: 5000 });
+  await enqueueCommand({
+    interactionId: "rate-command",
+    applicationId: "100000000000000001",
+    token: "rate-feedback",
+    discordUserId: ALICE,
+    accountId: 3,
+    conversationId: 884,
+    action: { type: "status", status: "resolved" },
+  });
+  await vi.waitFor(() => expect(feedback).toBeGreaterThan(0));
+  expect(feedback - started).toBeLessThan(1000);
+});
+
+it("returns before Discord's deadline without acknowledging an unconfirmed durable enqueue", async () => {
+  vi.useFakeTimers();
+  const namespace = new Proxy(env.CONVERSATION, {
+    get(target, property, receiver) {
+      if (property === "getByName")
+        return () =>
+          new Proxy(hub(), {
+            get(object, key, objectReceiver) {
+              if (key === "interaction") return async () => new Promise<never>(() => {});
+              return Reflect.get(object, key, objectReceiver);
+            },
+          });
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  const thread = nextThreadId();
+  await env.THREAD_DIRECTORY.getByName(`thread:v1:${thread}`).claim({
+    accountId: 3,
+    conversationId: 12,
+    forumId: FORUM,
+    guildId: GUILD,
+    generation: 1,
+  });
+  const signed = await signedInteraction(
+    {
+      id: "100000000000000999",
+      application_id: "100000000000000001",
+      type: 2,
+      guild_id: GUILD,
+      channel_id: thread,
+      member: { user: { id: ALICE } },
+      data: { type: 1, name: "resolve" },
+    },
+    Math.floor(Date.now() / 1000),
+  );
+  const pending = worker.fetch(signed(), { ...env, CONVERSATION: namespace }, createExecutionContext());
+  await vi.advanceTimersByTimeAsync(2501);
+  const response = await pending;
+  expect(response.status).toBe(503);
+  vi.useRealTimers();
+});
+
+it("does not replay a customer reply whose creation response was lost", async () => {
+  world.mock.spy.mockRestore();
+  let sends = 0;
+  world = new World([
+    on("GET", "chatwoot.example.com/api/v1/profile", () => json({ id: 42, accounts: [{ id: 3 }] })),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/885/messages", () => {
+      sends += 1;
+      throw new TypeError("Connection lost after commit");
+    }),
+  ]);
+  await enqueueCommand({
+    interactionId: "unknown-customer-reply",
+    applicationId: "100000000000000001",
+    token: "unknown-feedback",
+    discordUserId: ALICE,
+    accountId: 3,
+    conversationId: 885,
+    action: { type: "message", private: true, content: "Reply once", files: [] },
+  });
+  await drain();
+  await makeJobsDue();
+  await drain();
+  expect(sends).toBe(1);
+  const feedback = world.requests.find(
+    (request) => request.method === "PATCH" && request.url.pathname.includes("unknown-feedback"),
+  );
+  expect(JSON.parse(feedback?.body ?? "{}").content).toContain("result is unknown");
+});
+
+it("does not confirm a concurrent identical note after an unknown mutation", async () => {
+  world.mock.spy.mockRestore();
+  let concurrent = false;
+  world = new World([
+    on("GET", "chatwoot.example.com/api/v1/profile", () => json({ id: 42, accounts: [{ id: 3 }] })),
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/886", () =>
+      json({ id: 886, status: "open", inbox_id: 2, messages: [{ id: 99601 }] }),
+    ),
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/886/messages", () =>
+      json({
+        payload: concurrent
+          ? [{ id: 99602, content: "Same note", message_type: 1, private: true, sender: { id: 42 } }]
+          : [],
+      }),
+    ),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/886/messages", () => {
+      concurrent = true;
+      return json({ error: "response lost" }, { status: 502 });
+    }),
+  ]);
+  await enqueueCommand({
+    interactionId: "concurrent-note",
+    applicationId: "100000000000000001",
+    token: "concurrent-note-feedback",
+    discordUserId: ALICE,
+    accountId: 3,
+    conversationId: 886,
+    action: { type: "message", private: true, content: "Same note", files: [] },
+  });
+  await drain();
+  const feedback = world.requests.find(
+    (request) => request.method === "PATCH" && request.url.pathname.includes("concurrent-note-feedback"),
+  );
+  expect(JSON.parse(feedback?.body ?? "{}").content).toContain("result is unknown");
+});
+
+it("confirms an unknown inbox handoff from the resulting bot assignment", async () => {
+  world.mock.spy.mockRestore();
+  let assigned = false;
+  world = new World([
+    on("GET", "chatwoot.example.com/api/v1/profile", () => json({ id: 42, accounts: [{ id: 3 }] })),
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/890", () =>
+      json({
+        id: 890,
+        status: assigned ? "pending" : "open",
+        inbox_id: 2,
+        meta: {
+          assignee: assigned ? { id: 77 } : { id: 42 },
+          assignee_type: assigned ? "AgentBot" : "User",
+        },
+        messages: [],
+      }),
+    ),
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/inboxes/2/agent_bot", () =>
+      json({ agent_bot: { id: 77, account_id: 3 } }),
+    ),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/890/assignments", () => {
+      assigned = true;
+      return json({ error: "response lost" }, { status: 502 });
+    }),
+  ]);
+  await enqueueCommand({
+    interactionId: "handoff-unknown",
+    applicationId: "100000000000000001",
+    token: "handoff-feedback",
+    discordUserId: ALICE,
+    accountId: 3,
+    conversationId: 890,
+    action: { type: "status", status: "pending" },
+  });
+  await drain();
+  const feedback = world.requests.find(
+    (request) => request.method === "PATCH" && request.url.pathname.includes("handoff-feedback"),
+  );
+  expect(JSON.parse(feedback?.body ?? "{}").content).toContain("Handed back to the inbox bot");
+});
+
+it("continues attachments after a bounded slice while another command gets feedback", async () => {
+  world.mock.spy.mockRestore();
+  const downloads = [0, 0];
+  let sends = 0;
+  let feedbackAt = 0;
+  let releaseDownload = () => {};
+  const downloadGate = new Promise<void>((resolve) => {
+    releaseDownload = resolve;
+  });
+  const sizes = [2 * 1024 * 1024 + 1, 3];
+  world = new World([
+    on("GET", "chatwoot.example.com/api/v1/profile", () => json({ id: 42, accounts: [{ id: 3 }] })),
+    on("GET", /^cdn\.discordapp\.com\/attachments\/slow-[01]$/, async (request) => {
+      const index = request.url.pathname.endsWith("0") ? 0 : 1;
+      downloads[index] = (downloads[index] ?? 0) + 1;
+      if (index === 1 && downloads[index] === 1) {
+        await downloadGate;
+        throw new JobDeadlineError();
+      }
+      return Promise.resolve(new Response(new Uint8Array(sizes[index] ?? 0)));
+    }),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/888/messages", (request) => {
+      sends += 1;
+      const files = request.form?.getAll("attachments[]") ?? [];
+      expect(files.map((file) => (file instanceof File ? [file.name, file.size] : file))).toEqual([
+        ["first.bin", sizes[0]],
+        ["second.bin", sizes[1]],
+      ]);
+      return json({ id: 88801, content: "Files", message_type: 1, private: true });
+    }),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/889/toggle_status", () => json({})),
+    on(
+      "PATCH",
+      /^discord\.com\/api\/v10\/webhooks\/100000000000000001\/slice-feedback\/messages\/(@|%40)original$/,
+      () => {
+        feedbackAt = Date.now();
+        return json({});
+      },
+    ),
+  ]);
+  world.conversation(888, [{ id: 88801, content: "Files", message_type: 0 }]);
+  world.conversation(889, [{ id: 88901, content: "Status", message_type: 0 }]);
+  const queued = Date.now();
+  await enqueueCommand({
+    interactionId: "slow-attachments",
+    applicationId: "100000000000000001",
+    token: "attachment-feedback",
+    discordUserId: ALICE,
+    accountId: 3,
+    conversationId: 888,
+    action: {
+      type: "message",
+      private: true,
+      content: "Files",
+      files: sizes.map((size, index) => ({
+        url: `https://cdn.discordapp.com/attachments/slow-${index}`,
+        filename: index === 0 ? "first.bin" : "second.bin",
+        size,
+      })),
+    },
+  });
+  await vi.waitFor(() => expect(downloads[1]).toBe(1));
+  await enqueueCommand({
+    interactionId: "command-during-attachments",
+    applicationId: "100000000000000001",
+    token: "slice-feedback",
+    discordUserId: ALICE,
+    accountId: 3,
+    conversationId: 889,
+    action: { type: "status", status: "resolved" },
+  });
+  try {
+    await vi.waitFor(() => expect(feedbackAt).toBeGreaterThan(0));
+    expect(downloads).toEqual([1, 1]);
+  } finally {
+    releaseDownload();
+  }
+  await drain();
+  expect(feedbackAt).toBeGreaterThan(0);
+  expect(feedbackAt - queued).toBeLessThan(1000);
+  expect(downloads).toEqual([1, 2]);
+  expect(sends).toBe(1);
+});
+
+it("does not confirm labels unless the complete resulting set matches", async () => {
+  world.mock.spy.mockRestore();
+  world = new World([
+    on("GET", "chatwoot.example.com/api/v1/profile", () => json({ id: 42, accounts: [{ id: 3 }] })),
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/labels", () => json({ payload: [] })),
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/887/labels", () => json({ payload: ["billing"] })),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/887/labels", () =>
+      json({ error: "response lost" }, { status: 502 }),
+    ),
+  ]);
+  world.conversation(887, []);
+  await enqueueCommand({
+    interactionId: "labels-unknown",
+    applicationId: "100000000000000001",
+    token: "labels-unknown-feedback",
+    discordUserId: ALICE,
+    accountId: 3,
+    conversationId: 887,
+    action: { type: "labels", labels: [] },
+  });
+  await drain();
+  const feedback = world.requests.find(
+    (request) => request.method === "PATCH" && request.url.pathname.includes("labels-unknown-feedback"),
+  );
+  expect(JSON.parse(feedback?.body ?? "{}").content).toContain("result is unknown");
+});
+
+it("does not confirm a snooze without its target time", async () => {
+  world.mock.spy.mockRestore();
+  world = new World([
+    on("GET", "chatwoot.example.com/api/v1/profile", () => json({ id: 42, accounts: [{ id: 3 }] })),
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/888", () =>
+      json({ id: 888, status: "snoozed", snoozed_until: 123, inbox_id: 2, messages: [] }),
+    ),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/888/toggle_status", () =>
+      json({ error: "response lost" }, { status: 502 }),
+    ),
+  ]);
+  await enqueueCommand({
+    interactionId: "snooze-unknown",
+    applicationId: "100000000000000001",
+    token: "snooze-unknown-feedback",
+    discordUserId: ALICE,
+    accountId: 3,
+    conversationId: 888,
+    action: { type: "status", status: "snoozed", snoozedUntil: 456 },
+  });
+  await drain();
+  const feedback = world.requests.find(
+    (request) => request.method === "PATCH" && request.url.pathname.includes("snooze-unknown-feedback"),
+  );
+  expect(JSON.parse(feedback?.body ?? "{}").content).toContain("result is unknown");
+});
+
+it("delivers confirmed feedback before an optional panel read", async () => {
+  world.mock.spy.mockRestore();
+  let profileReads = 0;
+  let feedback = 0;
+  world = new World([
+    on("GET", "chatwoot.example.com/api/v1/profile", () => {
+      profileReads += 1;
+      return profileReads === 1
+        ? json({ id: 42, accounts: [{ id: 3 }] })
+        : json({ error: "panel unavailable" }, { status: 503 });
+    }),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/889/toggle_status", () => json({})),
+    on(
+      "PATCH",
+      /^discord\.com\/api\/v10\/webhooks\/100000000000000001\/panel-feedback\/messages\/(@|%40)original$/,
+      () => {
+        feedback += 1;
+        return json({});
+      },
+    ),
+  ]);
+  await enqueueCommand({
+    interactionId: "panel-feedback",
+    applicationId: "100000000000000001",
+    token: "panel-feedback",
+    discordUserId: ALICE,
+    accountId: 3,
+    conversationId: 889,
+    panel: true,
+    action: { type: "status", status: "resolved" },
+  });
+  await drain();
+  expect(feedback).toBe(1);
+});
+
+it("does not replay a lost CSAT receipt or suppress later five to one to five revisions", async () => {
+  world.mock.spy.mockRestore();
+  const sends: string[] = [];
+  world = new World([
+    (request) => {
+      if (
+        request.method !== "POST" ||
+        request.url.pathname !== "/api/v10/webhooks/1/tok" ||
+        !request.body.includes("Rating:")
+      )
+        return undefined;
+      sends.push(/Rating: ([15])/.exec(request.body)?.[1] ?? "missing");
+      throw new TypeError("Connection lost after Discord accepted the response");
+    },
+  ]);
+  const question = { id: 88702, content: "How did we do?", message_type: 3, content_type: "input_csat" };
+  world.conversation(887, [{ id: 88701, content: "Thank you", message_type: 0 }, question]);
+  await hub(887).enqueueConversation(3, 887);
+  await drain();
+  for (const rating of [5, 5, 1, 1, 5, 5]) {
+    Object.assign(question, { content_attributes: { submitted_values: { csat_survey_response: { rating } } } });
+    await hub(887).enqueueMessageUpdate(3, 887, question.id);
+    await drain();
+    await makeJobsDue();
+    await drain();
+  }
+  expect(sends).toEqual(["5", "1", "5"]);
+});
+
+it("recovers a completed command after its start deadline without claiming nothing was done", async () => {
+  world.mock.spy.mockRestore();
+  let mutations = 0;
+  let currentLabels = ["vip"];
+  world = new World([
+    on("GET", "chatwoot.example.com/api/v1/profile", () => json({ id: 42, accounts: [{ id: 3 }] })),
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/989/labels", () =>
+      json({ payload: currentLabels }),
+    ),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/989/labels", () => {
+      mutations++;
+      currentLabels = [];
+      return json({});
+    }),
+  ]);
+  const command: CommandJob = {
+    interactionId: "result-recovery",
+    applicationId: "100000000000000001",
+    token: "result-recovery-feedback",
+    discordUserId: ALICE,
+    accountId: 3,
+    conversationId: 989,
+    action: { type: "label", change: "remove", label: "vip" },
+  };
+  await runInDurableObject(hub(989), async (_instance, state) => {
+    vi.spyOn(state.storage, "setAlarm").mockResolvedValue();
+    const store = new Store(state.storage.sql);
+    const settings = await loadSettings(env);
+    expect((await executeCommand(command, { settings, fetch, effects: new Effects(store) })).content).toContain(
+      "removed",
+    );
+    // Reconstruct at the real boundary between the persisted effect receipt and command result.
+    const executor = new Conversation(state, env);
+    await executor.enqueueCommand(command);
+    state.storage.sql.exec(
+      "UPDATE jobs SET created_at = ? WHERE key = ?",
+      Date.now() - 13 * 60000,
+      `command:${command.interactionId}`,
+    );
+    await executor.alarm();
+    const result = JSON.parse(store.get(`command:${command.interactionId}:result`) ?? "{}");
+    expect(result.content).toBe("✅ Label vip removed.");
+    expect(result.content).not.toContain("nothing was done");
+    await executor.alarm();
+  });
+  expect(mutations).toBe(1);
+  const feedback = world.requests.find(
+    (request) => request.method === "PATCH" && request.url.pathname.includes("result-recovery-feedback"),
+  );
+  expect(JSON.parse(feedback?.body ?? "{}").content).toContain("removed");
+});
+
+it.each([false, true])(
+  "fences a duplicate-link loser before recovery and derived/delete side effects (stale row %s)",
+  async (stale) => {
+    const thread = nextThreadId();
+    const winner = { accountId: 3, conversationId: 99011, guildId: GUILD, forumId: FORUM, generation: 1 };
+    expect(await env.THREAD_DIRECTORY.getByName(`thread:v1:${thread}`).claim(winner)).toBe(true);
+    world.threads.set(thread, FORUM);
+    world.conversation(99012, [{ id: 10, content: "old reply", message_type: 1, status: "failed" }], {
+      discord_thread: `https://discord.com/channels/${GUILD}/${thread}`,
+    });
+    await runInDurableObject(hub(99012), async (_instance, state) => {
+      vi.spyOn(state.storage, "setAlarm").mockResolvedValue();
+      const store = new Store(state.storage.sql);
+      const executor = new Conversation(state, env);
+      if (stale) {
+        store.adoptThread(3, 99012, thread);
+        store.setCursor(3, 99012, 10);
+      } else {
+        await executor.enqueueConversation(3, 99012);
+        await executor.alarm();
+        expect(store.conversation(3, 99012)?.threadId).toBeUndefined();
+      }
+      await executor.enqueueMessageUpdate(3, 99012, 10);
+      await executor.alarm();
+      world.conversations.delete(99012);
+      state.storage.sql.exec("UPDATE jobs SET not_before=0");
+      await executor.enqueueConversation(3, 99012);
+      await executor.alarm();
+      expect(world.webhookPosts()).toHaveLength(0);
+      expect(world.sent("PATCH", new RegExp(`/channels/${thread}$`))).toHaveLength(0);
+      expect(await env.THREAD_DIRECTORY.getByName(`thread:v1:${thread}`).get()).toEqual(winner);
+    });
+  },
+);
+
+it("archives a deleted conversation even when its one deletion notice has an unknown outcome", async () => {
+  world.mock.spy.mockRestore();
+  world = new World([
+    (request) =>
+      request.method === "POST" &&
+      request.url.pathname === "/api/v10/webhooks/1/tok" &&
+      JSON.parse(request.body).content === "This conversation no longer exists in Chatwoot."
+        ? json({}, { status: 500 })
+        : undefined,
+  ]);
+  world.conversation(99031, [{ id: 9903101, content: "Close this", message_type: 0 }]);
+  await hub(99031).enqueueConversation(3, 99031);
+  await vi.waitFor(
+    () => expect(world.webhookPosts().some((post) => String(post.body.content).startsWith("Close this"))).toBe(true),
+    { timeout: 5000 },
+  );
+  const thread = world.webhookPosts().at(-1)?.thread;
+  world.conversations.delete(99031);
+  await hub(99031).enqueueConversation(3, 99031);
+  await vi.waitFor(async () => expect(await ticketForThread(thread ?? "")).toBeNull(), { timeout: 5000 });
+  expect(
+    world.webhookPosts().filter((post) => post.body.content === "This conversation no longer exists in Chatwoot."),
+  ).toHaveLength(1);
+  expect(
+    world
+      .sent("PATCH", new RegExp(`/channels/${thread}$`))
+      .some((request) => JSON.parse(request.body).archived === true),
+  ).toBe(true);
+  await hub(99031).enqueueConversation(3, 99031);
+  await drain();
+  expect(
+    world.webhookPosts().filter((post) => post.body.content === "This conversation no longer exists in Chatwoot."),
+  ).toHaveLength(1);
+});

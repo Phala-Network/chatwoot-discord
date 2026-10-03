@@ -2,20 +2,25 @@ export function retryDelay(attempts: number): number {
   return Math.min(5000 * 2 ** attempts, 30 * 60 * 1000);
 }
 
-export interface Job {
+export type Job = {
   key: string;
   payload: string;
   version: number;
   attempts: number;
   /** When the job was first queued (ms since the epoch). */
   createdAt: number;
-}
+};
 
 export class QueueStore {
   constructor(
     protected readonly sql: SqlStorage,
     protected readonly now: () => number = Date.now,
+    private readonly atomic: <T>(write: () => T) => T = (write) => write(),
   ) {}
+
+  transaction<T>(write: () => T): T {
+    return this.atomic(write);
+  }
 
   migrate(): void {
     this.sql.exec(`CREATE TABLE IF NOT EXISTS jobs (
@@ -74,16 +79,23 @@ export class QueueStore {
   }
 
   nextDueJob(): Job | undefined {
-    const row = this.sql
-      .exec<{ key: string; payload: string; version: number; attempts: number; created_at: number }>(
-        `SELECT key, payload, version, attempts, created_at FROM jobs WHERE suspended != 2 AND not_before <= ?
-         ORDER BY priority, not_before, created_at LIMIT 1`,
+    return this.nextDueJobs(1)[0];
+  }
+
+  /** A bounded due batch; independent scan and delivery work can select their own keys. */
+  nextDueJobs(limit: number, prefix = ""): Job[] {
+    return this.sql
+      .exec<Job>(
+        `SELECT key, payload, version, attempts, created_at AS createdAt FROM jobs
+         WHERE suspended != 2 AND not_before <= ? AND substr(key, 1, ?) = ?
+         ORDER BY MAX(0, priority - CAST((? - created_at) / 30000 AS INTEGER)), not_before, created_at LIMIT ?`,
         this.now(),
+        prefix.length,
+        prefix,
+        this.now(),
+        limit,
       )
-      .toArray()[0];
-    if (!row) return undefined;
-    const { created_at: createdAt, ...job } = row;
-    return { ...job, createdAt };
+      .toArray();
   }
 
   /** Earliest due time. */

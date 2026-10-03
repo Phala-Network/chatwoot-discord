@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Budget } from "../../../shared/budget.ts";
-import { executeCommand } from "../src/commands/actions.ts";
+import { Budget, JobDeadlineError } from "../../../shared/budget.ts";
+import { type CommandExecution, commandPanel, executeCommand } from "../src/commands/actions.ts";
 import type { CommandAction, CommandJob } from "../src/commands/job.ts";
+import { Effects } from "../src/effects.ts";
 import { ALICE, BOB, json, mockFetch, on, type Route, testSettings } from "./helpers.ts";
 
 const settings = testSettings();
@@ -23,21 +24,156 @@ function job(action: CommandAction, discordUserId = ALICE): CommandJob {
 const profile = on("GET", `${cw}/profile`, () =>
   json({ id: 42, name: "Alice Example", available_name: "Alice", email: "alice@example.com", accounts: [{ id: 3 }] }),
 );
-const ok = (method: string, path: string) => on(method, path, () => json({}));
+const ok = (method: string, path: string) =>
+  on(method, path, () =>
+    json(path.endsWith("/messages") ? { id: 900, content: "ok", message_type: 1, private: true } : {}),
+  );
 
 function run(action: CommandAction, ...routes: Route[]) {
   return runWith(settings, action, ...routes);
 }
 
 function runWith(given: typeof settings, action: CommandAction, ...routes: Route[]) {
-  const mock = mockFetch(profile, ...routes);
-  const outcome = executeCommand(job(action), given, (request) => fetch(request));
+  const mock = mockFetch(
+    profile,
+    ...routes,
+    on("GET", conversation, () => json({ id: 15, status: "open", inbox_id: 2 })),
+  );
+  const execution: CommandExecution = {
+    settings: given,
+    fetch: (request) => fetch(request),
+  };
+  const outcome = executeCommand(job(action), execution);
   return { outcome, result: outcome.then(({ content }) => content), requests: mock.requests };
 }
 
 afterEach(() => vi.restoreAllMocks());
 
 describe("executeCommand", () => {
+  it("does not skip an unknown reply assignment target when the fresh assignee is present but its status mismatches", async () => {
+    const rows = new Map<string, string>();
+    const effects = new Effects({ get: (key) => rows.get(key), set: (key, value) => rows.set(key, value) });
+    effects.save("command:1:assign", {
+      state: "UNKNOWN",
+      startedAt: Date.now(),
+      request: {
+        kind: "assignment",
+        id: 42,
+        type: "User",
+        inboxId: 2,
+        status: "open",
+      },
+    });
+    const mock = mockFetch(
+      profile,
+      on("GET", conversation, () =>
+        json({ id: 15, inbox_id: 2, status: "pending", meta: { assignee_type: "User", assignee: { id: 42 } } }),
+      ),
+      ok("POST", `${conversation}/messages`),
+    );
+    const result = await executeCommand(job({ type: "message", private: false, content: "Hello", files: [] }), {
+      settings,
+      fetch,
+      effects,
+    });
+    expect(result.content).toContain("result is unknown");
+    expect(mock.requests.filter((request) => request.method === "POST")).toHaveLength(0);
+  });
+
+  it("recovers a confirmed handoff after result loss without changing paths when the inbox bot disconnects", async () => {
+    const rows = new Map<string, string>();
+    const effects = () => new Effects({ get: (key) => rows.get(key), set: (key, value) => rows.set(key, value) });
+    let connected = true;
+    const mock = mockFetch(
+      profile,
+      on("GET", conversation, () => json({ id: 15, status: "open", inbox_id: 2 })),
+      on("GET", `${cw}/accounts/3/inboxes/2/agent_bot`, () =>
+        json({ agent_bot: connected ? { id: 77, account_id: 3 } : null }),
+      ),
+      ok("POST", `${conversation}/assignments`),
+      ok("POST", `${conversation}/toggle_status`),
+    );
+    const command = job({ type: "status", status: "pending" });
+    expect((await executeCommand(command, { settings, fetch, effects: effects() })).content).toContain("Handed back");
+    connected = false;
+    expect((await executeCommand(command, { settings, fetch, effects: effects() })).content).toContain("Handed back");
+    expect(mock.requests.filter((request) => request.method === "POST").map((request) => request.url.pathname)).toEqual(
+      ["/api/v1/accounts/3/conversations/15/assignments"],
+    );
+  });
+
+  it.each(["add", "remove"] as const)(
+    "recovers the original full label target for %s after losing the command result",
+    async (change) => {
+      const rows = new Map<string, string>();
+      const effects = () => new Effects({ get: (key) => rows.get(key), set: (key, value) => rows.set(key, value) });
+      let labels = ["refund", ...(change === "remove" ? ["vip"] : [])];
+      const mock = mockFetch(
+        profile,
+        on("GET", `${cw}/accounts/3/labels`, () => json({ payload: [{ title: "vip" }, { title: "refund" }] })),
+        on("GET", `${conversation}/labels`, () => json({ payload: labels })),
+        on("POST", `${conversation}/labels`, () => {
+          labels = change === "add" ? ["vip"] : ["refund"];
+          return change === "add" ? json({}, { status: 502 }) : json({});
+        }),
+      );
+      const command = job({ type: "label", change, label: "vip" });
+      const first = await executeCommand(command, { settings, fetch, effects: effects() });
+      const resumed = await executeCommand(command, { settings, fetch, effects: effects() });
+      if (change === "add") expect(resumed.content).toContain("result is unknown");
+      else expect(resumed.content).toBe("✅ Label vip removed.");
+      expect(resumed.content).toBe(first.content);
+      expect(mock.requests.filter((request) => request.method === "POST")).toHaveLength(1);
+    },
+  );
+
+  it("reports an already confirmed reply even if its channel reply window closes before result recovery", async () => {
+    const rows = new Map<string, string>();
+    const effects = () => new Effects({ get: (key) => rows.get(key), set: (key, value) => rows.set(key, value) });
+    let canReply = true;
+    const mock = mockFetch(
+      profile,
+      on("GET", conversation, () =>
+        json({ id: 15, status: "open", can_reply: canReply, meta: { assignee: { id: 42 } } }),
+      ),
+      ok("POST", `${conversation}/messages`),
+    );
+    const command = job({ type: "message", private: false, content: "Reply", files: [] });
+    const first = await executeCommand(command, { settings, fetch, effects: effects() });
+    canReply = false;
+    expect((await executeCommand(command, { settings, fetch, effects: effects() })).content).toBe(first.content);
+    expect(mock.requests.filter((request) => request.method === "POST")).toHaveLength(1);
+  });
+
+  it("resumes a partial block against the original contact without resolving twice", async () => {
+    const rows = new Map<string, string>();
+    const effects = () => new Effects({ get: (key) => rows.get(key), set: (key, value) => rows.set(key, value) });
+    let contact = 77;
+    let attempts = 0;
+    const mock = mockFetch(
+      profile,
+      on("GET", conversation, () => json({ id: 15, status: "open", meta: { sender: { id: contact } } })),
+      ok("POST", `${conversation}/toggle_status`),
+      on("PUT", `${cw}/accounts/3/contacts/77`, () => {
+        if (++attempts === 1) throw new JobDeadlineError(false);
+        return json({});
+      }),
+      ok("PUT", `${cw}/accounts/3/contacts/99`),
+    );
+    const command = job({ type: "block" });
+    await expect(executeCommand(command, { settings, fetch, effects: effects() })).rejects.toBeInstanceOf(
+      JobDeadlineError,
+    );
+    contact = 99;
+    expect((await executeCommand(command, { settings, fetch, effects: effects() })).content).toContain(
+      "Contact blocked",
+    );
+    expect(mock.requests.filter((request) => request.method === "POST")).toHaveLength(1);
+    expect(mock.requests.filter((request) => request.method === "PUT").map((request) => request.url.pathname)).toEqual([
+      "/api/v1/accounts/3/contacts/77",
+      "/api/v1/accounts/3/contacts/77",
+    ]);
+  });
   it("acts with the invoking agent's own token", async () => {
     const { result, requests } = run(
       { type: "status", status: "resolved" },
@@ -46,6 +182,21 @@ describe("executeCommand", () => {
     expect(await result).toBe("✅ Resolved.");
     expect(requests.every((request) => request.headers.get("api_access_token") === "token-alice")).toBe(true);
     expect(JSON.parse(requests.at(-1)?.body ?? "")).toEqual({ status: "resolved" });
+  });
+
+  it("confirms a Chatwoot mutation accepted before a 500 response", async () => {
+    let status = "open";
+    const { result } = runWith(
+      settings,
+      { type: "status", status: "resolved" },
+      on("POST", `${conversation}/toggle_status`, () => {
+        status = "resolved";
+        return json({ error: "proxy lost the response" }, { status: 502 });
+      }),
+      on("GET", conversation, () => json({ id: 15, status })),
+    );
+    const outcome = await result;
+    expect(outcome).toBe("✅ Resolved.");
   });
 
   it("reopens", async () => {
@@ -284,7 +435,9 @@ describe("executeCommand", () => {
     mockFetch(
       on("GET", `${cw}/profile`, () => json({ id: 42, name: "A", email: "a@example.com", accounts: [{ id: 99 }] })),
     );
-    expect((await executeCommand(job({ type: "block" }), settings, (request) => fetch(request))).content).toBe(
+    expect(
+      (await executeCommand(job({ type: "block" }), { settings, fetch: (request) => fetch(request) })).content,
+    ).toBe(
       "❌ Your Chatwoot user is no longer an agent in this Chatwoot account. Ask an admin to add you back, or to unlink your Discord account.",
     );
   });
@@ -296,11 +449,10 @@ describe("executeCommand", () => {
       ),
       ok("POST", `${conversation}/messages`),
     );
-    const { content } = await executeCommand(
-      job({ type: "message", private: true, content: "hi", files: [] }),
+    const { content } = await executeCommand(job({ type: "message", private: true, content: "hi", files: [] }), {
       settings,
-      (request) => fetch(request),
-    );
+      fetch: (request) => fetch(request),
+    });
     expect(content).toBe(
       "❌ Your Chatwoot access token belongs to another Chatwoot user, so nothing was done. Ask an admin to fix your link.",
     );
@@ -315,7 +467,7 @@ describe("executeCommand", () => {
         () => new Response(null, { status: 301, headers: { location: "https://evil.example/" } }),
       ),
     );
-    const { content } = await executeCommand(job({ type: "block" }), settings, (request) => fetch(request));
+    const { content } = await executeCommand(job({ type: "block" }), { settings, fetch: (request) => fetch(request) });
     expect(content).toBe("❌ That did not work. Please do it in Chatwoot.");
     expect(requests.map((request) => [request.url.hostname, request.redirect])).toEqual([
       ["chatwoot.example.com", "manual"],
@@ -325,7 +477,10 @@ describe("executeCommand", () => {
   it("refuses a queued command once its invoker is no longer linked", async () => {
     const unlinked = testSettings({ agents: [{ discordUserId: BOB, chatwootUserId: 43 }] });
     const { requests } = mockFetch(profile);
-    const { content } = await executeCommand(job({ type: "block" }), unlinked, (request) => fetch(request));
+    const { content } = await executeCommand(job({ type: "block" }), {
+      settings: unlinked,
+      fetch: (request) => fetch(request),
+    });
     expect(content).toBe("❌ Your Discord account is not linked to a Chatwoot agent.");
     expect(requests).toEqual([]);
   });
@@ -497,11 +652,11 @@ describe("executeCommand", () => {
 
     it("draws it again after a change from the panel, with what was done", async () => {
       const mock = mockFetch(profile, agents, ok("POST", `${conversation}/assignments`), state, labels);
-      const { content, components } = await executeCommand(
-        { ...job({ type: "assign", chatwootUserId: 43 }), panel: true },
-        settings,
-        (request) => fetch(request),
-      );
+      const command = { ...job({ type: "assign" as const, chatwootUserId: 43 }), panel: true };
+      const result = await executeCommand(command, { settings, fetch: (request) => fetch(request) });
+      const content = result.content;
+      expect(result.components).toBeUndefined();
+      const components = await commandPanel(command, result, settings, (request) => fetch(request));
       expect(content).toBe("✅ Assigned to Bob Example.");
       expect(card(components).parts[0]).toBe("### Acme #15 · Jane <\u200b@123>\n✅ Assigned to Bob Example.");
       expect(mock.requests.some((request) => request.url.pathname.endsWith("/assignments"))).toBe(true);
@@ -563,7 +718,7 @@ describe("executeCommand", () => {
         json({ error: "PG::ConnectionBad secret details" }, { status: 500 }),
       ),
     );
-    expect(await result).toBe("❌ That did not work. Please do it in Chatwoot.");
+    expect(await result).toBe("❌ The result is unknown. Check in Chatwoot before trying again.");
   });
 
   it("gives up on a request that does not answer in time, saying it may have been done", async () => {
@@ -574,11 +729,10 @@ describe("executeCommand", () => {
         : new Promise<Response>((_resolve, reject) => {
             request.signal.addEventListener("abort", () => reject(request.signal.reason));
           });
-    const { content } = await executeCommand(
-      job({ type: "status", status: "resolved" }),
+    const { content } = await executeCommand(job({ type: "status", status: "resolved" }), {
       settings,
-      new Budget(20, hanging, 20).fetch,
-    );
-    expect(content).toMatch(/^❌ Chatwoot or Discord did not answer in time\. Check in Chatwoot whether it was done/);
+      fetch: new Budget(20, hanging).fetchWith(20),
+    });
+    expect(content).toContain("result is unknown");
   });
 });

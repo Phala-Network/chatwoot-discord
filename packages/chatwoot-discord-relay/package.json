@@ -31,6 +31,10 @@
     "./stored-config": {
       "types": "./lib/packages/chatwoot-discord-relay/scripts/stored-config.d.ts",
       "default": "./lib/packages/chatwoot-discord-relay/scripts/stored-config.js"
+    },
+    "./operator": {
+      "types": "./lib/packages/chatwoot-discord-relay/src/operator.d.ts",
+      "default": "./lib/packages/chatwoot-discord-relay/src/operator.js"
     }
   },
   "bin": {
@@ -42,7 +46,10 @@
     "lib/shared",
     "CHANGELOG.md",
     "LICENSE",
-    "docs/assets"
+    "docs/assets",
+    "docs/adoption.md",
+    "docs/operator.ts",
+    "docs/operator.config.ts"
   ],
   "packageManager": "npm@12.1.0",
   "engines": {

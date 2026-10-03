@@ -33,6 +33,16 @@ import { assignedLine, assigneeKey, Notifier, type TriageOptions } from "./notif
 
 export type WebhookMessage = RESTPostAPIWebhookWithTokenJSONBody;
 type MessageComponents = NonNullable<WebhookMessage["components"]>;
+interface PlannedPart {
+  message: WebhookMessage;
+  plainContent: string;
+  notification?: NotificationExpiry;
+}
+
+export interface NotificationExpiry {
+  expiresAt: number;
+  contentWithoutTriage: string;
+}
 
 /** Thrown by a ForumClient when a post no longer exists in Discord (e.g. it was deleted). */
 export class UnknownThreadError extends Error {
@@ -42,13 +52,20 @@ export class UnknownThreadError extends Error {
   }
 }
 
+export type SendOutcome =
+  | { state: "confirmed"; channelId: string; messageId: string }
+  | { state: "unknown" | "rejected" };
+
 export interface ForumClient {
   /** Executes the forum's webhook. Without `threadId`, `message.thread_name` starts a new post. */
   execute(
     forumChannelId: string,
     message: WebhookMessage,
     threadId?: string,
-  ): Promise<{ channelId: string; messageId: string }>;
+    sendKey?: string,
+    checkpoint?: (receipt: { channelId: string; messageId: string }) => void,
+    notification?: NotificationExpiry,
+  ): Promise<SendOutcome>;
   /**
    * Modifies a post of the forum. Discord rejects changes to an archived post unless the same
    * request unarchives it. Throws UnknownThreadError if the post no longer exists.
@@ -60,11 +77,6 @@ export interface ForumClient {
   ): Promise<void>;
   /** Edits a message the forum's webhook posted; false if the message no longer exists. */
   editMessage(forumChannelId: string, threadId: string, messageId: string, message: WebhookMessage): Promise<boolean>;
-  /**
-   * The cards (Components V2 messages) the forum's webhook posted among the page of a post's
-   * messages that follows message `after`, and the last message of that page when more follow.
-   */
-  cardsAfter(forumChannelId: string, threadId: string, after: string): Promise<{ cards: string[]; next?: string }>;
   /** Deletes a message the forum's webhook posted; a message that is already gone counts as deleted. */
   deleteMessage(forumChannelId: string, threadId: string, messageId: string): Promise<void>;
   /** True if `threadId` is a post that still exists in the forum. */
@@ -82,6 +94,7 @@ export interface PostFields {
   state: string;
   /** The Chatwoot user id of the assignee the post last announced ("" for none; see assigneeKey). */
   announcedAssignee: string;
+  assigneeNoticeId: string;
   /** 1 while a live message is posted and the assignee is not announced after it yet (see announceAssignee). */
   announcePending: number;
   /**
@@ -92,7 +105,7 @@ export interface PostFields {
   title: string;
   /** The Chatwoot message the title's subject comes from. */
   titleMessageId: number;
-  /** The post's card (unset: none yet; see unknownCards for cards not known). */
+  /** The post's card (unset: none yet). */
   cardId: string;
   /** 1 once a message was posted after the card, which then moves to the bottom. */
   cardCovered: number;
@@ -104,6 +117,9 @@ export interface PostFields {
 }
 
 export interface RelayStore {
+  get(key: string): string | undefined;
+  set(key: string, value: string, ttlMs?: number): void;
+  delete(key: string): void;
   /** What is recorded about the conversation's post; a field is undefined until it is set. */
   conversation(
     accountId: number,
@@ -147,28 +163,13 @@ export interface RelayOptions {
   card?: ((ticket: CardTicket, answerId: string | undefined) => MessageComponents) | undefined;
   /** Messages created longer ago than this are relayed without notifications. */
   liveSeconds: number;
+  ensureThread?: (accountId: number, conversationId: number, threadId: string) => Promise<void>;
+  reserveTriage?: (hour: string, key: string, limit: number) => Promise<boolean>;
   now?: () => Date;
 }
 
 /** A stored state that matches no conversation: the post's archived flag must be applied again. */
 const OUT_OF_DATE = "";
-const UNKNOWN_CARDS = "?";
-/** Discord's epoch (ms since the Unix epoch), and how far its clock may be from the Worker's. */
-const DISCORD_EPOCH = 1420070400000n;
-const CLOCK_SKEW_MS = 60_000n;
-
-/**
- * The card id recorded while the post may hold cards of unknown ids after Discord message `after`:
- * an answer to posting one may have been lost, or the post was adopted. They are looked for, and
- * deleted, before a card is posted.
- */
-export function unknownCards(after: string): string {
-  return `${UNKNOWN_CARDS}${after}`;
-}
-
-export function isUnknownCard(cardId: string | undefined): boolean {
-  return cardId?.startsWith(UNKNOWN_CARDS) === true;
-}
 /** Discord applies at most this many tags to a post. */
 const MAX_TAGS = 5;
 const RELAYED_TYPES = new Set(["incoming", "outgoing", "activity"]);
@@ -183,6 +184,7 @@ export class Relay {
       linkedAgent: options.linkedAgent,
       liveSeconds: options.liveSeconds,
       now: options.now ?? (() => new Date()),
+      reserveTriage: options.reserveTriage,
     });
   }
 
@@ -192,7 +194,7 @@ export class Relay {
    * deleted and empty messages, and messages from a blocked contact are not relayed. A message
    * that notifies leaves an announcement pending (see `announceAssignee`).
    */
-  async relay(message: RelayMessage): Promise<void> {
+  async relay(message: RelayMessage): Promise<boolean | undefined> {
     if (!RELAYED_TYPES.has(message.messageType) || message.deleted) return;
     // A blocked contact's messages are muted in Chatwoot (no notifications); keep them out of Discord too.
     if (message.messageType === "incoming" && message.conversation.contact.blocked) return;
@@ -202,11 +204,15 @@ export class Relay {
     const { store } = this.options;
     const accountId = message.account.id;
     const conversation = message.conversation;
-    const parts = this.parts(message, text);
+    const planKey = `plan:${accountId}:${conversation.id}:${message.id}`;
+    const saved = store.get(planKey);
+    const parts: PlannedPart[] = saved ? JSON.parse(saved) : await this.parts(message, text);
+    if (!saved) store.set(planKey, JSON.stringify(parts));
+    if (message.messageType === "incoming") this.customerEvent(accountId, conversation.id, `message:${message.id}`);
     let threadId = store.conversation(accountId, conversation.id)?.threadId;
     if (threadId) {
       try {
-        await this.post(message, parts, threadId);
+        if (!(await this.post(message, parts, threadId))) return;
       } catch (error) {
         if (!(error instanceof UnknownThreadError)) throw error;
         store.forgetThread(accountId, conversation.id); // The post was deleted in Discord; start a new one.
@@ -215,7 +221,8 @@ export class Relay {
     }
     if (!threadId) {
       threadId = await this.createPost(message);
-      await this.post(message, parts, threadId);
+      if (!threadId) return false;
+      if (!(await this.post(message, parts, threadId))) return;
     }
     this.unarchived(accountId, conversation);
     if (this.notifier.notifies(message)) store.updateConversation(accountId, conversation.id, { announcePending: 1 });
@@ -231,8 +238,13 @@ export class Relay {
     const { store } = this.options;
     const post = store.conversation(accountId, conversationId);
     // A part of a customer message stands for the whole message: its first part.
-    const source = store.firstPart(accountId, conversationId, sourceId) ?? sourceId;
-    if (!post?.threadId || !isAfter(answerId, post.answerId) || !answersLatest(source, post.customerMessageId)) {
+    const source = store.firstPart(accountId, conversationId, sourceId);
+    if (
+      !source ||
+      !post?.threadId ||
+      !isAfter(answerId, post.answerId) ||
+      !answersLatest(source, post.customerMessageId)
+    ) {
       return;
     }
     store.updateConversation(accountId, conversationId, { answerId, answerSourceId: source, cardCovered: 1 });
@@ -246,20 +258,23 @@ export class Relay {
    * job's retry posts it even when there are no new messages.
    */
   async announceAssignee(accountId: number, conversation: RelayConversation): Promise<void> {
+    const { store } = this.options;
     const discordId = this.notifier.newAssignee(accountId, conversation);
     if (discordId) {
       const notice = this.notice(assignedLine(`<@${discordId}>`));
-      const posted = await this.postMessage(accountId, conversation, {
-        ...notice,
-        allowed_mentions: { parse: [], users: [discordId] },
-      });
-      if (posted === undefined) return;
-      await this.addMember(accountId, conversation.id, discordId);
+      const posted = await this.postMessage(
+        accountId,
+        conversation,
+        { ...notice, allowed_mentions: { parse: [], users: [discordId] } },
+        `assignee:${this.observe(accountId, conversation.id, "assignee", assigneeKey(conversation))}`,
+      );
+      if (posted) store.updateConversation(accountId, conversation.id, { assigneeNoticeId: posted });
     }
-    this.options.store.updateConversation(accountId, conversation.id, {
+    store.updateConversation(accountId, conversation.id, {
       announcedAssignee: assigneeKey(conversation),
       announcePending: 0,
     });
+    if (discordId) await this.addMember(accountId, conversation.id, discordId);
   }
 
   /**
@@ -269,15 +284,19 @@ export class Relay {
    * lets a request change an archived post if it also unarchives it, so the changes are applied
    * with `archived: false` and a resolved post is archived by a last request.
    */
+  async ensureThread(accountId: number, conversationId: number, threadId: string): Promise<void> {
+    await this.options.ensureThread?.(accountId, conversationId, threadId);
+  }
+
   async sync(accountId: number, conversation: RelayConversation, threadId: string): Promise<void> {
     const { store, forum } = this.options;
     const state = this.stateOf(conversation);
+    await this.ensureThread(accountId, conversation.id, threadId);
     const recorded = store.conversation(accountId, conversation.id);
     const source = recorded?.answerSourceId;
     const draft = source && answersLatest(source, recorded?.customerMessageId) ? recorded?.answerId : undefined;
     const card = this.options.card?.(this.cardTicket(accountId, conversation), draft);
-    const cardDue =
-      card !== undefined && (!recorded?.cardId || isUnknownCard(recorded.cardId) || recorded.cardCovered === 1);
+    const cardDue = card !== undefined && (!recorded?.cardId || recorded.cardCovered === 1);
     const stateChanged = recorded?.state !== state;
     if (!stateChanged && !cardDue) return;
     // Until everything below is applied, the post counts as out of date, so a failure or a yield
@@ -324,7 +343,12 @@ export class Relay {
    * Posts a customer's response to an interactive message into the conversation's post, under
    * the contact's name and avatar (see `postMessage`).
    */
-  async postResponse(accountId: number, conversation: RelayConversation, text: string): Promise<string | undefined> {
+  async postResponse(
+    accountId: number,
+    conversation: RelayConversation,
+    text: string,
+    sendKey: string,
+  ): Promise<string | undefined> {
     const { frontendUrl, avatars } = this.options;
     let content = defused(text);
     if (content.length > CONTENT_LIMIT) {
@@ -332,12 +356,17 @@ export class Relay {
       const note = `-# Response truncated (${charLength(text)} characters). Full text: <${link}>`;
       content = `${split(content, CONTENT_LIMIT - note.length - 1)[0] ?? ""}\n${note}`;
     }
-    const messageId = await this.postMessage(accountId, conversation, {
-      content,
-      username: customerName(conversation.contact),
-      avatar_url: customerAvatar(conversation.contact.avatarUrl, avatars),
-      allowed_mentions: { parse: [] },
-    });
+    const messageId = await this.postMessage(
+      accountId,
+      conversation,
+      {
+        content,
+        username: customerName(conversation.contact),
+        avatar_url: customerAvatar(conversation.contact.avatarUrl, avatars),
+        allowed_mentions: { parse: [] },
+      },
+      sendKey,
+    );
     if (messageId) this.customerWrote(accountId, conversation.id, messageId);
     return messageId;
   }
@@ -346,8 +375,13 @@ export class Relay {
    * Posts a notice into the conversation's post, e.g. when one of its messages could not be
    * relayed or delivered (see `postMessage`).
    */
-  notify(accountId: number, conversation: RelayConversation, content: string): Promise<string | undefined> {
-    return this.postMessage(accountId, conversation, this.notice(content));
+  notify(
+    accountId: number,
+    conversation: RelayConversation,
+    content: string,
+    sendKey: string,
+  ): Promise<string | undefined> {
+    return this.postMessage(accountId, conversation, this.notice(content), sendKey);
   }
 
   /** The conversation was deleted in Chatwoot: says so in its post, archives it, and forgets it. */
@@ -355,11 +389,14 @@ export class Relay {
     const { store, forum } = this.options;
     const threadId = store.conversation(accountId, conversationId)?.threadId;
     const gone = this.notice("This conversation no longer exists in Chatwoot.");
-    if (threadId && (await this.postMessage(accountId, { id: conversationId }, gone)) !== undefined) {
-      try {
-        await forum.updateThread(this.forumOf(accountId), threadId, { archived: true });
-      } catch (error) {
-        if (!(error instanceof UnknownThreadError)) throw error;
+    if (threadId) {
+      await this.postMessage(accountId, { id: conversationId }, gone, "deleted");
+      if (store.conversation(accountId, conversationId)?.threadId) {
+        try {
+          await forum.updateThread(this.forumOf(accountId), threadId, { archived: true });
+        } catch (error) {
+          if (!(error instanceof UnknownThreadError)) throw error;
+        }
       }
     }
     store.forgetThread(accountId, conversationId);
@@ -385,15 +422,15 @@ export class Relay {
    * with room for them, so a message splits the same way on every attempt and a retry can
    * resume after the parts already posted.
    */
-  private parts(message: RelayMessage, text: string): WebhookMessage[] {
+  private async parts(message: RelayMessage, text: string): Promise<PlannedPart[]> {
     const { frontendUrl, maxChunks } = this.options;
-    const notification = this.notifier.notification(message);
+    const notification = await this.notifier.notification(message);
     const chunks = split(text, CONTENT_LIMIT - this.notifier.reserve);
     const kept = chunks.slice(0, maxChunks);
     const username = senderName(message);
     const avatar = senderAvatar(message, this.options.avatars);
     const agents = [...(message.mentionedAgents?.values() ?? [])];
-    const parts: WebhookMessage[] = kept.map((chunk, index) => {
+    const parts: PlannedPart[] = kept.map((chunk, index) => {
       const last = index === kept.length - 1;
       const content = last ? [chunk, ...notification.lines].join("\n") : chunk;
       // Linked agents mentioned in a private note are pinged where the mention is.
@@ -402,44 +439,76 @@ export class Relay {
         ...agents.filter((id) => chunk.includes(`<@${id}>`)),
       ]);
       return {
-        content,
-        username,
-        avatar_url: avatar,
-        allowed_mentions: users.size > 0 ? { parse: [], users: [...users] } : { parse: [] },
+        plainContent: chunk,
+        ...(last && notification.triageExpiresAt !== undefined
+          ? {
+              notification: {
+                expiresAt: notification.triageExpiresAt,
+                contentWithoutTriage: [chunk, ...(notification.withoutTriage ?? [])].join("\n"),
+              },
+            }
+          : {}),
+        message: {
+          content,
+          username,
+          avatar_url: avatar,
+          allowed_mentions: users.size > 0 ? { parse: [], users: [...users] } : { parse: [] },
+        },
       };
     });
     if (chunks.length > maxChunks) {
       const link = conversationUrl(frontendUrl, message.account.id, message.conversation.id);
+      const content = `-# Message truncated (${charLength(text)} characters). Full text: <${link}>`;
       parts.push({
-        content: `-# Message truncated (${charLength(text)} characters). Full text: <${link}>`,
-        username,
-        avatar_url: avatar,
-        allowed_mentions: { parse: [] },
+        plainContent: content,
+        message: { content, username, avatar_url: avatar, allowed_mentions: { parse: [] } },
       });
     }
     return parts;
   }
 
   /**
-   * Posts the parts not yet posted, recording each one. A customer's message is their latest from
-   * its first part on, so a later part that fails leaves no earlier draft offered.
+   * Posts the parts not yet posted. A draft needs the full confirmed context; the customer
+   * event already invalidated the previous draft before the first attempted part.
    */
-  private async post(message: RelayMessage, parts: WebhookMessage[], threadId: string): Promise<void> {
+  private async post(message: RelayMessage, parts: PlannedPart[], threadId: string): Promise<boolean> {
     const { store, forum } = this.options;
     const accountId = message.account.id;
     const conversationId = message.conversation.id;
-    const forumChannelId = this.forumOf(accountId);
-    const fromCustomer = message.messageType === "incoming";
-    const posted = store.postedParts(accountId, conversationId, message.id);
-    if (fromCustomer && posted[0]) this.customerWrote(accountId, conversationId, posted[0]);
-    for (let part = posted.length; part < parts.length; part += 1) {
-      const payload = parts[part];
-      if (!payload) break;
-      const { messageId } = await forum.execute(forumChannelId, payload, threadId);
-      store.savePostedPart(accountId, conversationId, message.id, part, messageId);
+    await this.ensureThread(accountId, conversationId, threadId);
+    let incomplete = false;
+    for (const [part, { message: frozen, plainContent, notification }] of parts.entries()) {
+      const payload = incomplete
+        ? {
+            ...frozen,
+            content: plainContent,
+            allowed_mentions: {
+              parse: [],
+              users: frozen.allowed_mentions?.users?.filter((id) => plainContent.includes(`<@${id}>`)) ?? [],
+            },
+          }
+        : notification && (this.options.now?.() ?? new Date()).getTime() >= notification.expiresAt
+          ? { ...frozen, content: notification.contentWithoutTriage }
+          : frozen;
+      this.unarchived(accountId, message.conversation);
       store.updateConversation(accountId, conversationId, { cardCovered: 1 });
-      if (fromCustomer && part === 0) this.customerWrote(accountId, conversationId, messageId);
+      const outcome = await forum.execute(
+        this.forumOf(accountId),
+        payload,
+        threadId,
+        `message:${accountId}:${conversationId}:${message.id}:${part}:${threadId}`,
+        (receipt) => store.savePostedPart(accountId, conversationId, message.id, part, receipt.messageId),
+        incomplete ? undefined : notification,
+      );
+      if (outcome.state !== "confirmed") {
+        incomplete = true;
+        this.logUnknownSend(accountId, conversationId, message.id, threadId, part);
+      }
     }
+    const first = store.postedParts(accountId, conversationId, message.id)[0];
+    if (!incomplete && message.messageType === "incoming" && first)
+      this.customerWrote(accountId, conversationId, first);
+    return true;
   }
 
   /**
@@ -447,7 +516,7 @@ export class Relay {
    * itself follows as the first reply. Bots act on replies but not on a forum post's opening
    * message, so this lets the first customer message reach a triage bot like any other.
    */
-  private async createPost(message: RelayMessage): Promise<string> {
+  private async createPost(message: RelayMessage): Promise<string | undefined> {
     const { store, forum, frontendUrl } = this.options;
     const accountId = message.account.id;
     const conversation = message.conversation;
@@ -465,17 +534,23 @@ export class Relay {
     };
     const tags = this.postTags(accountId, conversation);
     if (tags.length > 0) post.applied_tags = tags;
-    const { channelId: threadId } = await forum.execute(target.forumChannelId, post);
-    store.updateConversation(accountId, conversation.id, {
-      threadId,
-      titleSubject: subject,
-      title,
-      titleMessageId: message.id,
-      state: this.stateOf(conversation),
-      // Nothing announced yet: an assignee is announced after the run's messages.
-      announcedAssignee: "",
-    });
-    return threadId;
+    const outcome = await forum.execute(
+      target.forumChannelId,
+      post,
+      undefined,
+      `post:${accountId}:${conversation.id}:${store.get("generation") ?? 1}`,
+      (receipt) =>
+        store.updateConversation(accountId, conversation.id, {
+          threadId: receipt.channelId,
+          titleSubject: subject,
+          title,
+          titleMessageId: message.id,
+          state: this.stateOf(conversation),
+          announcedAssignee: "",
+        }),
+    );
+    if (outcome.state !== "confirmed") return undefined;
+    return outcome.channelId;
   }
 
   /**
@@ -487,21 +562,45 @@ export class Relay {
     accountId: number,
     conversation: Pick<RelayConversation, "id" | "status">,
     message: WebhookMessage,
+    sendKey: string,
   ): Promise<string | undefined> {
     const { store, forum } = this.options;
     const threadId = store.conversation(accountId, conversation.id)?.threadId;
     if (!threadId) return undefined;
-    let messageId: string;
+    await this.ensureThread(accountId, conversation.id, threadId);
+    this.unarchived(accountId, conversation);
+    store.updateConversation(accountId, conversation.id, { cardCovered: 1 });
     try {
-      ({ messageId } = await forum.execute(this.forumOf(accountId), message, threadId));
+      const outcome = await forum.execute(
+        this.forumOf(accountId),
+        message,
+        threadId,
+        `notice:${accountId}:${conversation.id}:${threadId}:${sendKey}`,
+      );
+      if (outcome.state === "confirmed") return outcome.messageId;
+      this.logUnknownSend(accountId, conversation.id, undefined, threadId);
+      return undefined;
     } catch (error) {
       if (!(error instanceof UnknownThreadError)) throw error;
       store.forgetThread(accountId, conversation.id);
       return undefined;
     }
-    this.unarchived(accountId, conversation);
-    store.updateConversation(accountId, conversation.id, { cardCovered: 1 });
-    return messageId;
+  }
+
+  private logUnknownSend(
+    accountId: number,
+    conversationId: number,
+    messageId: number | undefined,
+    threadId?: string,
+    part?: number,
+  ): void {
+    log.warn("Discord message send outcome unknown", {
+      accountId,
+      conversationId,
+      ...(messageId === undefined ? {} : { messageId }),
+      ...(threadId === undefined ? {} : { threadId }),
+      ...(part === undefined ? {} : { part }),
+    });
   }
 
   /**
@@ -534,31 +633,36 @@ export class Relay {
     const forumChannelId = this.forumOf(accountId);
     const recorded = store.conversation(accountId, conversationId);
     const card: WebhookMessage = { flags: MessageFlags.IsComponentsV2, components };
+    if (store.get(`card:${accountId}:${conversationId}:${threadId}:unknown`)) return;
     const cardId = recorded?.cardId;
-    if (cardId && !isUnknownCard(cardId) && recorded?.cardCovered !== 1) {
+    if (cardId && recorded?.cardCovered !== 1) {
       if (await forum.editMessage(forumChannelId, threadId, cardId, card)) return;
     }
-    if (isUnknownCard(cardId)) {
-      // Page by page, recording how far it got, so a yield continues where it stopped.
-      for (let after: string | undefined = cardId?.slice(UNKNOWN_CARDS.length); after !== undefined; ) {
-        const page = await forum.cardsAfter(forumChannelId, threadId, after);
-        for (const id of page.cards) await forum.deleteMessage(forumChannelId, threadId, id);
-        after = page.next;
-        if (after) store.updateConversation(accountId, conversationId, { cardId: unknownCards(after) });
-      }
-    } else if (cardId) {
+    if (cardId) {
       await forum.deleteMessage(forumChannelId, threadId, cardId);
     }
-    // Should Discord's answer be lost, the card posted is looked for after this moment.
-    const now = BigInt((this.options.now?.() ?? new Date()).getTime());
-    const moment = String((now - CLOCK_SKEW_MS - DISCORD_EPOCH) << 22n);
-    store.updateConversation(accountId, conversationId, { cardId: unknownCards(moment) });
-    const { messageId } = await forum.execute(
+    const key = `card:${accountId}:${conversationId}:${threadId}`;
+    let revision = Number(store.get(`${key}:revision`) ?? 0);
+    if (!store.get(`${key}:placing`)) {
+      revision += 1;
+      store.set(`${key}:revision`, String(revision));
+      store.set(`${key}:placing`, "1");
+    }
+    const outcome = await forum.execute(
       forumChannelId,
       { ...card, username: SYSTEM_USERNAME, avatar_url: avatars.chatwoot, allowed_mentions: { parse: [] } },
       threadId,
+      `${key}:${revision}`,
+      (receipt) => {
+        store.updateConversation(accountId, conversationId, { cardId: receipt.messageId, cardCovered: 0 });
+        store.delete(`${key}:placing`);
+      },
     );
-    store.updateConversation(accountId, conversationId, { cardId: messageId, cardCovered: 0 });
+    if (outcome.state !== "confirmed") {
+      store.set(`${key}:unknown`, "1");
+      store.updateConversation(accountId, conversationId, { cardCovered: 0 });
+      this.logUnknownSend(accountId, conversationId, undefined, threadId);
+    }
   }
 
   /** A message from Chatwoot itself. */
@@ -588,6 +692,36 @@ export class Relay {
       assignee: assignee ? (assignee.name ?? `#${assignee.id ?? "?"}`) : null,
       labels: conversation.labels,
     };
+  }
+
+  observe(accountId: number, conversationId: number, kind: string, value: string): number {
+    const key = `observed:${accountId}:${conversationId}:${kind}`;
+    const old: { value: string; revision: number } | undefined =
+      JSON.parse(this.options.store.get(key) ?? "null") ?? undefined;
+    if (old?.value === value) return old.revision;
+    const revision = (old?.revision ?? 0) + 1;
+    this.options.store.set(key, JSON.stringify({ value, revision }));
+    return revision;
+  }
+
+  customerEvent(accountId: number, conversationId: number, event: string): void {
+    const key = `customer:${accountId}:${conversationId}`;
+    const seen = `${key}:event:${event}`;
+    if (this.options.store.get(seen)) return;
+    this.options.store.set(seen, "1");
+    if (event.startsWith("message:")) {
+      const source = Number(event.slice(8));
+      const latest = Number(this.options.store.get(`${key}:created`) ?? 0);
+      if (source <= latest) return;
+      this.options.store.set(`${key}:created`, String(source));
+    }
+    this.options.store.set(key, event);
+    this.options.store.updateConversation(accountId, conversationId, {
+      answerId: "",
+      answerSourceId: "",
+      customerMessageId: "",
+      cardCovered: 1,
+    });
   }
 
   /** Records the customer's latest message (Discord message `messageId`), which only moves forward. */
@@ -623,5 +757,5 @@ function isAfter(id: string, other: string | undefined): boolean {
  * starts at `latest`: the source is that message (any of its parts) or later.
  */
 function answersLatest(sourceId: string, latest: string | undefined): boolean {
-  return !latest || BigInt(sourceId) >= BigInt(latest);
+  return !!latest && BigInt(sourceId) >= BigInt(latest);
 }
