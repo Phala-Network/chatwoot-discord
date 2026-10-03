@@ -175,6 +175,7 @@ describe("DiscordForum", () => {
       "outcome is unknown",
     );
     expect(requests.filter((request) => request.method === "POST")).toHaveLength(1);
+    expect(requests.filter((request) => request.method === "GET")).toHaveLength(0);
   });
 
   it("retries a refused tag send after the recovery read fails", async () => {
