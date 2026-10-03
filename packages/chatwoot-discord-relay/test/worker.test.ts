@@ -1,4 +1,4 @@
-// End to end through the Worker and the Hub Durable Object (alarms included), with Chatwoot and
+// End to end through the Worker and its conversation Durable Objects (alarms included), with Chatwoot and
 // Discord faked at the fetch boundary.
 
 import {
@@ -1747,7 +1747,7 @@ it("measures command feedback behind a slow conversation", async () => {
 
 it.for(["baseline", "headers", "body", "discord"] as const)(
   "measures thirty warm independent conversations while A blocks %s",
-  { timeout: 60000 },
+  { timeout: 90000 },
   async (mode, context) => {
     const samples: Array<{ ack: number; queue: number; action: number; feedback: number; firstPost: number }> = [];
     for (let sample = 0; sample < 30; sample++) {

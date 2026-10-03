@@ -241,7 +241,7 @@ npx cf deploy --secrets-file <secrets file>
 [`chatwoot-discord-relay`](https://www.npmjs.com/package/chatwoot-discord-relay) package,
 published from this repository's releases with npm provenance, at an exact version. Your project
 needs `cf`, `vite`, and `@cloudflare/vite-plugin` as dev dependencies, a `vite.config.ts` like this
-repository's, `src/index.ts` exporting the default Worker and all seven partition classes from `chatwoot-discord-relay`, the
+repository's, `src/index.ts` exporting the default Worker, all seven partition classes, and the retained read-only `Hub` from `chatwoot-discord-relay`, the
 configuration as JSON with comments in a file of its own (`config.jsonc`), and a
 `cloudflare.config.ts` that binds a [KV namespace](https://developers.cloudflare.com/kv/) and the
 configuration's key instead of `CONFIG`:
@@ -259,6 +259,8 @@ export default defineConfig({
     domains: ["<worker host>"],
     triggers: [triggers.scheduled({ schedule: "*/5 * * * *" })],
     exports: {
+      // Preserve the existing Hub namespace during the adoption/rollback window.
+      Hub: exports.durableObject({ storage: "sqlite" }),
       Conversation: exports.durableObject({ storage: "sqlite" }),
       ThreadDirectory: exports.durableObject({ storage: "sqlite" }),
       TriageBudget: exports.durableObject({ storage: "sqlite" }),
@@ -281,6 +283,11 @@ export default defineConfig({
   },
 });
 ```
+
+The separate private operator binds `LEGACY_HUB` to this retained class; see
+[the adoption runbook](docs/adoption.md). After the rollback window and the runbook's gates,
+remove `Hub` from the entrypoint and declare `Hub: exports.durableObject({ state: "deleted" })`.
+Do not remove or recreate any of the seven partition classes.
 
 Store the configuration, then deploy. In CI, follow [Use cf in CI](https://developers.cloudflare.com/cf/ci/)
 without `--mode` (this configuration has no modes): `npx cf build`, then `npx cf deploy --prebuilt` after storing
@@ -411,10 +418,10 @@ a larger configuration goes in a [KV namespace](https://developers.cloudflare.co
 | `relay.linkAttribute` | string | `discord_thread` | Conversation custom attribute that receives the post URL (`""` disables it). |
 | `relay.startAfterMessageId` | integer ≥ 0 | `0` | Messages with an id at or below this are never relayed (cutover watermark, see [Operations](https://github.com/Phala-Network/chatwoot-workers/blob/main/packages/chatwoot-discord-relay/docs/operations.md)). |
 | `relay.maxAttempts` | integer ≥ 1 | `5` | Attempts before a message Discord refuses as invalid is skipped with a notice. |
-| `relay.subrequestBudget` | integer 20–1000, and ≥ `relay.maxChunks` + 30 | `45` | Outbound requests per alarm invocation (Free plan limit: 50). The minimum fits a run's setup and one message's worst case (`src/relay/limits.ts`). |
+| `relay.subrequestBudget` | integer 20–1000 | `45` | Outbound requests per alarm invocation (Free plan limit: 50). HTTP and coordinator RPCs count; preparations and message parts continue across alarms. |
 | `avatars.chatwoot` | https URL | `<publicUrl>/favicon-512x512.png` | Avatar of activity lines, cards, notices, agent bots without an https Chatwoot avatar, and agents with neither a linked Discord user nor an https Chatwoot avatar. |
 | `avatars.contact` | https URL | Gravatar "mystery person" | Avatar of customers without an https avatar in Chatwoot. |
-| `queue` | object | unset | The hourly [support queue](#support-queue). Unset: off. Requires `relay.subrequestBudget` ≥ 6 × accounts + 4. |
+| `queue` | object | unset | The hourly [support queue](#support-queue). Unset: off. Pages and message parts continue within the invocation budget. |
 | `queue.channelId` | Discord id (17–20 digits) | required | Channel or forum post the queue is posted in. The bot needs *Send Messages* there (*Send Messages in Threads* for a post). |
 | `queue.escalationRoleId` | Discord id (17–20 digits) | unset | Role pinged for tickets unassigned too long. To ping a role that is not mentionable, the bot needs *Mention @everyone, @here, and All Roles* in the channel. Unset: no escalation. |
 | `queue.escalationUserId` | Discord id (17–20 digits) | unset | A user pinged instead of a role (set one of the two). |

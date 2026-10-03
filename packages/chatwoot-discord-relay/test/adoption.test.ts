@@ -12,6 +12,7 @@ import { QueueDigest } from "../src/digest.ts";
 import { DiscordForum } from "../src/discord/forum.ts";
 import { DiscordRest } from "../src/discord/rest.ts";
 import { legacyInventory } from "../src/legacy.ts";
+import { inventory } from "../src/operator.ts";
 import { Store } from "../src/store.ts";
 import legacySchema from "./fixtures/legacy-027.ts";
 import { FORUM, json, mockFetch, on } from "./helpers.ts";
@@ -472,4 +473,19 @@ it("seals the original digest baseline atomically and rejects changed same-epoch
     expect(() => digest.stage("sealed", JSON.stringify({ a: { since: 10, level: 3 } }))).toThrow();
     expect(JSON.parse(store.get("queue:escalations") ?? "null")).toEqual({ a: { since: 10, level: 3 } });
   });
+});
+
+it("reads the retained Hub inventory through the private operator binding", async () => {
+  await runInDurableObject(env.LEGACY_HUB.getByName("global"), (_instance, state) => {
+    state.storage.sql.exec(legacySchema);
+    state.storage.sql.exec(
+      "INSERT INTO conversations (account_id,conversation_id,thread_id,cursor) VALUES (3,123,?,101)",
+      THREAD,
+    );
+  });
+  const page = await inventory(env);
+  expect(page.schemaVersion).toBe(9);
+  expect(page.mappings).toMatchObject([{ accountId: 3, conversationId: 123, threadId: THREAD, cursor: 101 }]);
+  expect(page.complete).toBe(true);
+  expect(page.jobs).toBe(0);
 });

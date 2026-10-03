@@ -12,12 +12,30 @@ for package in chatwoot-discord-relay chatwoot-router; do
   consumer="$scratch/$package"
   mkdir -p "$consumer"
   cp -R "packages/$package/test/package/." "$consumer/"
+  if [ "$package" = chatwoot-discord-relay ]; then
+    cp "packages/$package/docs/operator.ts" "$consumer/operator-template.ts"
+  fi
   npm pack -w "$package" --pack-destination "$consumer"
   (
     cd "$consumer"
     npm install --workspaces=false --ignore-scripts --no-save --no-audit --no-fund ./*.tgz typescript @cloudflare/workers-types @types/node@24
     ./node_modules/.bin/tsc -p tsconfig.json
     ./node_modules/.bin/tsc -p tsconfig.worker.json
+    if [ "$package" = chatwoot-discord-relay ]; then
+      node operator.mjs
+      "$root/node_modules/.bin/cf" build
+      node lifecycle.mjs
+      "$root/node_modules/.bin/cf" deploy --prebuilt --dry-run
+      "$root/node_modules/.bin/cf" build --mode retire-hub
+      node lifecycle.mjs retire-hub
+      "$root/node_modules/.bin/cf" deploy --prebuilt --dry-run --mode retire-hub
+      mkdir operator
+      cp package.json operator/package.json
+      cp operator-template.ts operator/operator.ts
+      cp "$root/packages/$package/docs/operator.config.ts" operator/cloudflare.config.ts
+      cp vite.config.ts operator/vite.config.ts
+      (cd operator; "$root/node_modules/.bin/cf" build; "$root/node_modules/.bin/cf" deploy --prebuilt --dry-run)
+    fi
     if [ "$package" = chatwoot-router ]; then
       command=chatwoot-router-store-config
     else

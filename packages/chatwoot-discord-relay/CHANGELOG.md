@@ -5,24 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
-
-- Partition relay execution by account and conversation. Dedicated thread directories, account sweeps, forum registries, triage budgets, channel digests and a scoped Discord reservation/report limiter own shared coordination without executing other conversations' jobs.
-- Preserve durable unknown message effects and unsent tails; confirm state mutations against the complete frozen target. Commands report their confirmed result before optional panels and card convergence.
-- Existing single-Hub installations require a drained adoption cut and prebuilt directory; see [the cutover/rollback runbook](docs/adoption.md). Drafts and hourly counters are not imported. Loss of pre-watermark deletion/title associations requires explicit owner acceptance before cutover. Minimal response and escalation baselines remain. The old Hub is a retired shell during the evidence window; the separately reviewed `retire-hub` configuration deletes only its class afterwards.
-
 ## [Unreleased]
 
 ### Changed
 
-- Bound Hub work with per-operation deadlines and persisted continuations. Persist rate-limit cooldowns without sleeping, page hourly digests, prioritize live messages with aging, and refresh decorative metadata outside the message path.
-- Separate command execution from retryable feedback and card convergence; retain unknown send outcomes without replay. Use one bounded durable interaction RPC and only persisted drafts for modals. Keep the deployed Hub namespace, cursor and hold state intact; the attachment table and assignee-notice receipt column are added without moving existing state.
-- Simplify the native-status design: inline the relay-only sweep continuation, remove its one-page loop and thin
-  alarm, payload, escalation, panel and notice wrappers. Keep pending holding, answering-reply pagination, queue
-  pings and Discord effects unchanged; log unavailable failure notices.
-- Remove unused inbox-list API and custom-attribute wrapper from the shared client; message creation now exposes
-  a validated Chatwoot receipt for the router while relay commands continue to use HTTP success.
-- Document waiting for router disconnect handoff before stopping it and restoring the recorded rollback baseline.
+- Partition relay execution by account and conversation. Separate thread directories, account sweeps, forum registries, triage budgets, channel digests and a scoped Discord limiter coordinate shared state without a central executor.
+- Bound operations and durable job continuations. Persist rate-limit cooldowns instead of sleeping; preserve pending holds, live-message priority, hourly digest deadlines and notification quotas. Optional inbox names, avatars, panels and card convergence do not delay message bodies or confirmed command feedback.
+- Persist each command's fixed mutation target and effect outcome separately from retryable feedback. Unknown message creation is never matched against history or automatically resent; unknown state mutations are confirmed only against the complete original target. Unattempted message tails continue without triage when context is incomplete or the hourly grant has expired.
+- Bound the whole initial interaction response and acknowledge only durable admission. Draft modals use persisted drafts; missing drafts give the explicit Reply with this fallback.
+
+### Upgrade
+
+- Existing single-Hub installations require a genuinely drained adoption cut, verified post links and a prebuilt thread directory. See the [cutover and rollback runbook](docs/adoption.md). Drafts and hourly counters are not imported; notifications resume at the next UTC hour. Losing pre-watermark deletion/title associations requires explicit owner acceptance before cutover. Minimal response and escalation baselines are retained.
+- Keep the old Hub as a nonexecuting shell during the evidence-retention window. After separately authorized review, `retire-hub` declares only that class deleted. Once new effects or card deletions exist, use forward repair; restoring the old snapshot is not clean rollback.
 
 ## [0.30.0] - 2026-10-03
 

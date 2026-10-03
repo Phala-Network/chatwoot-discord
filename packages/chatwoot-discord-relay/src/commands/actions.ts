@@ -43,7 +43,7 @@ export interface CommandResult {
   content: string;
   /**
    * What goes with the result: Assign to's menu, or the Manage panel drawn again with the ticket as
-   * it is now (a Components V2 message; see respond in hub.ts).
+   * it is now (a Components V2 message; see respond in conversation.ts).
    */
   components?: APIMessageTopLevelComponent[] | undefined;
   /** Chatwoot could not find the conversation: it may have been deleted. */

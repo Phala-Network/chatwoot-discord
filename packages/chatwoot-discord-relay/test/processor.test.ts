@@ -190,7 +190,7 @@ async function withStore<T>(run: (store: Store) => Promise<T>): Promise<T> {
   });
 }
 
-/** What the Hub gives a job: services over one invocation's budget. */
+/** What a conversation gives a job: services over one invocation's budget. */
 function context(store: Store, settings: Settings, limit = settings.config.relay.subrequestBudget) {
   const budget = new Budget(limit);
   const chatwoot = chatwootClient(settings.config.chatwoot.baseUrl, "relay-token", budget.fetch);
@@ -208,7 +208,7 @@ function context(store: Store, settings: Settings, limit = settings.config.relay
   };
 }
 
-/** Runs the conversation job until it is done, each run with a fresh budget, like the Hub does. */
+/** Runs the conversation job until it is done, each run with a fresh budget, like its conversation alarm does. */
 async function sync(store: Store, settings: Settings, limit?: number): Promise<ProcessOutcome[]> {
   const outcomes: ProcessOutcome[] = [];
   for (let run = 0; run < 100; run += 1) {

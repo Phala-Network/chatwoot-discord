@@ -3,7 +3,9 @@ import { env } from "cloudflare:workers";
 import { afterEach, expect, it, vi } from "vitest";
 import { Budget } from "../../../shared/budget.ts";
 import { QueueStore } from "../../../shared/store.ts";
+import { configSchema } from "../src/config.ts";
 import { control } from "../src/control.ts";
+import { QueueDigest } from "../src/digest.ts";
 import { DiscordLimiter, fingerprint, type LimitReport, LimitState, type Reservation } from "../src/discord/limiter.ts";
 import { DiscordRest } from "../src/discord/rest.ts";
 import { ForumRegistry } from "../src/registry.ts";
@@ -324,3 +326,53 @@ it.each([false, true])(
     expect(requests.length).toBe(inFlight ? 3 : 2);
   },
 );
+
+it("keeps the account sweep asleep for Chatwoot's full Retry-After instead of polling the cooldown", async () => {
+  let now = Date.now();
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  let reads = 0;
+  mockFetch(
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations", () => {
+      reads++;
+      return json({}, { status: 429, headers: { "retry-after": "63" } });
+    }),
+  );
+  await runInDurableObject(
+    env.ACCOUNT_SWEEP.getByName(`sweep-cooldown:${crypto.randomUUID()}`),
+    async (_instance, state) => {
+      vi.spyOn(state.storage, "getAlarm").mockResolvedValue(null);
+      const wake = vi.spyOn(state.storage, "setAlarm").mockResolvedValue();
+      const executor = new AccountSweep(state, env);
+      await executor.request(3);
+      await executor.alarm();
+      expect(Number(wake.mock.calls.at(-1)?.[0]) - now).toBeGreaterThanOrEqual(63000);
+      now += 5001;
+      await executor.alarm();
+      expect(reads).toBe(1);
+    },
+  );
+});
+
+it("keeps the hourly digest asleep for Chatwoot's full Retry-After", async () => {
+  const now = Date.now();
+  vi.spyOn(Date, "now").mockReturnValue(now);
+  mockFetch(
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations", () =>
+      json({}, { status: 429, headers: { "retry-after": "63" } }),
+    ),
+  );
+  await runInDurableObject(
+    env.QUEUE_DIGEST.getByName(`digest-cooldown:${crypto.randomUUID()}`),
+    async (_instance, state) => {
+      vi.spyOn(state.storage, "getAlarm").mockResolvedValue(null);
+      const wake = vi.spyOn(state.storage, "setAlarm").mockResolvedValue();
+      const executor = new QueueDigest(state, {
+        ...env,
+        CONFIG: { ...configSchema.parse(env.CONFIG), queue: { channelId: "100000000000000099" } },
+      });
+      await executor.request(now);
+      await executor.alarm();
+      expect(Number(wake.mock.calls.at(-1)?.[0]) - now).toBeGreaterThanOrEqual(63000);
+    },
+  );
+});

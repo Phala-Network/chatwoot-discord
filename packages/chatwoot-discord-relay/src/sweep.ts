@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { scheduleAlarm } from "../../../shared/alarm.ts";
 import { Budget } from "../../../shared/budget.ts";
-import { chatwootClient } from "../../../shared/chatwoot/api.ts";
+import { ChatwootError, chatwootClient } from "../../../shared/chatwoot/api.ts";
 import { errorFields, log } from "../../../shared/log.ts";
 import { QueueStore } from "../../../shared/store.ts";
 import { relaysInbox } from "./config.ts";
@@ -137,7 +137,7 @@ export class AccountSweep extends DurableObject<Env> {
       }
     } catch (error) {
       log.warn("account sweep delayed", { accountId, ...errorFields(error) });
-      this.store.deferJob(job, 5000);
+      this.store.deferJob(job, error instanceof ChatwootError ? (error.retryAfterMs ?? 5000) : 5000);
     }
     await scheduleAlarm(this.ctx, this.store.nextWakeup());
   }

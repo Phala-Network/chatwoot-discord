@@ -89,7 +89,7 @@ function escalationLevel(hours: number): number {
 
 /**
  * Posts the queue as of `now`. Nothing is posted after `deadline`: a run past it is dropped,
- * whole or from the message it reached (see Hub).
+ * whole or from the message it reached (see QueueDigest).
  */
 export async function postQueue(
   ctx: QueueContext,

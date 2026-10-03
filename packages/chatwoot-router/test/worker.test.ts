@@ -487,7 +487,7 @@ describe("account sweep", () => {
 it("measures routing behind a slow conversation", async () => {
   let startedSlow = false;
   let finished = 0;
-  let releaseSlow!: () => void;
+  let releaseSlow = () => {};
   const slow = new Promise<void>((resolve) => {
     releaseSlow = resolve;
   });

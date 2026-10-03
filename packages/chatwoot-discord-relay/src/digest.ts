@@ -1,11 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
 import { scheduleAlarm } from "../../../shared/alarm.ts";
 import { Budget } from "../../../shared/budget.ts";
-import { chatwootClient } from "../../../shared/chatwoot/api.ts";
+import { ChatwootError, chatwootClient } from "../../../shared/chatwoot/api.ts";
 import { errorFields, log } from "../../../shared/log.ts";
 import { QueueStore } from "../../../shared/store.ts";
 import { DiscordLimiter } from "./discord/limiter.ts";
-import { DiscordRest } from "./discord/rest.ts";
+import { DiscordHttpError, DiscordRest } from "./discord/rest.ts";
 import type { Env } from "./env.ts";
 import { escalationsSchema, postQueue } from "./queue.ts";
 import { loadSettings } from "./settings.ts";
@@ -71,7 +71,10 @@ export class QueueDigest extends DurableObject<Env> {
       else this.store.deferJob(job);
     } catch (error) {
       log.warn("queue digest delayed", errorFields(error));
-      this.store.deferJob(job, 5000);
+      this.store.deferJob(
+        job,
+        error instanceof ChatwootError || error instanceof DiscordHttpError ? (error.retryAfterMs ?? 5000) : 5000,
+      );
     }
     await scheduleAlarm(this.ctx, this.store.nextWakeup());
   }
