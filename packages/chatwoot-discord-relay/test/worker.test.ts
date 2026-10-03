@@ -1895,7 +1895,7 @@ it.for(["baseline", "headers", "body", "discord"] as const)(
         }),
         on(
           "PATCH",
-          new RegExp(`^discord.com/api/v10/webhooks/100000000000000001/measure-${sample}/messages/(@|%40)original$`),
+          new RegExp(`^discord\\.com/api/v10/webhooks/100000000000000001/measure-${sample}/messages/(@|%40)original$`),
           () => {
             feedback = performance.now();
             return json({});
@@ -2156,7 +2156,7 @@ it.each(["digest", "registry"] as const)(
       ),
       on(
         "PATCH",
-        /^discord.com\/api\/v10\/webhooks\/100000000000000001\/shared-fault\/messages\/(@|%40)original$/,
+        /^discord\.com\/api\/v10\/webhooks\/100000000000000001\/shared-fault\/messages\/(@|%40)original$/,
         () => {
           feedback = true;
           return json({});

@@ -350,7 +350,7 @@ describe("account sweep", () => {
     let pageUnavailable = true;
     let laterScan = false;
     mockFetch(
-      on("GET", /^chatwoot.example.com\/api\/v1\/accounts\/\d+\/conversations$/, (request) => {
+      on("GET", /^chatwoot\.example\.com\/api\/v1\/accounts\/\d+\/conversations$/, (request) => {
         if (!request.url.pathname.includes("/accounts/1/") || request.url.searchParams.get("status") !== "pending")
           return json({ data: { payload: [] } });
         const page = Number(request.url.searchParams.get("page"));

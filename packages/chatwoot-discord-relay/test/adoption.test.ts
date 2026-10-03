@@ -393,7 +393,7 @@ it("cleans old standalone cards through multiple pages/restarts, never a body or
             : [],
       );
     }),
-    on("DELETE", new RegExp(`^discord.com/api/v10/channels/${THREAD}/messages/(\\d+)$`), (request) => {
+    on("DELETE", new RegExp(`^discord\\.com/api/v10/channels/${THREAD}/messages/(\\d+)$`), (request) => {
       if (fail) {
         fail = false;
         return json({}, { status: 503 });
