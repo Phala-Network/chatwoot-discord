@@ -309,8 +309,7 @@ export class Conversation extends DurableObject<Env> {
         !this.store.get("adoption:complete")
       ) {
         if (staged) {
-          if (!cutover || cutover.phase !== "active")
-            throw new Error("Unfinished adoption requires matching active cutover");
+          if (cutover?.phase !== "active") throw new Error("Unfinished adoption requires matching active cutover");
           const stage: { owner: ThreadOwner; threadId: string; epoch: string; watermark: number } = JSON.parse(staged);
           if (stage.epoch !== cutover.epoch || stage.watermark !== services.settings.config.relay.startAfterMessageId)
             throw new Error("Cutover epoch or watermark mismatch");

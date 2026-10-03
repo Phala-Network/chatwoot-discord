@@ -7,7 +7,6 @@ import { configSchema } from "../src/config.ts";
 import { control } from "../src/control.ts";
 import { QueueDigest } from "../src/digest.ts";
 import { DiscordLimiter, fingerprint, type LimitReport, LimitState, type Reservation } from "../src/discord/limiter.ts";
-import { DiscordRest } from "../src/discord/rest.ts";
 import { ForumRegistry } from "../src/registry.ts";
 import { AccountSweep } from "../src/sweep.ts";
 import { json, mockFetch, on } from "./helpers.ts";
