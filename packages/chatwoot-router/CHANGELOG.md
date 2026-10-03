@@ -24,7 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Remove cached inbox discovery, obsolete lifecycle cleanup/coordination effects and the single-use decision reader.
   Keep bounded turn/history reads and the existing 45-request budget.
 - Document relay-first bootstrap, disconnect-and-drain rollback to the recorded live 0.27 version/config, and the
-  distinction between Chatwoot message creation and channel delivery.
+  distinction between Chatwoot message creation and channel delivery. Preserve Router DO reply/turn guards during
+  rollback and describe the independent relay 0.27 ledger and cross-version reply-once limit.
 
 ## [0.2.0] - 2026-10-03
 

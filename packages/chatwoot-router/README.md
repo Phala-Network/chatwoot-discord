@@ -213,8 +213,12 @@ fail startup; `/healthz` returns 503 without credentials in its response. All se
 
 ## Upgrade and rollback
 
-Keep Worker names, Durable Object namespaces, old KV configuration keys and reply attempts. Existing pending
-conversations are reconciled; open conversations remain with people. The user token must see all relevant inboxes.
+Keep Worker names, Durable Object namespaces/storage and old KV configuration keys. The Router DO holds
+permanent reply attempts/observed records and turn guards as well as jobs and decisions. Message history cannot
+rebuild an unknown attempt, an observed reply since deleted, or a missing turn boundary. Do not delete or recreate
+the Router DO during rollback. If its state is lost or restored to an older recovery point, keep bots disconnected
+and isolate conversations with uncertain attempts/turns for owner review; a currently empty history does not
+prove another send is safe. Existing pending conversations are reconciled; non-pending conversations stay with people. The user token must see all relevant inboxes.
 
 For the first move from the relay's built-in routing (production baseline 0.27.0):
 
@@ -229,14 +233,20 @@ For the first move from the relay's built-in routing (production baseline 0.27.0
 4. Connect bots one account at a time and verify real routing, handoff, failed/unknown reply handling, historical
    reply deduplication and Discord/triage behavior, including at least a complete sweep.
 5. To roll back, disconnect bots first and **keep this router running until no pending ticket remains assigned to
-   a disconnected brand bot**. The account sweep uses native bot handoff, clearing the bot assignee. Then stop
+   a disconnected brand bot and no non-pending ticket remains assigned to that bot**. Repeat full account passes
+   until both sets are empty: pending uses native bot handoff; non-pending uses explicit unassignment without
+   changing status. Preserve human/other-bot owners. Then stop
    webhook entry, cron and queued/in-flight router work; stopping cron alone does not cancel DO alarms. Preserve DO
-   state. Restore the recorded live 0.27 version **and its CONFIG_KEY**, without overlapping old/new routing.
-   Evaluate tickets already replied to and old checkpoints before restoring 0.27: that relay does not understand
-   this router's reply guard and can repeat replies. Sent messages and other mutations are not undone by rollback.
+   namespace and storage, including reply and turn guards. Restore the recorded live 0.27 version **and its
+   CONFIG_KEY**, without overlapping old/new routing. Relay 0.27 uses its original Hub's
+   `kind-reply:<account>:<conversation>` records; the Router uses separate `reply:<account>:<conversation>`
+   records. Restoring code/config does not copy Router attempts into the Hub or reset either ledger. Only replies
+   already recorded by 0.27 retain its own reply-once protection; Router-only replies/unknown attempts can be
+   attempted again by 0.27. Keep both DOs and review/isolate those tickets before restoring old routing. Rollback
+   does not guarantee reply-once across this switch or undo sent messages or other mutations.
 
 Current router upgrades need no custom coordination attributes, compatibility effects or one-time lifecycle
-cleanup. Older unreadable job payloads are dropped; live snapshots and the pending sweep reconstruct work.
+cleanup. Older unreadable job payloads are dropped; live snapshots and the account sweep reconstruct queued work, not durable reply/turn guards.
 If handoff credentials fail, repair them or let a real owner take the tickets; do not bulk-open with the integration
 user token, which can assign every ticket to that user. Keep old attributes through the owner's rollback window.
 
