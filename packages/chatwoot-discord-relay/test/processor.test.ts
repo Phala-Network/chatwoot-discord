@@ -4,16 +4,25 @@
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Budget } from "../../../shared/budget.ts";
+import { Budget, JobDeadlineError } from "../../../shared/budget.ts";
 import { chatwootClient } from "../../../shared/chatwoot/api.ts";
 import type { Settings } from "../src/config.ts";
-import { DiscordForum } from "../src/discord/forum.ts";
 import { DiscordRest } from "../src/discord/rest.ts";
-import { minimumBudget, requestsPerMessage } from "../src/relay/limits.ts";
 import { type ProcessOutcome, processConversation, refreshMetadata, relayFor } from "../src/relay/processor.ts";
 import { processMessageUpdate } from "../src/relay/updates.ts";
 import { Store } from "../src/store.ts";
-import { ALICE, BOB, FORUM, json, mockFetch, on, type Recorded, TRIAGE, testSettings } from "./helpers.ts";
+import {
+  ALICE,
+  BOB,
+  TestForum as DiscordForum,
+  FORUM,
+  json,
+  mockFetch,
+  on,
+  type Recorded,
+  TRIAGE,
+  testSettings,
+} from "./helpers.ts";
 
 const GUILD = "100000000000000044";
 const now = () => Math.floor(Date.now() / 1000);
@@ -137,7 +146,7 @@ class World {
           return json({ message: "unavailable" }, { status: this.failPostsStatus });
         }
         this.threads += 1;
-        return json({ id: "card", channel_id: `20000000000000000${this.threads}` });
+        return json({ id: "100000000000001000", channel_id: `20000000000000000${this.threads}` });
       }),
     ).requests;
   }
@@ -174,7 +183,7 @@ class World {
 }
 
 async function withStore<T>(run: (store: Store) => Promise<T>): Promise<T> {
-  return runInDurableObject(env.HUB.getByName(`processor-${crypto.randomUUID()}`), (_instance, state) => {
+  return runInDurableObject(env.CONVERSATION.getByName(`processor-${crypto.randomUUID()}`), (_instance, state) => {
     const store = new Store(state.storage.sql);
     store.migrate();
     return run(store);
@@ -202,7 +211,9 @@ function context(store: Store, settings: Settings, limit = settings.config.relay
 /** Runs the conversation job until it is done, each run with a fresh budget, like the Hub does. */
 async function sync(store: Store, settings: Settings, limit?: number): Promise<ProcessOutcome[]> {
   const outcomes: ProcessOutcome[] = [];
-  for (let run = 0; run < 30; run += 1) {
+  for (let run = 0; run < 100; run += 1) {
+    // Each continuation is a later alarm; advance its upstream window without a real sleep.
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 1101);
     const outcome = await processConversation(context(store, settings, limit), 3, 12);
     outcomes.push(outcome);
     if (outcome === "done") return outcomes;
@@ -225,7 +236,7 @@ describe("processConversation", () => {
       { id: 501, content: "Update from Kim", message_type: 1 },
       { id: 502, content: "Kim updated the ticket", message_type: 2 },
     ];
-    await runInDurableObject(env.HUB.getByName("legacy-processor"), async (_instance, state) => {
+    await runInDurableObject(env.CONVERSATION.getByName("legacy-processor"), async (_instance, state) => {
       // A legacy database fixture, independent of the current migration implementation.
       const sql = state.storage.sql;
       for (const table of [
@@ -407,7 +418,7 @@ describe("processConversation", () => {
     });
   });
 
-  it("pages through more than 100 messages in one run", async () => {
+  it("pages through more than 100 messages across bounded alarms", async () => {
     const world = new World();
     world.messages = Array.from({ length: 130 }, (_, index) => ({
       id: index + 1,
@@ -415,10 +426,12 @@ describe("processConversation", () => {
       message_type: 1,
     }));
     await withStore(async (store) => {
-      expect(await sync(store, testSettings(), 1000)).toEqual(["done"]);
+      await sync(store, testSettings(), 35);
       expect(world.replies()).toEqual(world.messages.map((message) => message.content));
       const pages = world.sent("GET", "/messages").map((request) => request.url.searchParams.get("after"));
-      expect(pages).toEqual(["0", "100"]);
+      expect(pages[0]).toBe("0");
+      expect(Number(pages.at(-1))).toBeGreaterThan(100);
+      expect(store.conversation(3, 12)?.cursor).toBe(130);
     });
   });
 
@@ -430,7 +443,7 @@ describe("processConversation", () => {
       content: `n${index + 1}`,
       message_type: 1,
     }));
-    const limit = requestsPerMessage(settings.config.relay.maxChunks) + 10;
+    const limit = 20;
     await withStore(async (store) => {
       const outcomes = await sync(store, settings, limit);
       expect(outcomes.length).toBeGreaterThan(2);
@@ -440,7 +453,7 @@ describe("processConversation", () => {
   });
 
   it("relays a message in its worst case within the smallest budget the configuration accepts", async () => {
-    const settings = testSettings({ relay: { maxChunks: 10, subrequestBudget: minimumBudget(10) } });
+    const settings = testSettings({ relay: { maxChunks: 10, subrequestBudget: 20 } });
     const world = new World();
     // The link attribute names a post deleted in Discord: checked, then a new post is opened.
     world.goneThreads.add("300000000000000009");
@@ -452,7 +465,7 @@ describe("processConversation", () => {
       { id: 1, content: "x\n".repeat(15_000), message_type: 1, sender: { id: 43, type: "user", name: "Bob" } },
     ];
     await withStore(async (store) => {
-      expect(await sync(store, settings)).toEqual(["done"]);
+      expect((await sync(store, settings)).length).toBeGreaterThan(1);
       const replies = world.replies();
       expect(replies).toHaveLength(11);
       expect(replies.at(-1)).toMatch(/^-# Message truncated/);
@@ -496,17 +509,13 @@ describe("processConversation", () => {
       await sync(store, settings);
       world.messages.push({ id: 2, content: "refused", message_type: 1 });
       // Refused on every attempt; the notice afterwards is accepted.
-      let refusals = maxAttempts;
-      world.threadFailure = () => {
-        refusals -= 1;
-        return refusals >= 0
-          ? json({ message: "Invalid Form Body", code: 50035 }, { status: 400 })
-          : json({ id: "notice", channel_id: "x" });
-      };
+      world.threadFailure = () => json({ message: "Invalid Form Body", code: 50035 }, { status: 400 });
       for (let attempt = 1; attempt < maxAttempts; attempt += 1) {
         await expect(processConversation(context(store, settings), 3, 12)).rejects.toThrow(/Discord HTTP 400/);
       }
+      world.threadFailure = undefined;
       expect(await processConversation(context(store, settings), 3, 12)).toBe("done");
+      expect(world.replies().filter((content) => content === "refused")).toHaveLength(1);
 
       expect(world.posts().at(-1)?.body.content).toBe(
         "⚠️ Chatwoot message 2 could not be relayed. Check it in Chatwoot.",
@@ -1045,7 +1054,7 @@ describe("agent bot lifecycle", () => {
     await withStore(async (store) => {
       const settings = testSettings();
       for (let alarm = 0; alarm < 5 && world.posts().length === 0; alarm += 1) {
-        await processConversation(context(store, settings, minimumBudget(4)), 3, 12);
+        await processConversation(context(store, settings, 20), 3, 12);
       }
       expect(world.replies().find((text) => text.startsWith("A customer request"))).toContain(`<@${TRIAGE}>`);
     });
@@ -1063,7 +1072,7 @@ describe("agent bot lifecycle", () => {
       ];
       await withStore(async (store) => {
         const settings = testSettings();
-        expect(await processConversation(context(store, settings, minimumBudget(4)), 3, 12)).toBe("yield");
+        expect(await processConversation(context(store, settings, 5), 3, 12)).toBe("yield");
         expect(world.posts()).toEqual([]);
 
         if (change === "arrives") world.messages.push(reply);
@@ -1088,24 +1097,12 @@ it("continues after a time slice without replaying already posted messages", asy
     store.setCursor(3, 12, 0);
     const services = context(store, settings);
     services.budget.startSlice(150);
-    // The first post succeeds. Reading the next message's decoration is not needed for activities;
-    // stop at the next GET after that post, then resume through a fresh invocation.
-    const realFetch = vi.mocked(globalThis.fetch).getMockImplementation();
-    if (!realFetch) throw new Error("Missing world fetch");
-    let firstPosted = false;
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (request, init) => {
-      const input = new Request(request, init);
-      if (firstPosted && input.method === "GET") {
-        await new Promise<void>((_resolve, reject) =>
-          input.signal.addEventListener("abort", () => reject(input.signal.reason), { once: true }),
-        );
-      }
-      const response = await realFetch(input);
-      if (input.method === "POST" && new URL(input.url).pathname === "/api/v10/webhooks/1/tok") firstPosted = true;
-      return response;
+    const checkpoint = services.budget.checkpoint.bind(services.budget);
+    vi.spyOn(services.budget, "checkpoint").mockImplementation(() => {
+      if (world.replies().length === 1) throw new JobDeadlineError();
+      checkpoint();
     });
     await expect(processConversation(services, 3, 12)).rejects.toThrow(/time slice/);
-    vi.mocked(globalThis.fetch).mockImplementation(realFetch);
     await sync(store, settings);
     expect(world.replies()).toEqual(["_first_", "_second_"]);
   });

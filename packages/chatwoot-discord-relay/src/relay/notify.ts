@@ -24,6 +24,7 @@ interface NotifierOptions {
   /** A message created longer ago than this is history. */
   liveSeconds: number;
   now: () => Date;
+  reserveTriage?: ((hour: string, key: string, limit: number) => Promise<boolean>) | undefined;
 }
 
 interface Notification {
@@ -55,12 +56,12 @@ export class Notifier {
   }
 
   /** The notification lines for a message; the same on every attempt at posting it. */
-  notification(message: RelayMessage): Notification {
+  async notification(message: RelayMessage): Promise<Notification> {
     if (!this.notifies(message)) return { lines: [], users: [] };
     // While a new assignee waits for their announcement, which pings them, do not ping twice.
     const ping = fromCustomer(message) && !this.newAssignee(message.account.id, message.conversation);
     const assignee = ping ? this.linkedAssignee(message.conversation) : undefined;
-    const triage = this.triage(message);
+    const triage = await this.triage(message);
     const mentions = [triage.mention, assignee].filter((id) => id !== undefined).map((id) => `<@${id}>`);
     const lines = [mentions.length > 0 ? `-# ${mentions.join(" ")}` : undefined, triage.note].filter(
       (line) => line !== undefined,
@@ -97,20 +98,33 @@ export class Notifier {
    * The triage bot mention for a customer message, or a note when a routing kind handled
    * it or the bot's hourly budget is used up.
    */
-  private triage(message: RelayMessage): { mention?: string; note?: string } {
+  private async triage(message: RelayMessage): Promise<{ mention?: string; note?: string }> {
     const { triage, store } = this.options;
     if (!fromCustomer(message)) return {};
     if (!triage) return {};
     const { account, conversation } = message;
     // Decided and counted once per message: a retry after a failed post repeats the decision.
-    const decision = store.once(`triage:${account.id}:${message.id}`, () => {
-      if (conversation.status !== "open" || message.answered) return "answered";
+    const event = `triage:${account.id}:${conversation.id}:${message.id}`;
+    let decision = store.get(event);
+    if (decision === undefined) {
       const hour = this.options.now().toISOString().slice(0, 13);
-      const key = `${message.account.id}:${message.conversation.id}`;
-      if (store.increment(`triage:${key}:${hour}`) > triage.perConversationPerHour) return "conversation";
-      if (store.increment(`triage:${hour}`) > triage.perHour) return "hour";
-      return "mention";
-    });
+      if (conversation.status !== "open" || message.answered) decision = "answered";
+      else if (store.increment(`triage:${account.id}:${conversation.id}:${hour}`) > triage.perConversationPerHour)
+        decision = "conversation";
+      else {
+        // Persist fail-closed before RPC: a lost grant is never retried under another key.
+        store.set(event, "hour");
+        try {
+          const granted = this.options.reserveTriage
+            ? await this.options.reserveTriage(hour, event, triage.perHour)
+            : store.increment(`triage:${hour}`) <= triage.perHour;
+          decision = granted ? "mention" : "hour";
+        } catch {
+          decision = "hour";
+        }
+      }
+      store.set(event, decision);
+    }
     if (decision === "answered") return { note: handledNote(triage) };
     if (decision === "conversation") return { note: conversationBudgetNote(triage) };
     if (decision === "hour") return { note: hourlyBudgetNote(triage) };

@@ -262,30 +262,6 @@ export class Store extends QueueStore implements RelayStore, Cache {
     return row ? { accountId: row.account_id, conversationId: row.conversation_id } : undefined;
   }
 
-  /**
-   * Up to `limit` of the account's posts that have no card, whose ticket was not resolved when
-   * last synced (`state` is Relay.stateOf, which starts with the status), and that were not taken
-   * in the last `retryMs`; each is taken (see backfillCards in hub.ts).
-   */
-  takePostsWithoutCard(accountId: number, limit: number, retryMs: number): number[] {
-    const ids = this.sql
-      .exec<{ conversation_id: number }>(
-        `SELECT c.conversation_id FROM conversations c
-         LEFT JOIN cache taken ON taken.key = 'card-backfill:' || c.account_id || ':' || c.conversation_id
-           AND (taken.expires_at IS NULL OR taken.expires_at > ?)
-         WHERE c.account_id = ? AND c.thread_id IS NOT NULL AND c.card_id IS NULL AND taken.key IS NULL
-           AND (c.state IS NULL OR c.state NOT LIKE '["resolved"%')
-         ORDER BY c.conversation_id DESC LIMIT ?`,
-        this.now(),
-        accountId,
-        limit,
-      )
-      .toArray()
-      .map((row) => row.conversation_id);
-    for (const id of ids) this.set(`card-backfill:${accountId}:${id}`, "1", retryMs);
-    return ids;
-  }
-
   setCursor(accountId: number, conversationId: number, cursor: number): void {
     this.ensureRow(accountId, conversationId);
     this.sql.exec(
@@ -400,8 +376,16 @@ export class Store extends QueueStore implements RelayStore, Cache {
   }
 
   forgetThread(accountId: number, conversationId: number): void {
-    const key = `send:post:${accountId}:${conversationId}`;
-    if (this.get(key) !== "unknown") this.delete(key);
+    const threadId = this.conversation(accountId, conversationId)?.threadId;
+    if (threadId) {
+      this.set(
+        "directory:tombstone",
+        JSON.stringify({ threadId, owner: JSON.parse(this.get("directory:owner") ?? "null") }),
+      );
+      this.set("generation", String(Number(this.get("generation") ?? 1) + 1));
+      this.delete("directory:thread");
+      this.delete("directory:owner");
+    }
     this.sql.exec(
       `UPDATE conversations SET thread_id = NULL, state = NULL, announced_assignee = NULL, assignee_notice_id = NULL, announce_pending = NULL,
          title_subject = NULL, title = NULL, title_message_id = NULL, card_id = NULL, card_covered = NULL, answer_id = NULL,

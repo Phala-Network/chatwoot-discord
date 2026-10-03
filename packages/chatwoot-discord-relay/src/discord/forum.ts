@@ -21,19 +21,17 @@ import {
   Routes,
   WebhookType,
 } from "discord-api-types/v10";
-import { parallel } from "../../../../shared/concurrent.ts";
 import { log } from "../../../../shared/log.ts";
 import { Effects } from "../effects.ts";
+import type { ForumAccess, ForumSnapshot } from "../registry.ts";
 import { type ForumClient, type SendOutcome, UnknownThreadError, type WebhookMessage } from "../relay/relay.ts";
 import { DiscordHttpError, type DiscordRest } from "./rest.ts";
 
-const WEBHOOK_NAME = "Chatwoot";
 /** Discord answers a request to a deleted post with this code, with HTTP 404 or, for a webhook, 400. */
 const UNKNOWN_CHANNEL = 10003;
 const UNKNOWN_WEBHOOK = 10015;
 const UNKNOWN_MESSAGE = 10008;
 const UNKNOWN_TAG = 10087;
-const APPLICATION_KEY = "discord:application";
 
 export interface Cache {
   get(key: string): string | undefined;
@@ -46,6 +44,7 @@ export class DiscordForum implements ForumClient {
   constructor(
     private readonly rest: DiscordRest,
     private readonly cache: Cache,
+    private readonly access: ForumAccess,
   ) {}
 
   async execute(
@@ -88,7 +87,7 @@ export class DiscordForum implements ForumClient {
     } catch (error) {
       if (threadId && isUnknownChannel(error)) throw new UnknownThreadError(threadId);
       if (error instanceof DiscordHttpError && error.status === 404) {
-        if (error.code === UNKNOWN_WEBHOOK) this.cache.delete(webhookKey(forumChannelId));
+        if (error.code === UNKNOWN_WEBHOOK) await this.access.invalidate(forumChannelId, webhook.version);
         else if (threadId) throw new UnknownThreadError(threadId);
       }
       throw error;
@@ -136,7 +135,7 @@ export class DiscordForum implements ForumClient {
       if (isUnknownChannel(error)) throw new UnknownThreadError(threadId);
       if (error instanceof DiscordHttpError && error.status === 404) {
         if (error.code === UNKNOWN_MESSAGE) return false;
-        if (error.code === UNKNOWN_WEBHOOK) this.cache.delete(webhookKey(forumChannelId));
+        if (error.code === UNKNOWN_WEBHOOK) await this.access.invalidate(forumChannelId, webhook.version);
         else throw new UnknownThreadError(threadId);
       }
       throw error;
@@ -155,7 +154,7 @@ export class DiscordForum implements ForumClient {
       if (isUnknownChannel(error)) return;
       if (error instanceof DiscordHttpError && error.status === 404) {
         if (error.code === UNKNOWN_MESSAGE) return;
-        if (error.code === UNKNOWN_WEBHOOK) this.cache.delete(webhookKey(forumChannelId));
+        if (error.code === UNKNOWN_WEBHOOK) await this.access.invalidate(forumChannelId, webhook.version);
       }
       throw error;
     }
@@ -172,54 +171,18 @@ export class DiscordForum implements ForumClient {
   }
 
   async postUrl(forumChannelId: string, threadId: string): Promise<string> {
-    const key = `forum:${forumChannelId}:guild`;
-    let guildId = this.cache.get(key);
-    if (!guildId) {
-      const channel = await this.rest.get<RESTGetAPIChannelResult>(Routes.channel(forumChannelId));
-      guildId = "guild_id" in channel ? (channel.guild_id ?? "") : "";
-      if (guildId) this.cache.set(key, guildId); // A channel never changes its guild.
-    }
-    return `https://discord.com/channels/${guildId}/${threadId}`;
+    const snapshot = await this.webhook(forumChannelId);
+    return `https://discord.com/channels/${snapshot.guildId}/${threadId}`;
   }
 
   async addMember(threadId: string, userId: string): Promise<void> {
     await this.rest.put<RESTPutAPIChannelThreadMembersResult, never>(Routes.threadMembers(threadId, userId), {});
   }
 
-  /**
-   * Reuses the forum's incoming webhook this application created, or creates it. A webhook is
-   * recognized by its creator's application id, not its name: another integration's webhook of
-   * the same name is never used.
-   */
-  private async webhook(forumChannelId: string): Promise<{ id: string; token: string }> {
-    const key = webhookKey(forumChannelId);
-    const [id, token] = this.cache.get(key)?.split(":") ?? [];
-    if (id && token) return { id, token };
-    const [applicationId, hooks] = await parallel(
-      this.applicationId(),
-      this.rest.get<RESTGetAPIChannelWebhooksResult>(Routes.channelWebhooks(forumChannelId)),
-    );
-    const existing = hooks.find(
-      (hook) => hook.type === WebhookType.Incoming && hook.application_id === applicationId && hook.token,
-    );
-    const hook =
-      existing ??
-      (await this.rest.post<RESTPostAPIChannelWebhookResult, RESTPostAPIChannelWebhookJSONBody>(
-        Routes.channelWebhooks(forumChannelId),
-        { body: { name: WEBHOOK_NAME } },
-      ));
-    if (!hook.token) throw new Error("Discord returned a webhook without a token");
-    this.cache.set(key, `${hook.id}:${hook.token}`);
-    return { id: hook.id, token: hook.token };
-  }
-
-  /** This bot's application id, which never changes. */
-  private async applicationId(): Promise<string> {
-    const cached = this.cache.get(APPLICATION_KEY);
-    if (cached) return cached;
-    const { id } = await this.rest.get<RESTGetCurrentApplicationResult>(Routes.currentApplication());
-    this.cache.set(APPLICATION_KEY, id);
-    return id;
+  private async webhook(forumChannelId: string): Promise<ForumSnapshot> {
+    const snapshot = await this.access.lookup(forumChannelId);
+    if (!snapshot) throw new DiscordHttpError(429, undefined, "forum not ready", 1000);
+    return snapshot;
   }
 
   /**
@@ -250,8 +213,4 @@ export class DiscordForum implements ForumClient {
 
 function isUnknownChannel(error: unknown): boolean {
   return error instanceof DiscordHttpError && error.code === UNKNOWN_CHANNEL;
-}
-
-function webhookKey(forumChannelId: string): string {
-  return `forum:${forumChannelId}:webhook`;
 }

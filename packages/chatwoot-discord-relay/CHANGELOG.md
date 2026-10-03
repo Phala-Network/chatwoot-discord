@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- Partition relay execution by account and conversation. Dedicated thread directories, account sweeps, forum registries, triage budgets, channel digests and a scoped Discord reservation/report limiter own shared coordination without executing other conversations' jobs.
+- Preserve durable unknown message effects and unsent tails; confirm state mutations against the complete frozen target. Commands report their confirmed result before optional panels and card convergence.
+- Existing single-Hub installations require a drained adoption cut and prebuilt directory; see [the cutover/rollback runbook](docs/adoption.md). Drafts, hourly counters and pre-watermark deletion associations are intentionally not imported. Minimal response and escalation baselines remain. The old Hub is a retired shell during the evidence window; the separately reviewed `retire-hub` configuration deletes only its class afterwards.
+
 ## [Unreleased]
 
 ### Changed

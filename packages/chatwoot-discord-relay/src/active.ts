@@ -1,3 +1,4 @@
+// Post-observation entrypoint: the retired Hub is deliberately not exported.
 export {
   AccountSweep,
   Conversation,
@@ -7,4 +8,4 @@ export {
   QueueDigest,
   ThreadDirectory,
   TriageBudget,
-} from "chatwoot-discord-relay";
+} from "./index.ts";

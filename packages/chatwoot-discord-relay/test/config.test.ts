@@ -40,16 +40,10 @@ describe("configuration", () => {
     expect(configSchema.safeParse({ ...minimal, accounts: [account] }).success).toBe(false);
   });
 
-  it("requires a subrequest budget that fits a run's setup and one message of relay.maxChunks parts", () => {
-    const budget = (subrequestBudget: number) =>
-      configSchema.safeParse({ ...minimal, relay: { maxChunks: 10, subrequestBudget } });
-    // Accepted before, though a run's setup left too little for the message: it yielded forever.
-    const result = budget(25);
-    expect(result.success).toBe(false);
-    expect(result.error?.issues.map((issue) => issue.path.join("."))).toEqual(["relay.subrequestBudget"]);
-    expect(budget(37).success).toBe(false);
-    expect(budget(39).success).toBe(false);
-    expect(budget(40).success).toBe(true);
+  it("accepts a small invocation budget for a message that continues across alarms", () => {
+    expect(configSchema.safeParse({ ...minimal, relay: { maxChunks: 10, subrequestBudget: 20 } }).success).toBe(true);
+    expect(configSchema.safeParse({ ...minimal, relay: { subrequestBudget: 19 } }).success).toBe(false);
+    expect(configSchema.safeParse({ ...minimal, relay: { subrequestBudget: 1001 } }).success).toBe(false);
   });
 
   it("links agents by Chatwoot user id, each Discord and Chatwoot user once", () => {
@@ -102,12 +96,12 @@ describe("configuration", () => {
     expect(configSchema.safeParse({ ...minimal, routing: { accounts: {} } }).success).toBe(false);
   });
 
-  it("requires a subrequest budget that fits the support queue", () => {
+  it("accepts a queue whose account pages span multiple alarms", () => {
     const queue = { channelId: "100000000000000900" };
     const accounts = Array.from({ length: 11 }, (_, i) => ({ ...minimal.accounts[0], id: i + 1 }));
     expect(configSchema.safeParse({ ...minimal, queue }).success).toBe(true);
     const result = configSchema.safeParse({ ...minimal, accounts, queue });
-    expect(result.error?.issues.map((issue) => issue.path.join("."))).toEqual(["relay.subrequestBudget"]);
+    expect(result.success).toBe(true);
   });
 
   it("bounds the triage bot's name, which its budget notes repeat", () => {

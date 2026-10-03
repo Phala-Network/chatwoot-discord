@@ -18,13 +18,14 @@ import {
 import { z } from "zod";
 import type { Budget } from "../../../shared/budget.ts";
 import { type ChatwootClient, CONVERSATIONS_PER_PAGE, personAssignee } from "../../../shared/chatwoot/api.ts";
-import { parallel } from "../../../shared/concurrent.ts";
 import { parseJson } from "../../../shared/json.ts";
 import { log } from "../../../shared/log.ts";
 import { relaysInbox, type Settings } from "./config.ts";
 import type { DiscordRest } from "./discord/rest.ts";
+import { Effects } from "./effects.ts";
 import { PENDING_PAGES, QUEUE_MESSAGES, QUEUE_PAGES, SNOOZED_PAGES } from "./queue-limits.ts";
 import { clip, conversationUrl, defused } from "./relay/format.ts";
+import { threadIdFromUrl } from "./relay/processor.ts";
 
 const ESCALATION_HOURS = [1, 2, 4, 8, 16];
 const ESCALATION_REPEAT_HOURS = 24;
@@ -39,7 +40,7 @@ const ESCALATIONS_KEY = "queue:escalations";
 export interface QueueStore {
   get(key: string): string | undefined;
   set(key: string, value: string, ttlMs?: number): void;
-  conversation(accountId: number, conversationId: number): { threadId?: string | undefined } | undefined;
+  conversation?(accountId: number, conversationId: number): { threadId?: string | undefined } | undefined;
 }
 
 export interface QueueContext {
@@ -59,18 +60,12 @@ const ticketSchema = z.object({
   escalate: z.boolean(),
   snoozed: z.boolean(),
   pending: z.boolean(),
+  threadId: z.string().optional(),
 });
 type Ticket = z.infer<typeof ticketSchema>;
 const passSchema = z.object({
-  chains: z.array(
-    z.object({
-      accountId: z.number(),
-      status: z.enum(["open", "snoozed", "pending"]),
-      pages: z.number(),
-      page: z.number(),
-      done: z.boolean(),
-    }),
-  ),
+  source: z.number().int().nonnegative(),
+  page: z.number().int().positive(),
   tickets: z.array(ticketSchema),
   unread: z.boolean(),
   part: z.number().int().min(0),
@@ -82,7 +77,7 @@ interface Chunk {
   role: boolean;
 }
 
-const escalationsSchema = z.record(z.string(), z.object({ since: z.number(), level: z.number() }));
+export const escalationsSchema = z.record(z.string(), z.object({ since: z.number(), level: z.number() }));
 type Escalations = z.infer<typeof escalationsSchema>;
 
 /** How many escalation steps (1, 2, 4, 8, 16 h, then every 24 h) a wait has reached. */
@@ -117,56 +112,51 @@ export async function postQueue(
   const pass = savedPass.success
     ? savedPass.data
     : {
-        chains: settings.config.accounts.flatMap((account) =>
-          reads.map((read) => ({ accountId: account.id, ...read, page: 1, done: false })),
-        ),
+        source: 0,
+        page: 1,
         tickets: [],
         unread: false,
         part: 0,
       };
   const save = () => store.set(key, JSON.stringify(pass), 3 * 60 * 1000);
+  const sources = settings.config.accounts.flatMap((account) => reads.map((read) => ({ account, ...read })));
   let read = 0;
-  while (pass.chains.some((chain) => !chain.done)) {
-    if (Date.now() > deadline) return "done";
+  while (pass.source < sources.length) {
+    if (Date.now() >= deadline) return "done";
     budget?.checkpoint();
-    if (budget && (read >= 2 || budget.remaining < 2)) {
+    if (budget && (read >= 1 || budget.remaining < 8)) {
       save();
       return "yield";
     }
-    const chains = pass.chains.filter((chain) => !chain.done).slice(0, 2);
-    const pages = await parallel(
-      ...chains.map((chain) => chatwoot.listConversations(chain.accountId, chain.page, chain.status)),
-    );
-    for (const [index, chain] of chains.entries()) {
-      const conversations = pages[index];
-      if (!conversations) throw new Error("Missing queue page");
-      const account = settings.account(chain.accountId);
-      if (!account) {
-        chain.done = true;
-        continue;
-      }
-      for (const conversation of conversations) {
-        const conversationId = conversation.id;
-        if (conversationId === undefined || !relaysInbox(account, conversation.inbox_id)) continue;
-        const assignee = personAssignee(conversation);
-        const waitingSince = conversation.waiting_since ?? 0;
-        if (chain.status !== "pending" && assignee && !waitingSince) continue;
-        pass.tickets.push({
-          accountId: account.id,
-          accountName: account.name,
-          conversationId,
-          waitingSince,
-          assignee: assignee?.id ? { id: assignee.id, name: assignee.name ?? "" } : null,
-          escalate: false,
-          snoozed: chain.status === "snoozed",
-          pending: chain.status === "pending",
-        });
-      }
-      chain.done = conversations.length < CONVERSATIONS_PER_PAGE || chain.page >= chain.pages;
-      if (chain.page >= chain.pages && conversations.length === CONVERSATIONS_PER_PAGE) pass.unread = true;
-      chain.page += 1;
+    const source = sources[pass.source];
+    if (!source) break;
+    const { account, status, pages } = source;
+    const conversations = await chatwoot.listConversations(account.id, pass.page, status);
+    for (const conversation of conversations) {
+      const conversationId = conversation.id;
+      if (conversationId === undefined || !relaysInbox(account, conversation.inbox_id)) continue;
+      const assignee = personAssignee(conversation);
+      const waitingSince = conversation.waiting_since ?? 0;
+      if (status !== "pending" && assignee && !waitingSince) continue;
+      const threadId = threadIdFromUrl(conversation.custom_attributes?.[settings.config.relay.linkAttribute]);
+      pass.tickets.push({
+        accountId: account.id,
+        accountName: account.name,
+        conversationId,
+        waitingSince,
+        assignee: assignee?.id ? { id: assignee.id, name: assignee.name ?? "" } : null,
+        escalate: false,
+        snoozed: status === "snoozed",
+        pending: status === "pending",
+        ...(threadId ? { threadId } : {}),
+      });
     }
-    read += chains.length;
+    if (conversations.length < CONVERSATIONS_PER_PAGE || pass.page >= pages) {
+      if (pass.page >= pages && conversations.length === CONVERSATIONS_PER_PAGE) pass.unread = true;
+      pass.source += 1;
+      pass.page = 1;
+    } else pass.page += 1;
+    read += 1;
     save();
   }
   const tickets = pass.tickets;
@@ -202,10 +192,26 @@ export async function postQueue(
   for (let index = pass.part; index < chunks.length; index += 1) {
     if (late()) return "done";
     budget?.checkpoint();
-    if (budget && budget.remaining < 1) return "yield";
+    if (budget && budget.remaining < 8) return "yield";
     const chunk = chunks[index];
     if (!chunk) break;
-    await post(rest, queue.channelId, chunk, queue.escalationRoleId, nonce(index));
+    const effect = await new Effects(store).run(
+      `digest:${queue.channelId}:${Math.floor(nowSeconds / 3600)}:${index}`,
+      { content: chunk.content, users: [...chunk.users], role: chunk.role },
+      async (frozen) => {
+        const receipt = await post(
+          rest,
+          queue.channelId,
+          { ...frozen, users: new Set(frozen.users) },
+          queue.escalationRoleId,
+          nonce(index),
+        );
+        if (!receipt?.id || !/^\d+$/.test(receipt.id)) throw new TypeError("Missing digest receipt");
+        return { messageId: receipt.id };
+      },
+    );
+    if (effect.state === "UNKNOWN")
+      log.warn("digest part unknown", { part: index, hour: Math.floor(nowSeconds / 3600) });
     if (index === 0) store.set(ESCALATIONS_KEY, JSON.stringify(unread ? { ...previous, ...escalations } : escalations));
     pass.part = index + 1;
     save();
@@ -260,7 +266,7 @@ function messages(ctx: QueueContext, tickets: Ticket[], nowSeconds: number, unre
 
 function line(ctx: QueueContext, ticket: Ticket, nowSeconds: number): string {
   const { settings, store } = ctx;
-  const threadId = store.conversation(ticket.accountId, ticket.conversationId)?.threadId;
+  const threadId = ticket.threadId ?? store.conversation?.(ticket.accountId, ticket.conversationId)?.threadId;
   const url = conversationUrl(settings.frontendUrl, ticket.accountId, ticket.conversationId);
   const post = threadId ? `<#${threadId}>` : `[${ticket.accountName} #${ticket.conversationId}](<${url}>)`;
   const waiting = ticket.waitingSince ? `waiting ${duration(nowSeconds - ticket.waitingSince)}` : "replied";
@@ -287,8 +293,8 @@ async function post(
   chunk: Chunk,
   roleId: string | undefined,
   nonce: string,
-): Promise<void> {
-  await rest.post<RESTPostAPIChannelMessageResult, RESTPostAPIChannelMessageJSONBody>(
+): Promise<RESTPostAPIChannelMessageResult> {
+  return rest.post<RESTPostAPIChannelMessageResult, RESTPostAPIChannelMessageJSONBody>(
     Routes.channelMessages(channelId),
     {
       body: {

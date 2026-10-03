@@ -11,6 +11,7 @@ export interface Effect<T, Request = unknown> {
   request: Request;
   startedAt?: number;
   receipt?: T;
+  rejection?: { upstream: "discord" | "chatwoot"; status: number; code?: number };
 }
 
 export class Effects {
@@ -33,6 +34,12 @@ export class Effects {
   ): Promise<Effect<T, Request>> {
     const effect = this.read<T, Request>(key) ?? { state: "READY", request };
     if (effect.state === "DISPATCHING") this.save(key, { ...effect, state: "UNKNOWN" });
+    if (effect.state === "REJECTED" && effect.rejection) {
+      const rejected = effect.rejection;
+      if (rejected.upstream === "discord")
+        throw new DiscordHttpError(rejected.status, rejected.code, "previously rejected");
+      throw new ChatwootError(rejected.status, "previously rejected");
+    }
     if (effect.state !== "READY") return this.read<T, Request>(key) ?? effect;
     this.save(key, { ...effect, state: "DISPATCHING", startedAt: Date.now() });
     try {
@@ -43,13 +50,21 @@ export class Effects {
       if (
         error instanceof BudgetExhaustedError ||
         (error instanceof JobDeadlineError && !error.requestStarted) ||
-        (http && error.status === 429)
+        (http && [401, 403, 404, 429].includes(error.status))
       ) {
         this.save(key, { ...effect, state: "READY" });
         throw error;
       }
       if (http && error.status >= 400 && error.status < 500 && error.status !== 408) {
-        this.save(key, { ...effect, state: "REJECTED" });
+        this.save(key, {
+          ...effect,
+          state: "REJECTED",
+          rejection: {
+            upstream: error instanceof DiscordHttpError ? "discord" : "chatwoot",
+            status: error.status,
+            ...(error instanceof DiscordHttpError && error.code !== undefined ? { code: error.code } : {}),
+          },
+        });
         throw error;
       }
       log.warn("effect outcome unknown", { effectId: key });

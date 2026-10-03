@@ -1,7 +1,7 @@
 // Worker entry: verifies and acknowledges Chatwoot webhooks and Discord interactions, and hands
-// all slow work to the Hub Durable Object. Each request stays within a few milliseconds of CPU.
+// slow work to the conversation Durable Object. Each request stays within a few milliseconds of CPU.
 
-import type { APIInteraction } from "discord-api-types/v10";
+import { type APIInteraction, InteractionResponseType, InteractionType, MessageFlags } from "discord-api-types/v10";
 import { verifyKey } from "discord-interactions";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -11,17 +11,13 @@ import { errorFields, log } from "../../../shared/log.ts";
 import { eventTarget, isFreshTimestamp, verifyChatwootSignature } from "./chatwoot/webhook.ts";
 import { CONTENT_MAX } from "./commands/definitions.ts";
 import { ConfigError } from "./config.ts";
+import { control, conversation } from "./control.ts";
 import type { Env } from "./env.ts";
-import { HUB_NAME } from "./hub.ts";
 import { loadSettings } from "./settings.ts";
 
 const INTERACTION_DEADLINE_MS = 2500;
 
 const app = new Hono<{ Bindings: Env }>();
-
-function hub(env: Env) {
-  return env.HUB.getByName(HUB_NAME);
-}
 
 app.get("/healthz", async (c) => {
   try {
@@ -64,11 +60,13 @@ app.post("/chatwoot/webhook", bodyLimit({ maxSize: 2 * 1024 * 1024 }), async (c)
     return c.text("account does not match the webhook secret", 403);
   }
 
-  const stub = hub(c.env);
+  const stub = conversation(c.env, target.accountId, target.conversationId);
   if (target.type === "message-updated") {
-    await stub.enqueueMessageUpdate(target.accountId, target.conversationId, target.messageId);
+    await control(undefined, () =>
+      stub.enqueueMessageUpdate(target.accountId, target.conversationId, target.messageId),
+    );
   } else {
-    await stub.enqueueConversation(target.accountId, target.conversationId, target.delayMs);
+    await control(undefined, () => stub.enqueueConversation(target.accountId, target.conversationId, target.delayMs));
   }
   return c.json({ ok: true });
 });
@@ -99,7 +97,14 @@ app.post("/triage/answered", bodyLimit({ maxSize: 64 * 1024 }), async (c) => {
   } catch {
     return c.text("bad request", 400);
   }
-  await hub(c.env).triageAnswered(answer.threadId, answer.answerId, answer.replyTo, answer.draft);
+  const owner = await control(undefined, () => c.env.THREAD_DIRECTORY.getByName(`thread:v1:${answer.threadId}`).get());
+  if (!owner || !(await loadSettings(c.env)).account(owner.accountId)) return c.text("unknown thread", 404);
+  await conversation(c.env, owner.accountId, owner.conversationId).triageAnswered(
+    answer.threadId,
+    answer.answerId,
+    answer.replyTo,
+    answer.draft,
+  );
   return c.json({ ok: true });
 });
 
@@ -127,7 +132,28 @@ app.post("/discord/interactions", async (c) => {
           return c.text("bad request", 400);
         }
         deadline.throwIfAborted();
-        return c.json(await hub(c.env).interaction(interaction));
+        if (interaction.type === InteractionType.Ping) return c.json({ type: InteractionResponseType.Pong });
+        const refuse = (content: string) =>
+          c.json({
+            type: InteractionResponseType.ChannelMessageWithSource,
+            data: { flags: MessageFlags.Ephemeral, content },
+          });
+        if (settings.config.cutover?.phase === "maintenance")
+          return refuse(
+            "Relay maintenance: this command was not accepted or executed. Please try again after maintenance.",
+          );
+        if (settings.config.cutover && BigInt(interaction.id) <= BigInt(settings.config.cutover.interactionFence))
+          return refuse("This interaction belongs to the previous relay. Please reopen the command or editor.");
+        const threadId = interaction.channel?.id ?? interaction.channel_id;
+        if (!threadId) return refuse("Use this command inside a ticket post in the Chatwoot forum.");
+        const owner = await control(undefined, () => c.env.THREAD_DIRECTORY.getByName(`thread:v1:${threadId}`).get());
+        if (
+          !owner ||
+          settings.account(owner.accountId)?.forumChannelId !== owner.forumId ||
+          interaction.guild_id !== owner.guildId
+        )
+          return refuse("Use this command inside a ticket post in the Chatwoot forum.");
+        return c.json(await conversation(c.env, owner.accountId, owner.conversationId).interaction(interaction, owner));
       })(),
       deadline,
     );
@@ -148,15 +174,30 @@ app.onError((error, c) => {
 const handler = {
   fetch: app.fetch,
   async scheduled(controller, env, ctx) {
-    ctx.waitUntil(hub(env).requestSweep());
-    // The support queue is posted hourly, by the run at minute 0.
-    if (new Date(controller.scheduledTime).getUTCMinutes() === 0) ctx.waitUntil(hub(env).requestQueue());
+    const settings = await loadSettings(env);
+    if (settings.config.cutover?.phase === "maintenance") return;
+    for (const account of settings.config.accounts)
+      ctx.waitUntil(env.ACCOUNT_SWEEP.getByName(`account:v1:${account.id}`).request(account.id));
+    for (const forumId of new Set(settings.config.accounts.map((account) => account.forumChannelId)))
+      ctx.waitUntil(env.FORUM_REGISTRY.getByName(`forum:v1:${forumId}`).lookup(forumId));
+    const queue = settings.config.queue;
+    if (
+      queue &&
+      new Date(controller.scheduledTime).getUTCMinutes() === 0 &&
+      controller.scheduledTime >= (settings.config.cutover?.notificationsAfter ?? 0)
+    )
+      ctx.waitUntil(env.QUEUE_DIGEST.getByName(`digest:v1:${queue.channelId}`).request(controller.scheduledTime));
   },
 } satisfies ExportedHandler<Env>;
 
 export default handler;
 
+export { DiscordRateLimit, ThreadDirectory, TriageBudget } from "./control.ts";
+export { Conversation } from "./conversation.ts";
+export { QueueDigest } from "./digest.ts";
 export { Hub } from "./hub.ts";
+export { ForumRegistry } from "./registry.ts";
+export { AccountSweep } from "./sweep.ts";
 
 async function interactionBody(request: Request, signal: AbortSignal): Promise<ArrayBuffer | undefined> {
   if (!request.body) return new ArrayBuffer(0);
@@ -175,7 +216,7 @@ async function interactionBody(request: Request, signal: AbortSignal): Promise<A
       chunks.push(value);
     }
   } catch (error) {
-    await reader.cancel().catch(() => {});
+    void reader.cancel().catch(() => {});
     throw error;
   } finally {
     reader.releaseLock();

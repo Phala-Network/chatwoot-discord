@@ -9,28 +9,20 @@ Conversations with activity within `reconcile.lookbackSeconds` get a post from t
 older ones get a post with their next message. A new post relays the conversation's whole
 history; its messages older than `reconcile.lookbackSeconds` notify no one (see
 [Pings and notifications](relay.md#pings-and-notifications)).
-To start with new messages only, set `relay.startAfterMessageId` to the newest message id in
-Chatwoot when you install (for example the id in the newest conversation's `messages` from
-`GET /api/v1/accounts/<id>/conversations`).
+To start with new messages only, use a verified committed boundary for
+`relay.startAfterMessageId`. Replacing an existing relay additionally requires the quiesced cut below.
 
 ## Cutover from an existing relay
 
-If posts already exist (for example from another relay), the service must not open a second
-post for those conversations.
-
-1. Store each existing post URL in its conversation's `discord_thread` attribute
-   (`https://discord.com/channels/<guild id>/<thread id>`). A conversation without a mapping
-   adopts the linked post if it still exists in that account's forum.
-2. Set `relay.startAfterMessageId` to the last message id the other relay handled. Adopted posts
-   and new conversations only relay messages after it. (With `0`, adopted posts continue after
-   their latest message.)
-3. Stop the other relay, deploy this service, and point the Chatwoot webhooks at it. The sweep
-   catches up on anything changed in the meantime.
+Follow the [adoption and rollback runbook](adoption.md). Repair and verify all old post links,
+prebuild the thread directory, and obtain a quiesced processed watermark and interaction fence.
+The owner must authorize the maintenance/cutover operation separately. Switching webhooks or
+choosing the newest message from one API page does not prove the old relay drained.
 
 ## State and recovery
 
 All state (which post belongs to which conversation, how far each is relayed, the Discord ids
-of posted messages, the job queue) is in the Hub Durable Object's SQLite database. Restore it,
+of posted messages, the job queue) is in each Conversation Durable Object's SQLite database. Restore it,
 if it is lost or damaged, with Durable Objects'
 [point-in-time recovery](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#pitr-point-in-time-recovery-api)
 (any point in the last 30 days).

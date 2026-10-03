@@ -14,3 +14,12 @@ export async function within<T>(pending: Promise<T>, signal: AbortSignal): Promi
     if (abort) signal.removeEventListener("abort", abort);
   }
 }
+
+export class JobDeadlineError extends Error {
+  readonly requestStarted: boolean;
+  constructor(requestStarted = false) {
+    super("Job time slice is used up");
+    this.name = "JobDeadlineError";
+    this.requestStarted = requestStarted;
+  }
+}

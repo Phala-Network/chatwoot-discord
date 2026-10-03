@@ -1,11 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Budget, JobDeadlineError } from "../../../shared/budget.ts";
 import manifest from "../package.json" with { type: "json" };
-import { DiscordForum } from "../src/discord/forum.ts";
 import { DiscordHttpError, DiscordRest } from "../src/discord/rest.ts";
 import { avatarUrl } from "../src/discord/users.ts";
 import { UnknownThreadError } from "../src/relay/relay.ts";
-import { json, mockFetch, on } from "./helpers.ts";
+import { TestForum as DiscordForum, mockFetch as fetchRoutes, json, on, type Route } from "./helpers.ts";
+
+function mockFetch(...routes: Route[]) {
+  return fetchRoutes(
+    ...routes,
+    on("GET", `${api}/channels/55`, () => json({ id: "55", guild_id: "100000000000000044" })),
+  );
+}
 
 class MemoryCache {
   values = new Map<string, string>();
@@ -234,7 +240,7 @@ describe("DiscordForum", () => {
     });
     await client.execute("55", { content: "again" }, "thread-9");
     // The application id and the webhook are looked up once, then cached.
-    expect(requests.filter((request) => request.method === "GET")).toHaveLength(2);
+    expect(requests.filter((request) => request.method === "GET")).toHaveLength(3);
     const posts = requests.filter((request) => request.url.pathname.startsWith("/api/v10/webhooks/"));
     expect(posts.map((request) => request.url.search)).toEqual([
       "?wait=true&with_components=true",
@@ -263,11 +269,17 @@ describe("DiscordForum", () => {
   });
 
   it("links a post in its forum's guild, looking the guild up once", async () => {
-    const { requests } = mockFetch(forumChannel);
+    const { requests } = mockFetch(
+      application,
+      on("GET", `${api}/channels/55/webhooks`, () =>
+        json([{ id: "1", token: "tok", type: 1, application_id: "100000000000000001" }]),
+      ),
+      forumChannel,
+    );
     const client = forum();
     expect(await client.postUrl("55", "123")).toBe("https://discord.com/channels/44/123");
     expect(await client.postUrl("55", "124")).toBe("https://discord.com/channels/44/124");
-    expect(requests).toHaveLength(1);
+    expect(requests).toHaveLength(3);
   });
 
   it.each([

@@ -66,7 +66,7 @@ export async function relayDerived(
       : await relay.notify(accountId, conversation, derived.text, sendKey);
   store.savePostedResponse(accountId, conversation.id, message.id, digest);
   if (discordId) store.saveDerivedMessage(accountId, conversation.id, message.id, discordId);
-  log.info(derived.kind === "response" ? "response posted" : "delivery failure posted", {
+  log.info("derived event processed", {
     accountId,
     conversationId: conversation.id,
     messageId: message.id,

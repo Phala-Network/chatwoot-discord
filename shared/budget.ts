@@ -1,7 +1,7 @@
 // Every outbound attempt counts, including retries and coordinator RPCs. A job's slice and
 // the operation deadline also bound response bodies; a caller's cancellation is never replaced.
 import type { Fetch } from "./chatwoot/api.ts";
-import { within } from "./deadline.ts";
+import { JobDeadlineError, within } from "./deadline.ts";
 
 export class BudgetExhaustedError extends Error {
   constructor() {
@@ -10,12 +10,7 @@ export class BudgetExhaustedError extends Error {
   }
 }
 
-export class JobDeadlineError extends Error {
-  constructor(readonly requestStarted = false) {
-    super("Job time slice is used up");
-    this.name = "JobDeadlineError";
-  }
-}
+export { JobDeadlineError } from "./deadline.ts";
 
 export const METADATA_TIMEOUT_MS = 1500;
 export const TRANSFER_TIMEOUT_MS = 8000;
@@ -55,6 +50,10 @@ export class Budget {
     this.used += 1;
   }
 
+  controlSignal(ms: number): AbortSignal {
+    return AbortSignal.any([AbortSignal.timeout(ms), ...(this.slice ? [this.slice] : [])]);
+  }
+
   fetchWith(timeoutMs: number): Fetch {
     return (request) => this.request(request, timeoutMs);
   }
@@ -77,11 +76,13 @@ export class Budget {
             if (done) controller.close();
             else controller.enqueue(value);
           } catch (error) {
-            await reader.cancel().catch(() => {});
             controller.error(slice?.aborted ? new JobDeadlineError(true) : error);
+            void reader.cancel().catch(() => {});
           }
         },
-        cancel: (reason) => reader.cancel(reason),
+        cancel: (reason) => {
+          void reader.cancel(reason).catch(() => {});
+        },
       });
       return new Response(body, {
         status: response.status,

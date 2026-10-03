@@ -55,6 +55,12 @@ async function matches(
     case "status":
       return current.status === target.status && (current.snoozed_until ?? null) === target.snoozedUntil;
     case "assignment":
+      if (
+        target.type === "AgentBot" &&
+        target.inboxId !== null &&
+        (await client.inboxBot(accountId, target.inboxId))?.id !== target.id
+      )
+        return false;
       return (
         (current.inbox_id ?? null) === target.inboxId &&
         current.status === target.status &&

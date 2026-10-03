@@ -146,6 +146,8 @@ export interface RelayOptions {
   card?: ((ticket: CardTicket, answerId: string | undefined) => MessageComponents) | undefined;
   /** Messages created longer ago than this are relayed without notifications. */
   liveSeconds: number;
+  ensureThread?: (accountId: number, conversationId: number, threadId: string) => Promise<void>;
+  reserveTriage?: (hour: string, key: string, limit: number) => Promise<boolean>;
   now?: () => Date;
 }
 
@@ -165,6 +167,7 @@ export class Relay {
       linkedAgent: options.linkedAgent,
       liveSeconds: options.liveSeconds,
       now: options.now ?? (() => new Date()),
+      reserveTriage: options.reserveTriage,
     });
   }
 
@@ -186,7 +189,7 @@ export class Relay {
     const conversation = message.conversation;
     const planKey = `plan:${accountId}:${conversation.id}:${message.id}`;
     const saved = store.get(planKey);
-    const parts: WebhookMessage[] = saved ? JSON.parse(saved) : this.parts(message, text);
+    const parts: WebhookMessage[] = saved ? JSON.parse(saved) : await this.parts(message, text);
     if (!saved) store.set(planKey, JSON.stringify(parts));
     if (message.messageType === "incoming") this.customerEvent(accountId, conversation.id, `message:${message.id}`);
     let threadId = store.conversation(accountId, conversation.id)?.threadId;
@@ -267,6 +270,7 @@ export class Relay {
   async sync(accountId: number, conversation: RelayConversation, threadId: string): Promise<void> {
     const { store, forum } = this.options;
     const state = this.stateOf(conversation);
+    await this.options.ensureThread?.(accountId, conversation.id, threadId);
     const recorded = store.conversation(accountId, conversation.id);
     const source = recorded?.answerSourceId;
     const draft = source && answersLatest(source, recorded?.customerMessageId) ? recorded?.answerId : undefined;
@@ -394,9 +398,9 @@ export class Relay {
    * with room for them, so a message splits the same way on every attempt and a retry can
    * resume after the parts already posted.
    */
-  private parts(message: RelayMessage, text: string): WebhookMessage[] {
+  private async parts(message: RelayMessage, text: string): Promise<WebhookMessage[]> {
     const { frontendUrl, maxChunks } = this.options;
-    const notification = this.notifier.notification(message);
+    const notification = await this.notifier.notification(message);
     const chunks = split(text, CONTENT_LIMIT - this.notifier.reserve);
     const kept = chunks.slice(0, maxChunks);
     const username = senderName(message);
@@ -437,14 +441,9 @@ export class Relay {
     const { store, forum } = this.options;
     const accountId = message.account.id;
     const conversationId = message.conversation.id;
-    const posted = store.postedParts(accountId, conversationId, message.id);
+    await this.options.ensureThread?.(accountId, conversationId, threadId);
     let incomplete = false;
     for (const [part, frozen] of parts.entries()) {
-      if (posted[part]) {
-        if (part === 0 && message.messageType === "incoming")
-          this.customerWrote(accountId, conversationId, posted[part]);
-        continue;
-      }
       const payload = incomplete ? { ...frozen, content: frozen.content?.replace(/\n-#.*$/, "") } : frozen;
       this.unarchived(accountId, message.conversation);
       store.updateConversation(accountId, conversationId, { cardCovered: 1 });
@@ -489,7 +488,12 @@ export class Relay {
     };
     const tags = this.postTags(accountId, conversation);
     if (tags.length > 0) post.applied_tags = tags;
-    const outcome = await forum.execute(target.forumChannelId, post, undefined, `post:${accountId}:${conversation.id}`);
+    const outcome = await forum.execute(
+      target.forumChannelId,
+      post,
+      undefined,
+      `post:${accountId}:${conversation.id}:${store.get("generation") ?? 1}`,
+    );
     if (outcome.state !== "confirmed") return undefined;
     const threadId = outcome.channelId;
     store.updateConversation(accountId, conversation.id, {
@@ -592,7 +596,6 @@ export class Relay {
       await forum.deleteMessage(forumChannelId, threadId, cardId);
     }
     const key = `card:${accountId}:${conversationId}:${threadId}`;
-    if (store.get(`${key}:unknown`)) return;
     let revision = Number(store.get(`${key}:revision`) ?? 0);
     if (!store.get(`${key}:placing`)) {
       revision += 1;
@@ -656,7 +659,15 @@ export class Relay {
 
   customerEvent(accountId: number, conversationId: number, event: string): void {
     const key = `customer:${accountId}:${conversationId}`;
-    if (this.options.store.get(key) === event) return;
+    const seen = `${key}:event:${event}`;
+    if (this.options.store.get(seen)) return;
+    this.options.store.set(seen, "1");
+    if (event.startsWith("message:")) {
+      const source = Number(event.slice(8));
+      const latest = Number(this.options.store.get(`${key}:created`) ?? 0);
+      if (source <= latest) return;
+      this.options.store.set(`${key}:created`, String(source));
+    }
     this.options.store.set(key, event);
     this.options.store.updateConversation(accountId, conversationId, {
       answerId: "",

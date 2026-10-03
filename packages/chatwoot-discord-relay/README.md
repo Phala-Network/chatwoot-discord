@@ -66,10 +66,18 @@ with fictional data.*
 ## How it works
 
 ```
-Chatwoot ──webhook──▶ Worker ──▶ Hub Durable Object ──▶ Discord forum post (via webhook)
-Discord ─/command───▶ Worker ──▶ Hub Durable Object ──▶ Chatwoot REST API (as that agent)
-Cron (every 5 min) ─▶ Worker ──▶ Hub Durable Object ──▶ sweep: catch up messages and conversation state
+Chatwoot ──webhook──▶ Worker ──▶ Conversation(account, conversation) ──▶ Discord post
+Discord ─/command───▶ Worker ──▶ ThreadDirectory(thread) ──▶ Conversation ──▶ Chatwoot
+Cron (every 5 min) ─▶ Worker ──▶ AccountSweep(account) ──enqueue──▶ Conversation
+Cron (hourly) ──────▶ Worker ──▶ QueueDigest(channel) ──▶ support queue
 ```
+
+Each Conversation owns its durable queue, receipts, cursor, drafts, thread generation and effects.
+Slow upstream work in one conversation does not occupy another conversation's executor. Directory,
+TriageBudget and DiscordRateLimit perform short local transactions; they never execute business HTTP.
+ForumRegistry owns webhook discovery. Discord requests fetch directly from their caller after scoped
+reservation/report; shared limits remain shared. Existing single-Hub installations require the
+[adoption and rollback runbook](docs/adoption.md) and a quiesced cut before enabling the new owners.
 
 - Each conversation gets one forum post, titled `[<Account> #<id>] <customer> — <subject or first message>`.
   It opens with a ticket header (channel, inbox, customer email, phone number on phone channels,
@@ -83,8 +91,8 @@ Cron (every 5 min) ─▶ Worker ──▶ Hub Durable Object ──▶ sweep: c
   token, so Chatwoot's permissions and audit trail apply. Talking in a post never reaches the
   customer; only commands do.
 - A customer message on a pending conversation with a linked inbox bot is held before posting, in the existing
-  deduplicated conversation job. The status webhook and five-minute sweep wake it; one 1-second re-read covers
-  a racing webhook, then the job waits without polling. Sweep wakes held jobs even outside the normal lookback.
+  deduplicated conversation job. Status webhooks, the local five-minute alarm and the account sweep
+  wake it, including held conversations outside the normal lookback.
   A fresh read releases the message when the conversation leaves pending or the bot is disconnected.
 - Live customer messages ping the linked human assignee. Bots are never people: `assignee_type: AgentBot` shows
   as Unassigned, without a human tag or ping, even when its id matches a user's. For open conversations only,
@@ -157,7 +165,7 @@ Design choices:
   checks its three-minute deadline before reading or posting. Status/card updates are immediate, while
   activity lines retain their delayed completion and pending messages retain their hold.
   Inbox names and avatars use cache-aside refresh jobs with a 300 ms deadline and fallback; they never
-  occupy the customer body's path. Initial interactions have one 2.5-second budget and one durable Hub RPC.
+  occupy the customer body's path. Initial interactions have one 2.5-second budget and a short Directory lookup and durable Conversation admission.
   An unconfirmed enqueue returns HTTP 503, never a premature Discord acknowledgement.
 - **Reliable by construction.** Chatwoot sends each webhook once, without retry, so webhooks are
   only triggers: the Worker queues the work durably in one Durable Object, which reads Chatwoot's
@@ -233,7 +241,7 @@ npx cf deploy --secrets-file <secrets file>
 [`chatwoot-discord-relay`](https://www.npmjs.com/package/chatwoot-discord-relay) package,
 published from this repository's releases with npm provenance, at an exact version. Your project
 needs `cf`, `vite`, and `@cloudflare/vite-plugin` as dev dependencies, a `vite.config.ts` like this
-repository's, `src/index.ts` with `export { default, Hub } from "chatwoot-discord-relay";`, the
+repository's, `src/index.ts` exporting the default Worker and all seven partition classes from `chatwoot-discord-relay`, the
 configuration as JSON with comments in a file of its own (`config.jsonc`), and a
 `cloudflare.config.ts` that binds a [KV namespace](https://developers.cloudflare.com/kv/) and the
 configuration's key instead of `CONFIG`:
@@ -250,9 +258,23 @@ export default defineConfig({
     compatibilityDate: "2026-08-15",
     domains: ["<worker host>"],
     triggers: [triggers.scheduled({ schedule: "*/5 * * * *" })],
-    exports: { Hub: exports.durableObject({ storage: "sqlite" }) },
+    exports: {
+      Conversation: exports.durableObject({ storage: "sqlite" }),
+      ThreadDirectory: exports.durableObject({ storage: "sqlite" }),
+      TriageBudget: exports.durableObject({ storage: "sqlite" }),
+      AccountSweep: exports.durableObject({ storage: "sqlite" }),
+      QueueDigest: exports.durableObject({ storage: "sqlite" }),
+      ForumRegistry: exports.durableObject({ storage: "sqlite" }),
+      DiscordRateLimit: exports.durableObject({ storage: "sqlite" }),
+    },
     env: {
-      HUB: bindings.durableObject({ worker: "chatwoot-discord-relay", exportName: "Hub" }),
+      CONVERSATION: bindings.durableObject({ worker: "chatwoot-discord-relay", exportName: "Conversation" }),
+      THREAD_DIRECTORY: bindings.durableObject({ worker: "chatwoot-discord-relay", exportName: "ThreadDirectory" }),
+      TRIAGE_BUDGET: bindings.durableObject({ worker: "chatwoot-discord-relay", exportName: "TriageBudget" }),
+      ACCOUNT_SWEEP: bindings.durableObject({ worker: "chatwoot-discord-relay", exportName: "AccountSweep" }),
+      QUEUE_DIGEST: bindings.durableObject({ worker: "chatwoot-discord-relay", exportName: "QueueDigest" }),
+      FORUM_REGISTRY: bindings.durableObject({ worker: "chatwoot-discord-relay", exportName: "ForumRegistry" }),
+      DISCORD_RATE_LIMIT: bindings.durableObject({ worker: "chatwoot-discord-relay", exportName: "DiscordRateLimit" }),
       CONFIG_STORE: bindings.kv({ id: "<namespace id>" }),
       CONFIG_KEY: bindings.text(storedConfig(new URL("config.jsonc", import.meta.url)).key),
     },
@@ -516,7 +538,7 @@ See [SECURITY.md](https://github.com/Phala-Network/chatwoot-workers/blob/main/SE
 | Free plan limit | How this service stays within it |
 |---|---|
 | 10 ms CPU per Worker request | The Worker verifies a signature, parses JSON, and makes one Durable Object call. Bodies over 2 MB are rejected; a very large webhook that fails is relayed by the next sweep. |
-| 50 subrequests per invocation | Alarms count requests against `relay.subrequestBudget` and yield to a fresh invocation before it runs out. A conversation run needs 6 requests to set up; it starts a message only while `relay.maxChunks` + 24 requests remain (its parts, 13 for everything else a message may need, and 11 to finish the run), so the budget must be at least `relay.maxChunks` + 30 (`src/relay/limits.ts`). A command starts only with 20 left, a sweep page with 1. |
+| 50 subrequests per invocation | Alarms count HTTP and control RPCs against `relay.subrequestBudget`. Preparation, message parts, attachment downloads and digest pages persist progress; a whole message or account sweep need not fit in one invocation. Metadata deadlines are 1.5 seconds, transfers 8 seconds, each job slice 10 seconds. |
 | 128 MB memory | Attachments are capped at 25 MB each / 50 MB per command. |
 | 100,000 Worker requests/day | See the estimate below. |
 | Durable Objects (SQLite): 100,000 requests/day, 100,000 rows written/day | See the estimate below. |

@@ -1,7 +1,9 @@
 import type { Fetch } from "../../../../shared/chatwoot/api.ts";
+import { JobDeadlineError } from "../../../../shared/deadline.ts";
 import { isRecord, parseJson } from "../../../../shared/json.ts";
 import type { RateLimitStore } from "../../../../shared/rate-limit.ts";
 import manifest from "../../package.json" with { type: "json" };
+import { DiscordLimiter } from "./limiter.ts";
 
 const API_BASE = "https://discord.com/api/v10";
 const USER_AGENT = `DiscordBot (https://github.com/Phala-Network/chatwoot-workers, ${manifest.version})`;
@@ -52,18 +54,23 @@ interface DiscordRequest<Body = never, Query extends object = never> {
 export class DiscordRest {
   private readonly token: string;
   private readonly fetch: Fetch;
-  private readonly limits: RateLimitStore;
+  private readonly limiter: DiscordLimiter;
 
-  constructor(token: string, fetch: Fetch, limits?: RateLimitStore) {
+  constructor(token: string, fetch: Fetch, limits?: RateLimitStore | DiscordLimiter) {
     this.token = token;
     this.fetch = fetch;
     const memory = new Map<string, string>();
-    this.limits = limits ?? {
-      get: (key) => memory.get(key),
-      set: (key, value) => {
-        memory.set(key, value);
-      },
-    };
+    this.limiter =
+      limits instanceof DiscordLimiter
+        ? limits
+        : new DiscordLimiter(
+            limits ?? {
+              get: (key) => memory.get(key),
+              set: (key, value) => {
+                memory.set(key, value);
+              },
+            },
+          );
   }
 
   get<Result, Query extends object = never>(path: string, request?: DiscordRequest<never, Query>): Promise<Result> {
@@ -97,20 +104,12 @@ export class DiscordRest {
     path: string,
     request: DiscordRequest<Body, Query> = {},
   ): Promise<Result> {
-    const scope = request.interaction ? "interaction" : request.auth === false ? "unauthenticated" : "bot";
-    const majorPath = /^\/(?:channels|guilds)\/[^/]+|^\/webhooks\/[^/]+(?:\/[^/]+)?/.exec(path)?.[0] ?? "";
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(majorPath));
-    const major = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-    const route = `${scope}:${method}:${path.replace(majorPath, majorPath ? "/:major" : "").replace(/\/messages\/[^/]+/, "/messages/:id")}`;
-    const routeKey = `discord:route:${route}`;
-    const bucketKey = () => `discord:bucket:${scope}:${this.limits.get(routeKey) ?? route}:${major}`;
-    const globalKey = `discord:global:${scope}`;
-    const wait =
-      Math.max(
-        request.interaction ? 0 : Number(this.limits.get(globalKey) ?? 0),
-        Number(this.limits.get(bucketKey()) ?? 0),
-      ) - Date.now();
-    if (wait > 0) throw new DiscordHttpError(429, undefined, "rate limited", wait);
+    const permit = await this.limiter
+      .reserve(method, path, this.token, request.auth !== false, request.interaction === true)
+      .catch(() => {
+        throw new JobDeadlineError();
+      });
+    if (!permit.allowed) throw new DiscordHttpError(429, undefined, "rate limited", permit.retryAfterMs);
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(request.query ?? {})) {
       if (value !== undefined) query.set(key, String(value));
@@ -130,32 +129,34 @@ export class DiscordRest {
       }),
     );
     const text = await response.text();
-    const bucket = response.headers.get("x-ratelimit-bucket");
-    if (bucket) this.limits.set(routeKey, bucket);
-    const key = bucketKey();
-    if (response.headers.get("x-ratelimit-remaining") === "0") {
-      this.reset(key, Date.now() + seconds(response.headers.get("x-ratelimit-reset-after")) * 1000);
-    }
-
-    if (response.ok) return result(text);
-
     const data = parseJson(text);
-    if (response.status === 429) {
-      const retryAt = Date.now() + seconds(field(data, "retry_after") ?? response.headers.get("retry-after")) * 1000;
-      if (field(data, "global") === true || response.headers.get("x-ratelimit-global") === "true") {
-        this.reset(request.interaction ? key : globalKey, retryAt);
-      } else {
-        this.reset(key, retryAt);
-      }
-      const wait = Math.max(0, retryAt - Date.now());
-      throw new DiscordHttpError(429, errorCode(data), errorMessage(data, response.statusText), wait);
-    }
+    const global = field(data, "global") === true || response.headers.get("x-ratelimit-global") === "true";
+    const retryAfterMs =
+      response.status === 429 ? seconds(field(data, "retry_after") ?? response.headers.get("retry-after")) * 1000 : 0;
+    await this.limiter.report(
+      {
+        owner: permit.owner,
+        reservation: permit.reservation,
+        ...(response.headers.get("x-ratelimit-bucket")
+          ? { bucket: response.headers.get("x-ratelimit-bucket") ?? "" }
+          : {}),
+        scope: response.headers.get("x-ratelimit-scope") ?? "user",
+        ...(response.headers.has("x-ratelimit-remaining")
+          ? { remaining: Number(response.headers.get("x-ratelimit-remaining")) }
+          : {}),
+        ...(response.headers.has("x-ratelimit-limit")
+          ? { capacity: Number(response.headers.get("x-ratelimit-limit")) }
+          : {}),
+        resetAfterMs: seconds(response.headers.get("x-ratelimit-reset-after")) * 1000,
+        retryAfterMs,
+        global: global && !request.interaction,
+      },
+      permit.globalOwner,
+    );
+    if (response.ok) return result(text);
+    if (response.status === 429)
+      throw new DiscordHttpError(429, errorCode(data), errorMessage(data, response.statusText), retryAfterMs);
     throw new DiscordHttpError(response.status, errorCode(data), errorMessage(data, response.statusText));
-  }
-
-  private reset(key: string, at: number): void {
-    const until = Math.max(Number(this.limits.get(key) ?? 0), at);
-    this.limits.set(key, String(until), Math.max(1, until - Date.now()));
   }
 }
 
