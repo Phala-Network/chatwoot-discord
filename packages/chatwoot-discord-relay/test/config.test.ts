@@ -9,13 +9,10 @@ const minimal = {
 };
 
 describe("configuration", () => {
-  it("rejects configurable routing attributes and link names that collide with coordination", () => {
+  it("rejects removed router configuration", () => {
     expect(
       configSchema.safeParse({ ...minimal, router: { accounts: [1], attributes: { seen: "custom" } } }).success,
     ).toBe(false);
-    for (const linkAttribute of ["routing_seen", "routing_handled", "routing_kind"]) {
-      expect(configSchema.safeParse({ ...minimal, relay: { linkAttribute } }).success).toBe(false);
-    }
   });
 
   it("requires webhook secrets for every relayed account", async () => {
@@ -24,7 +21,7 @@ describe("configuration", () => {
     );
   });
   it("validates router keepLabels as lower-case labels and defaults to none", () => {
-    const router = { accounts: [1] };
+    const router = {};
     expect(configSchema.parse({ ...minimal, router }).router).toMatchObject({ keepLabels: [] });
     expect(
       configSchema.parse({ ...minimal, router: { ...router, keepLabels: ["spam", "security", "beg-bounty"] } }).router,
@@ -51,7 +48,8 @@ describe("configuration", () => {
     expect(result.success).toBe(false);
     expect(result.error?.issues.map((issue) => issue.path.join("."))).toEqual(["relay.subrequestBudget"]);
     expect(budget(37).success).toBe(false);
-    expect(budget(38).success).toBe(true);
+    expect(budget(39).success).toBe(false);
+    expect(budget(40).success).toBe(true);
   });
 
   it("links agents by Chatwoot user id, each Discord and Chatwoot user once", () => {
@@ -97,8 +95,8 @@ describe("configuration", () => {
     expect(queue({ escalationRoleId: "100000000000000901", escalationUserId: "100000000000000902" })).toBe(false);
   });
 
-  it("waits only for configured relay accounts and rejects the old routing config", () => {
-    expect(configSchema.parse({ ...minimal, router: { accounts: [1] } }).router?.waitSeconds).toBe(30);
+  it("keeps kind labels and rejects the old router wait configuration", () => {
+    expect(configSchema.parse({ ...minimal, router: { keepLabels: ["spam"] } }).router?.keepLabels).toEqual(["spam"]);
     expect(configSchema.safeParse({ ...minimal, router: { accounts: [2] } }).success).toBe(false);
     expect(configSchema.safeParse({ ...minimal, router: { accounts: [1, 1] } }).success).toBe(false);
     expect(configSchema.safeParse({ ...minimal, routing: { accounts: {} } }).success).toBe(false);

@@ -25,6 +25,10 @@ export class QueueStore {
     );
     CREATE INDEX IF NOT EXISTS jobs_due ON jobs (not_before);
     CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, value TEXT NOT NULL, expires_at INTEGER);`);
+    const columns = this.sql.exec<{ name: string }>("PRAGMA table_info(jobs)").toArray();
+    if (!columns.some((column) => column.name === "suspended")) {
+      this.sql.exec("ALTER TABLE jobs ADD COLUMN suspended INTEGER NOT NULL DEFAULT 0");
+    }
   }
 
   // Cache
@@ -50,18 +54,6 @@ export class QueueStore {
     this.sql.exec("DELETE FROM cache WHERE key = ?", key);
   }
 
-  list(start: string, end: string): string[] {
-    return this.sql
-      .exec<{ value: string }>(
-        "SELECT value FROM cache WHERE key >= ? AND key < ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY key",
-        start,
-        end,
-        this.now(),
-      )
-      .toArray()
-      .map((row) => row.value);
-  }
-
   // Jobs
 
   /**
@@ -71,7 +63,7 @@ export class QueueStore {
   enqueue(key: string, priority: number, payload: string, notBefore = this.now()): void {
     this.sql.exec(
       `INSERT INTO jobs (key, priority, payload, not_before, created_at) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT (key) DO UPDATE SET version = version + 1, payload = excluded.payload,
+       ON CONFLICT (key) DO UPDATE SET version = version + 1, payload = excluded.payload, suspended = 0,
          not_before = CASE WHEN attempts > 0 THEN not_before ELSE MIN(not_before, excluded.not_before) END`,
       key,
       priority,
@@ -84,7 +76,7 @@ export class QueueStore {
   nextDueJob(): Job | undefined {
     const row = this.sql
       .exec<{ key: string; payload: string; version: number; attempts: number; created_at: number }>(
-        `SELECT key, payload, version, attempts, created_at FROM jobs WHERE not_before <= ?
+        `SELECT key, payload, version, attempts, created_at FROM jobs WHERE suspended != 2 AND not_before <= ?
          ORDER BY priority, not_before, created_at LIMIT 1`,
         this.now(),
       )
@@ -96,7 +88,9 @@ export class QueueStore {
 
   /** Earliest due time. */
   nextWakeup(): number | undefined {
-    const row = this.sql.exec<{ at: number | null }>("SELECT MIN(not_before) AS at FROM jobs").toArray()[0];
+    const row = this.sql
+      .exec<{ at: number | null }>("SELECT MIN(not_before) AS at FROM jobs WHERE suspended != 2")
+      .toArray()[0];
     return row?.at ?? undefined;
   }
 
@@ -124,6 +118,22 @@ export class QueueStore {
    */
   deferJob(job: Job, delayMs = 0): void {
     this.sql.exec("UPDATE jobs SET not_before = ? WHERE key = ?", this.now() + delayMs, job.key);
+  }
+
+  /** One short re-read for a racing status webhook, then wait for an event or a sweep. */
+  holdJob(job: Job): void {
+    this.sql.exec(
+      `UPDATE jobs SET suspended = CASE WHEN suspended = 0 THEN 1 ELSE 2 END,
+       not_before = ?, attempts = 0 WHERE key = ? AND version = ?`,
+      this.now() + 1000,
+      job.key,
+      job.version,
+    );
+  }
+
+  /** Suspended conversation jobs need reconciliation even outside the ordinary activity window. */
+  wakeHeldJobs(): void {
+    this.sql.exec("UPDATE jobs SET suspended = 0, not_before = ? WHERE suspended = 2", this.now());
   }
 
   prune(): void {

@@ -62,7 +62,12 @@ continuing where it stopped, and queues any conversation whose post is behind or
 state differ. Activity means a new message. A change without one (for example only the topic
 attribute) relies on its webhook, and so do deletions, responses, and delivery failures of
 messages already relayed: the sweep does not re-read relayed messages, so a missed webhook for
-one is not repaired. Neither does it read the post back from Discord: a title, tag, or archived
+one is not repaired. The sweep also retains unfinished answer-scan cursors: a lost update webhook for a failed
+reply retried as sent on a skipped page is not recovered, even before the customer's first post. Chatwoot's
+message API pages by ID without an update cursor; the retry keeps its ID. This can cause at most one extra
+triage call per affected customer message, within notification budgets, without losing the message. See the
+README's [How it works](../README.md#how-it-works) for the notification contract.
+Neither does it read the post back from Discord: a title, tag, or archived
 flag changed by hand in Discord stays until the conversation changes.
 
 ## Message order
@@ -91,8 +96,10 @@ describe the fields the API returns (see the repository's `shared/chatwoot/api.t
 
 ## Separate routing Worker
 
-AI routing lives in chatwoot-router, with its own queue and decision store. Hub queues no routing jobs and
-reads no router storage. The fetched conversation's routing watermarks drive notification deferrals and
-handled notes; its kind attribute keeps Manage from replacing the kind with a topic. See the package README
-for the timeout and upgrade contract. Shared implementations live in the repository's `shared/` source tree
+AI routing lives in chatwoot-router as a native account agent bot, with its own queue and decision memo.
+Hub queues no routing jobs and reads no router storage. A pending bot-inbox conversation holds its existing
+conversation job; status webhooks and the sweep wake it, with only one short race re-read. The current status
+and subsequent public answering replies decide triage. `assignee_type` prevents bot ids from matching human
+agents. Manage keeps all labels in `router.keepLabels`. See the package README's "How it works" for the model
+and its migration/rollback contract. Shared implementations live in the repository's `shared/` source tree
 and are bundled independently into each published package.

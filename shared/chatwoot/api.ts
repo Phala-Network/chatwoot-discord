@@ -28,7 +28,10 @@ export class ChatwootError extends Error {
  * A conversation as returned by GET conversations/{id} and in the conversation list. The spec's
  * `status` enum omits `snoozed`, which the API does return, so the relay treats it as a string.
  */
-export type ChatwootConversation = components["schemas"]["conversation_show"];
+export type ChatwootConversation = components["schemas"]["conversation_show"] & {
+  // EventDataPresenter#push_meta; omitted from the published v4.18.0 schema.
+  meta?: { assignee_type?: string | null };
+};
 
 const text = z.string().nullish();
 
@@ -108,6 +111,7 @@ const messageSchema = z.object({
       email: emailSchema.nullish(),
       deleted: z.boolean().nullish(),
       external_error: text,
+      activity: z.object({ type: text, status: text }).nullish(),
       submitted_values: z.unknown().optional(),
       submitted_email: z.unknown().optional(),
       items: z.unknown().optional(),
@@ -128,6 +132,16 @@ export const CONVERSATIONS_PER_PAGE = 25;
 
 /** Chatwoot returns up to 100 messages per `after` page. */
 export const MESSAGE_PAGE_SIZE = 100;
+/** MessageFinder returns 20 for the latest page and for `before`. */
+export const MESSAGE_HISTORY_PAGE_SIZE = 20;
+
+// The generated spec incorrectly describes this endpoint as an unwrapped 204. The actual
+// agent_bot.json.jbuilder returns this envelope. Strip all other fields, especially credentials.
+const inboxBotSchema = z.object({
+  agent_bot: z
+    .object({ id: z.number().int().positive().optional(), account_id: z.number().int().positive().nullish() })
+    .nullable(),
+});
 
 type MultipartMessage =
   operations["create-a-new-message-in-a-conversation"]["requestBody"]["content"]["multipart/form-data"];
@@ -179,7 +193,7 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
   ): Promise<T | undefined> {
     const { data, response } = await pending;
     if (notFound(response)) {
-      log.info("conversation deleted", { operation });
+      log.info("Chatwoot resource deleted", { operation });
       return undefined;
     }
     if (!response.ok || data === undefined) throw new ChatwootError(response.status, operation);
@@ -256,6 +270,32 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
       return messages?.find((message) => message.id === messageId);
     },
 
+    async listInboxes(accountId: number): Promise<number[]> {
+      const list = await data(
+        "list inboxes",
+        client.GET("/api/v1/accounts/{account_id}/inboxes", {
+          params: { path: { account_id: accountId } },
+        }),
+      );
+      return (list.payload ?? []).flatMap((inbox) => (inbox.id === undefined ? [] : [inbox.id]));
+    },
+
+    async inboxBot(accountId: number, inboxId: number): Promise<{ id: number } | undefined> {
+      const value = await dataUnlessNotFound(
+        "get inbox agent bot",
+        client.GET("/api/v1/accounts/{account_id}/inboxes/{id}/agent_bot", {
+          params: { path: { account_id: accountId, id: inboxId } },
+        }),
+      );
+      if (value === undefined) return undefined;
+      const parsed = inboxBotSchema.safeParse(value);
+      if (!parsed.success) throw new Error("Chatwoot returned an invalid inbox bot");
+      const bot = parsed.data.agent_bot;
+      if (bot?.id === undefined) return undefined;
+      if (bot.account_id !== accountId) throw new Error("Chatwoot inbox bot does not belong to the account");
+      return { id: bot.id };
+    },
+
     async inboxName(accountId: number, inboxId: number): Promise<string | undefined> {
       const inbox = await data(
         "get inbox",
@@ -274,7 +314,7 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
     async listConversations(
       accountId: number,
       page: number,
-      status: "all" | "open" | "snoozed" = "all",
+      status: "all" | "open" | "snoozed" | "pending" = "all",
     ): Promise<ChatwootConversation[]> {
       const list = await data(
         "list conversations",
@@ -336,12 +376,19 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
       );
     },
 
-    assign(accountId: number, conversationId: number, assigneeId: number): Promise<void> {
+    assign(
+      accountId: number,
+      conversationId: number,
+      assigneeId: number,
+      assigneeType: "User" | "AgentBot" = "User",
+    ): Promise<void> {
+      // AssignmentService supports assignee_type; the published schema omits it.
+      const body = { assignee_id: assigneeId, assignee_type: assigneeType };
       return ensureOk(
         "assign conversation",
         client.POST("/api/v1/accounts/{account_id}/conversations/{conversation_id}/assignments", {
           params: { path: { account_id: accountId, conversation_id: conversationId } },
-          body: { assignee_id: assigneeId },
+          body,
         }),
       );
     },
@@ -439,9 +486,26 @@ function notFound(response: Response): boolean {
 
 const MESSAGE_TYPES: Record<number, MessageType> = { 0: "incoming", 1: "outgoing", 2: "activity", 3: "template" };
 
+/** A bot (or another explicit non-user assignee) must never be matched to a numeric user id. */
+export function personAssignee(conversation: ChatwootConversation) {
+  const type = conversation.meta?.assignee_type;
+  return type == null || type === "User" ? conversation.meta?.assignee : undefined;
+}
+
+/** An actual public answer; Chatwoot templates include greetings and out-of-office notices. */
+export function isAnsweringReply(message: ChatwootMessage): boolean {
+  return (
+    message.message_type === 1 &&
+    !message.private &&
+    !message.content_attributes?.deleted &&
+    message.status !== "failed" &&
+    !message.content_attributes?.email?.auto_reply
+  );
+}
+
 export function toRelayConversation(conversationId: number, conversation: ChatwootConversation): RelayConversation {
   const meta = conversation.meta;
-  const assignee = meta?.assignee;
+  const assignee = personAssignee(conversation);
   return {
     id: conversationId,
     status: conversation.status,
@@ -456,6 +520,7 @@ export function toRelayConversation(conversationId: number, conversation: Chatwo
       avatarUrl: meta?.sender?.thumbnail ?? null,
     },
     assignee: assignee ? { id: assignee.id, name: assignee.name } : null,
+    assigneeType: meta?.assignee_type ?? null,
     customAttributes: conversation.custom_attributes ?? {},
   };
 }

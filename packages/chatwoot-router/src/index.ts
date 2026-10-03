@@ -21,7 +21,7 @@ app.get("/healthz", async (context) => {
   }
 });
 
-app.post("/chatwoot/webhook", bodyLimit({ maxSize: 2 * 1024 * 1024 }), async (context) => {
+app.post("/chatwoot/agent-bot", bodyLimit({ maxSize: 2 * 1024 * 1024 }), async (context) => {
   const settings = await loadSettings(context.env);
   const timestamp = context.req.header("x-chatwoot-timestamp");
   if (!timestamp || !isFreshTimestamp(timestamp, Math.floor(Date.now() / 1000))) {
@@ -30,7 +30,7 @@ app.post("/chatwoot/webhook", bodyLimit({ maxSize: 2 * 1024 * 1024 }), async (co
   const body = new Uint8Array(await context.req.arrayBuffer());
   const signature = context.req.header("x-chatwoot-signature");
   let signedBy: number | undefined;
-  for (const [accountId, secret] of Object.entries(settings.secrets.CHATWOOT_WEBHOOK_SECRETS)) {
+  for (const [accountId, secret] of Object.entries(settings.secrets.CHATWOOT_AGENT_BOT_SECRETS)) {
     if (await verifyChatwootSignature(secret, timestamp, body, signature)) {
       signedBy = Number(accountId);
       break;
@@ -48,7 +48,11 @@ app.post("/chatwoot/webhook", bodyLimit({ maxSize: 2 * 1024 * 1024 }), async (co
   if (target.accountId !== signedBy || !routesAccount(settings, target.accountId)) {
     return context.text("account does not match the webhook secret", 403);
   }
-  await context.env.ROUTER.getByName(ROUTER_NAME).enqueueConversation(target.accountId, target.conversationId);
+  await context.env.ROUTER.getByName(ROUTER_NAME).enqueueConversation(
+    target.accountId,
+    target.conversationId,
+    target.transition,
+  );
   return context.json({ ok: true });
 });
 

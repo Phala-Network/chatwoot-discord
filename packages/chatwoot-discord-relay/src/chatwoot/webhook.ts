@@ -29,13 +29,13 @@ type WebhookTarget =
  * What an event asks the relay to do, or undefined for events it ignores. Message payloads carry
  * `conversation.id` (the display id); conversation payloads are the conversation.
  *
- * Three message updates are relayed (the payload is Message#webhook_data, with `message_type`,
- * `content_type`, and `content_attributes`): a deletion, which sets `content_attributes.deleted`
+ * Message updates use Message#webhook_data, with `message_type`, `content_type`, and
+ * `content_attributes`: a deletion, which sets `content_attributes.deleted`
  * (MessagesController#destroy); a customer's response to an interactive message, which sets
  * `submitted_values` or `submitted_email` (Widget::MessagesController#update); and an outgoing
- * message the channel failed to deliver, which gets status `failed` and
- * `content_attributes.external_error` (e.g. Whatsapp::SendOnWhatsappService). The payload does
- * not say what changed, so any update of such a message is queued; the job posts once.
+ * message whose delivery status can change (including failed replies retried as sent).
+ * Outgoing updates invalidate unfinished answer scans before the first notification decision.
+ * The payload does not say what changed, so any update of such a message is queued; the job posts once.
  */
 export function eventTarget(payload: unknown): WebhookTarget | undefined {
   if (!isRecord(payload) || typeof payload.event !== "string") return undefined;
@@ -53,8 +53,7 @@ export function eventTarget(payload: unknown): WebhookTarget | undefined {
   const attributes = isRecord(payload.content_attributes) ? payload.content_attributes : {};
   const deleted = attributes.deleted === true;
   const responded = hasResponse(interactiveMessage(payload.content_type, payload.content, attributes));
-  const failed = payload.message_type === "outgoing" && typeof attributes.external_error === "string";
-  return deleted || responded || failed
+  return deleted || responded || payload.message_type === "outgoing"
     ? { type: "message-updated", accountId, conversationId, messageId: payload.id }
     : undefined;
 }

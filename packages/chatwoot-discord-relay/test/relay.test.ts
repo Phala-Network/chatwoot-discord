@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { LinkedAgent, RelayAssignee, RelayMessage } from "../../../shared/types.ts";
 import { ticketCard } from "../src/commands/components.ts";
 import { CONTENT_LIMIT } from "../src/relay/format.ts";
-import { Notifier, RoutingPendingError } from "../src/relay/notify.ts";
+import { Notifier } from "../src/relay/notify.ts";
 import { Relay, type RelayOptions, type WebhookMessage } from "../src/relay/relay.ts";
 import { FakeForum, FORUM, MemoryStore, message, snowflake, TAGS, TRIAGE } from "./helpers.ts";
 
@@ -301,29 +301,13 @@ describe("Relay", () => {
 
   it("does not call the triage bot for a message a routing kind's reply answered", async () => {
     ({ relay, forum } = relayWith({ triage }));
-    await relay.relay(message({ conversation: { customAttributes: { routing_handled: 101 } } }));
+    await relay.relay(message({ answered: true }));
     await relay.relay(message({ id: 102, content: "One more thing" }));
     const [answered, later] = forum.contents().slice(1);
     expect(answered).toBe(
       "My agent will not connect\n-# Triage bot not called: handled automatically. Ask it here, if needed.",
     );
     expect(later).toBe(`One more thing\n-# <@${TRIAGE}>`);
-  });
-
-  it("posts nothing of a customer message while its conversation's routing is still to run", async () => {
-    ({ relay, forum } = relayWith({
-      triage,
-      router: {
-        accounts: [3],
-        waitSeconds: 30,
-      },
-    }));
-    const pending = message({ createdAt: NOW_SECONDS });
-    await expect(relay.relay(pending)).rejects.toBeInstanceOf(RoutingPendingError);
-    expect(forum.calls).toEqual([]);
-    pending.conversation.customAttributes.routing_seen = pending.id;
-    await relay.relay(pending);
-    expect(forum.contents().at(-1)).toBe(`My agent will not connect\n-# <@${TRIAGE}>`);
   });
 
   it("keeps the room for notification lines that messages were split with since v0.23", () => {

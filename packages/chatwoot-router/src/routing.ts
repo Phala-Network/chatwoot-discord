@@ -1,29 +1,25 @@
-// Apply each input version's effects once; people own the fields afterward.
-// Check the input version before effects, then checkpoint and project. See README.md, "How it works".
+// Route only the native bot turn. See README.md, "How it works".
 
 import ipRegex from "ip-regex";
 import { z } from "zod";
-import { messageWatermark, ROUTING_ATTRIBUTES } from "../../../shared/attributes.ts";
 import {
   type ChatwootClient,
-  type ChatwootConversation,
   type ChatwootMessage,
   chatwootClient,
   type Fetch,
-  MESSAGE_PAGE_SIZE,
   messageContent,
   toRelayConversation,
 } from "../../../shared/chatwoot/api.ts";
 import { parseJson } from "../../../shared/json.ts";
 import type { Settings } from "./config.ts";
-import { actOnce, readEffects } from "./effects.ts";
+import { expectActivity, observeStatus, readTurn, requestHandoff } from "./turn.ts";
 
 /** Jev's answer when no owner fits; also the reserved route name. */
 export const UNCLEAR = "unclear";
 const UNCLEAR_CRITERION =
   "The message has no concrete request, mixes several of the other areas, concerns another product, or cannot be " +
   "assigned to exactly one of them.";
-/** With `snoozeUnclear`: whether the customer asked for anything yet. */
+/** Whether the customer asked for anything yet. */
 const REQUEST_CRITERIA = {
   request:
     "The customer asks for support, information, or an action: a question about a product or service, a problem, " +
@@ -35,7 +31,6 @@ const REQUEST_CRITERIA = {
 /** Jev's answer when no kind fits; also a reserved kind name. */
 const NO_KIND = "none";
 const NO_KIND_CRITERION = "None of the other kinds.";
-const JEV_URL = "https://api.typesafe.ai/v1/systemone";
 const MAX_MESSAGES = 3;
 const MAX_TEXT = 1600;
 
@@ -57,7 +52,6 @@ const REDACTIONS = [
 
 export interface RoutingStore {
   get(key: string): string | undefined;
-  list(start: string, end: string): string[];
   set(key: string, value: string): void;
 }
 
@@ -76,7 +70,7 @@ const decisionSchema = z.object({
   topicConfidence: z.number(),
   kind: z.string().nullable().default(null),
   kindConfidence: z.number().default(0),
-  /** Jev is confident the customer asked for nothing yet (asked with `snoozeUnclear` only). */
+  /** Jev is confident the customer asked for nothing yet. */
   noRequest: z.boolean().default(false),
 });
 type Decision = z.infer<typeof decisionSchema>;
@@ -111,168 +105,143 @@ export async function routeConversation(
   const { settings, store, chatwoot } = ctx;
   const routing = settings.config.routing;
   const owners = routing.accounts[String(accountId)];
-  if (!owners) return;
+  const token = settings.secrets.CHATWOOT_AGENT_BOT_TOKENS[String(accountId)];
+  if (!owners || !token) return;
+  const bot = chatwootClient(settings.config.chatwoot.baseUrl, token, ctx.fetch);
   const kinds = routing.kinds?.[String(accountId)] ?? {};
-  const raw = await chatwoot.getConversation(accountId, conversationId);
-  if (!raw) return;
-  const conversation = toRelayConversation(conversationId, raw);
-  const latest = await chatwoot.listMessages(accountId, conversationId, { filter_internal_messages: true });
-  const identities = [conversation.contact?.name, conversation.contact?.email];
-  const inputs = await customerInputs(ctx, accountId, conversationId, identities);
-  let seen = Math.max(inputs.seen, ...latest.filter(isCustomer).map((message) => message.id));
-  const key = inputs.ids.join(",");
-  const memoKey = `decision:${accountId}:${conversationId}:${key}`;
-  const cached = inputs.ids.map((_, index) =>
-    readDecision(store.get(`decision:${accountId}:${conversationId}:${inputs.ids.slice(0, index + 1).join(",")}`)),
-  );
-  let decision = cached.at(-1);
-  const previous = cached.findLast((entry) => entry !== undefined);
-  const kindFor = (answer?: Decision) =>
-    answer?.kind && answer.kindConfidence >= routing.minConfidence ? kinds[answer.kind] : undefined;
-  const assigneeFor = (answer?: Decision) =>
-    answer?.owner && answer.ownerConfidence >= routing.minConfidence ? owners[answer.owner]?.assignee : undefined;
-  const eligible = (observed: typeof conversation, answer?: Decision) =>
-    conversationId > (settings.config.startAfterConversationId[String(accountId)] ?? 0) &&
-    !observed.contact?.blocked &&
-    observed.status === "open" &&
-    (!observed.assignee || observed.assignee.id === assigneeFor(answer));
-  let observed = raw;
-  if (inputs.ids.length > 0 && eligible(conversation, previous)) {
-    if (!decision) {
-      decision = await decide(ctx, owners, routing.kinds?.[String(accountId)], inputs.text);
-      store.set(memoKey, JSON.stringify(decision));
+  const botId = routing.botIds[String(accountId)];
+  const snapshot = async (inboxId?: number) => {
+    const raw = await chatwoot.getConversation(accountId, conversationId);
+    if (!raw || raw.inbox_id === undefined || (inboxId !== undefined && raw.inbox_id !== inboxId)) return;
+    if (raw.status !== "pending") {
+      observeStatus(store, accountId, conversationId, raw.status ?? "open");
+      return;
     }
-    const freshInputs = await customerInputs(ctx, accountId, conversationId, identities);
-    if (freshInputs.ids.join(",") !== key) return "defer";
-    seen = Math.max(seen, freshInputs.seen);
-    const fresh = await chatwoot.getConversation(accountId, conversationId);
-    if (!fresh) return;
-    observed = fresh;
-    const current = toRelayConversation(conversationId, fresh);
-    if (eligible(current, decision)) {
-      const kind = kindFor(decision);
-      const kindName = kind ? decision.kind : null;
-      const assignee = kind?.status ? undefined : assigneeFor(decision);
-      const inputId = inputs.ids.at(-1) ?? 0;
-      if (assignee !== undefined) {
-        await actOnce(
-          ctx,
-          `assign:${accountId}:${conversationId}:${key}`,
-          { inputId, kind: null, handled: 0 },
-          "after",
-          async () => {
-            if (!current.assignee) await chatwoot.assign(accountId, conversationId, assignee);
-          },
-        );
-      }
-      const topic =
-        !kind?.status &&
-        decision.topic !== null &&
-        Object.hasOwn(routing.topics ?? {}, decision.topic) &&
-        decision.topicConfidence >= routing.minConfidence &&
-        current.labels.every((label) => Object.hasOwn(kinds, label))
-          ? decision.topic
-          : null;
-      const labels = [...new Set([...current.labels, ...[topic, kindName].filter((label) => label !== null)])];
-      await actOnce(
-        ctx,
-        `labels:${accountId}:${conversationId}:${key}`,
-        { inputId, kind: kindName, handled: 0 },
-        "after",
-        async () => {
-          if (labels.length !== current.labels.length) await chatwoot.setLabels(accountId, conversationId, labels);
-        },
-      );
-      const replyKey = `reply:${accountId}:${conversationId}`;
-      const botToken = settings.botToken(accountId);
-      if (kind?.cannedResponse && botToken && store.get(replyKey) === undefined) {
-        const content = await chatwoot.cannedResponse(accountId, kind.cannedResponse);
-        if (content === undefined) throw new Error("Chatwoot canned response is missing");
-        const bot = chatwootClient(settings.config.chatwoot.baseUrl, botToken, ctx.fetch);
-        await actOnce(ctx, replyKey, { inputId, kind: kindName, handled: inputId }, "before", () =>
-          bot.createMessage(accountId, conversationId, { content, private: false, files: [] }),
-        );
-      }
-      const snooze = !assignee && inputs.ids.length < MAX_MESSAGES && routing.snoozeUnclear && decision.noRequest;
-      const status = freshInputs.complete ? (kind?.status ?? (snooze ? "snoozed" : undefined)) : undefined;
-      if (status) {
-        await actOnce(
-          ctx,
-          `status:${accountId}:${conversationId}:${key}`,
-          { inputId, kind: kindName, handled: kind?.status ? inputId : 0 },
-          "before",
-          () => chatwoot.setStatus(accountId, conversationId, { status }),
-        );
-      }
-    }
-  }
-  await syncAttributes(ctx, accountId, conversationId, observed, seen);
-}
-
-async function syncAttributes(
-  ctx: RoutingContext,
-  accountId: number,
-  conversationId: number,
-  observed: ChatwootConversation,
-  seen: number,
-): Promise<void> {
-  const current = observed.custom_attributes ?? {};
-  const names = ROUTING_ATTRIBUTES;
-  const key = `seen:${accountId}:${conversationId}`;
-  const checkpoint = Math.max(messageWatermark(ctx.store.get(key)), seen, messageWatermark(current[names.seen]));
-  ctx.store.set(key, String(checkpoint));
-  const effects = readEffects(ctx.store, accountId, conversationId);
-  const handled = Math.max(0, ...effects.map((effect) => effect.handled));
-  const kind = effects.findLast((effect) => effect.kind !== null)?.kind ?? null;
-  const attributes = {
-    [names.seen]: checkpoint,
-    ...(handled > 0 ? { [names.handled]: Math.max(handled, messageWatermark(current[names.handled])) } : {}),
-    ...(kind === null ? {} : { [names.kind]: kind }),
+    const conversation = toRelayConversation(conversationId, raw);
+    if (conversation.contact.blocked || conversation.assignee) return;
+    if (raw.meta?.assignee && (raw.meta.assignee_type !== "AgentBot" || raw.meta.assignee.id !== botId)) return;
+    if ((await chatwoot.inboxBot(accountId, raw.inbox_id))?.id !== botId) return;
+    observeStatus(store, accountId, conversationId, "pending");
+    return { raw, conversation };
   };
-  if (
-    Object.entries(attributes).some(
-      ([name, value]) => (name === names.kind ? current[name] : messageWatermark(current[name])) !== value,
-    )
-  )
-    await ctx.chatwoot.setCustomAttributes(accountId, conversationId, attributes);
+  const initial = await snapshot();
+  if (!initial) return;
+  const identities = [initial.conversation.contact.name, initial.conversation.contact.email];
+  const inputs = (messages: ChatwootMessage[]) => {
+    const texts = messages
+      .filter(isCustomer)
+      .flatMap((message) => {
+        const text = sanitize(
+          [message.content_attributes?.email?.subject ?? "", messageContent(message)].join("\n"),
+          identities,
+        );
+        return text.replaceAll("[REDACTED]", "").trim() ? [{ id: message.id, text }] : [];
+      })
+      .slice(0, MAX_MESSAGES);
+    return {
+      key: texts.map((entry) => entry.id).join(","),
+      text: texts
+        .map((entry) => entry.text)
+        .join(" ")
+        .slice(0, MAX_TEXT),
+      count: texts.length,
+    };
+  };
+  const turn = await readTurn(chatwoot, store, accountId, conversationId);
+  const input = inputs(turn.messages);
+  const humanReply = (messages: ChatwootMessage[]) =>
+    messages.some(
+      (message) =>
+        message.message_type === 1 &&
+        !message.private &&
+        message.sender?.type === "user" &&
+        !message.content_attributes?.deleted,
+    );
+
+  // A fresh read before every effect. A new input/boundary is work for a new queue run.
+  const fresh = async () => {
+    const current = await snapshot(initial.raw.inbox_id);
+    if (!current) return;
+    const latest = await readTurn(chatwoot, store, accountId, conversationId);
+    if (latest.boundary !== turn.boundary || inputs(latest.messages).key !== input.key) return "defer" as const;
+    return { ...current, handoff: latest.handoff || humanReply(latest.messages) };
+  };
+  const handoff = async (current?: Awaited<ReturnType<typeof fresh>>) => {
+    requestHandoff(store, accountId, conversationId);
+    current ??= await fresh();
+    if (current === "defer") return "defer" as const;
+    if (current) await bot.setStatus(accountId, conversationId, { status: "open" });
+    return undefined;
+  };
+  if (turn.handoff || humanReply(turn.messages) || input.count === 0) return handoff();
+  const memoKey = `decision:${accountId}:${conversationId}:${input.key}`;
+  let decision = readDecision(store.get(memoKey));
+  if (!decision) {
+    decision = await decide(ctx, owners, routing.kinds?.[String(accountId)], input.text);
+    store.set(memoKey, JSON.stringify(decision));
+  }
+  const kind = decision.kind && decision.kindConfidence >= routing.minConfidence ? kinds[decision.kind] : undefined;
+  // A kind is actionable even when its text happens to look like a greeting.
+  const assignee =
+    decision.owner && decision.ownerConfidence >= routing.minConfidence ? owners[decision.owner]?.assignee : undefined;
+  let current = await fresh();
+  if (current === "defer" || !current) return current;
+  if (current.handoff) return handoff(current);
+  if (!kind && decision.noRequest && input.count < MAX_MESSAGES) return;
+  const topic =
+    !kind?.status &&
+    decision.topic !== null &&
+    Object.hasOwn(routing.topics ?? {}, decision.topic) &&
+    decision.topicConfidence >= routing.minConfidence &&
+    current.conversation.labels.every((label) => Object.hasOwn(kinds, label))
+      ? decision.topic
+      : null;
+  const labels = [
+    ...new Set([
+      ...current.conversation.labels,
+      ...[topic, kind ? decision.kind : null].filter((label) => label !== null),
+    ]),
+  ];
+  if (labels.length !== current.conversation.labels.length) await bot.setLabels(accountId, conversationId, labels);
+  const replyKey = `reply:${accountId}:${conversationId}`;
+  if (kind?.cannedResponse && store.get(replyKey) === undefined) {
+    const content = await chatwoot.cannedResponse(accountId, kind.cannedResponse);
+    if (!content?.trim()) return handoff();
+    current = await fresh();
+    if (current === "defer" || !current) return current;
+    if (current.handoff) return handoff(current);
+    store.set(replyKey, "attempted");
+    await bot.createMessage(accountId, conversationId, { content, private: false, files: [] });
+  }
+  if (assignee !== undefined && !kind?.status) {
+    // AssignmentService silently assigns nobody for a user outside this account.
+    const agents = await chatwoot.listAgents(accountId);
+    if (!agents.some((agent) => agent.id === assignee)) return handoff();
+  }
+  current = await fresh();
+  if (current === "defer" || !current) return current;
+  if (current.handoff) return handoff(current);
+  if (kind?.status) {
+    await bot.setStatus(accountId, conversationId, { status: kind.status });
+    expectActivity(store, accountId, conversationId, { status: kind.status });
+  } else if (assignee !== undefined && current.raw.meta?.assignee_type === "AgentBot") {
+    await bot.assign(accountId, conversationId, assignee);
+    expectActivity(store, accountId, conversationId, { status: "open" });
+  } else {
+    return handoff(current);
+  }
+  // Assignment itself ends a bot-assigned turn. No reply or status action may follow it.
+  return undefined;
 }
 
 function isCustomer(message: ChatwootMessage): boolean {
-  return message.message_type === 0 && !message.private;
-}
-
-async function customerInputs(
-  ctx: RoutingContext,
-  accountId: number,
-  conversationId: number,
-  identities: Array<string | null | undefined>,
-) {
-  const ids: number[] = [];
-  const parts: string[] = [];
-  let after = 0;
-  let seen = 0;
-  let complete = false;
-  for (let page = 0; page < 3 && ids.length < MAX_MESSAGES; page += 1) {
-    const messages = await ctx.chatwoot.listMessages(accountId, conversationId, {
-      after,
-      filter_internal_messages: true,
-    });
-    for (const message of messages.filter(isCustomer)) {
-      seen = Math.max(seen, message.id);
-      const text = sanitize(
-        [message.content_attributes?.email?.subject ?? "", messageContent(message)].join("\n"),
-        identities,
-      );
-      if (ids.length < MAX_MESSAGES && text.replaceAll("[REDACTED]", "").trim()) {
-        ids.push(message.id);
-        parts.push(text);
-      }
-    }
-    complete = ids.length === MAX_MESSAGES || messages.length < MESSAGE_PAGE_SIZE;
-    if (complete) break;
-    after = messages.at(-1)?.id ?? after;
-  }
-  return { ids, text: parts.join(" ").slice(0, MAX_TEXT), complete, seen };
+  return (
+    message.message_type === 0 &&
+    !message.private &&
+    !message.content_attributes?.deleted &&
+    !message.content_attributes?.email?.auto_reply &&
+    (message.sender?.type == null || message.sender.type === "contact")
+  );
 }
 
 export function sanitize(text: string, identities: Array<string | null | undefined>): string {
@@ -286,14 +255,13 @@ export function sanitize(text: string, identities: Array<string | null | undefin
   return value.replace(/\s+/g, " ").trim().slice(0, MAX_TEXT);
 }
 
-type Owners = NonNullable<Settings["config"]["routing"]>["accounts"][string];
+type Owners = Settings["config"]["routing"]["accounts"][string];
 
-type Kinds = NonNullable<NonNullable<Settings["config"]["routing"]>["kinds"]>[string];
+type Kinds = NonNullable<Settings["config"]["routing"]["kinds"]>[string];
 
 async function decide(ctx: RoutingContext, owners: Owners, kinds: Kinds | undefined, text: string): Promise<Decision> {
   const routing = ctx.settings.config.routing;
   const apiKey = ctx.settings.secrets.TYPESAFE_API_KEY;
-  if (!routing || !apiKey) throw new JevError("routing is not configured");
   const ownerCriteria: Record<string, string> = Object.fromEntries(
     Object.entries(owners).map(([route, owner]) => [route, owner.covers]),
   );
@@ -312,13 +280,11 @@ async function decide(ctx: RoutingContext, owners: Owners, kinds: Kinds | undefi
       criteria: routing.topics,
     };
   }
-  if (routing.snoozeUnclear) {
-    questions.request = {
-      type: "choice",
-      instructions: "Select whether the customer asks for anything in this support ticket, using only the ticket.",
-      criteria: REQUEST_CRITERIA,
-    };
-  }
+  questions.request = {
+    type: "choice",
+    instructions: "Select whether the customer asks for anything in this support ticket, using only the ticket.",
+    criteria: REQUEST_CRITERIA,
+  };
   if (kinds) {
     questions.kind = {
       type: "choice",
@@ -332,7 +298,7 @@ async function decide(ctx: RoutingContext, owners: Owners, kinds: Kinds | undefi
 
   // A redirect is an error, never followed: it could carry the key to another host.
   const response = await ctx.fetch(
-    new Request(JEV_URL, {
+    new Request(routing.endpoint, {
       method: "POST",
       redirect: "manual",
       headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },

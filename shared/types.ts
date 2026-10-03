@@ -43,7 +43,9 @@ export interface RelayConversation {
     blocked?: boolean;
     avatarUrl?: string | null;
   };
+  /** Person only; agent bots are represented as unassigned. */
   assignee?: RelayAssignee | null;
+  assigneeType?: string | null;
   customAttributes: Record<string, unknown>;
 }
 
@@ -59,6 +61,8 @@ export interface RelayMessage {
   emailSubject?: string | null;
   /** An automatic email reply (out of office, for example): relayed without notifications. */
   autoReply?: boolean;
+  /** A qualifying public reply follows this message in Chatwoot. */
+  answered?: boolean;
   attachments: RelayAttachment[];
   /** A bot's options to pick, cards, or articles, with a link each when they have one. */
   items?: RelayItem[];

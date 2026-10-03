@@ -15,6 +15,7 @@ export default defineConfig({
           CONFIG: {
             chatwoot: { baseUrl: "https://chatwoot.example.com" },
             routing: {
+              botIds: { "1": 1, "2": 2 },
               kinds: {
                 "1": {
                   spam: { covers: "Unsolicited advertising.", status: "resolved" },
@@ -27,12 +28,11 @@ export default defineConfig({
                 "2": { cloud: { assignee: 7, covers: "Cloud support." } },
               },
             },
-            startAfterConversationId: { "1": 10, "2": 2 },
           },
           CHATWOOT_TOKEN: "agent-token",
-          CHATWOOT_WEBHOOK_SECRETS: JSON.stringify({ "1": "secret-acme", "2": "secret-globex" }),
+          CHATWOOT_AGENT_BOT_SECRETS: JSON.stringify({ "1": "secret-acme", "2": "secret-globex" }),
           TYPESAFE_API_KEY: "ts-key",
-          CHATWOOT_BOT_TOKENS: JSON.stringify({ "1": "bot-token" }),
+          CHATWOOT_AGENT_BOT_TOKENS: JSON.stringify({ "1": "bot-token", "2": "other-bot-token" }),
         },
       },
     }),
