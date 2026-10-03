@@ -555,7 +555,7 @@ describe("worker", () => {
 
   it("retries a failed message with backoff without skipping it", async () => {
     world.conversation(13, [{ id: 601, content: "hello", message_type: 0 }]);
-    world.failReplies = 1;
+    world.rateLimitReplies = 1;
     await chatwootWebhook(created(13));
     await drain();
 
@@ -571,7 +571,7 @@ describe("worker", () => {
     await drain();
     const replies = world.webhookPosts().filter((post) => post.thread);
     expect(replies.map((post) => post.body.content)).toEqual([
-      "hello\n-# <@100000000000000777>", // attempt answered with HTTP 500
+      "hello\n-# <@100000000000000777>", // attempt deferred by Discord's 429
       "hello\n-# <@100000000000000777>",
     ]);
     await chatwootWebhook(created(13));

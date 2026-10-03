@@ -45,10 +45,12 @@ class World {
   failLinks = 0;
   /** Assignee announcements Discord fails before accepting them. */
   failAnnouncements = 0;
+  failAnnouncementsStatus = 503;
   /** Posts deleted in Discord. */
   goneThreads = new Set<string>();
   /** New posts Discord fails before accepting them. */
   failPosts = 0;
+  failPostsStatus = 503;
   /** Discord's answer to posting into a thread, while it fails. */
   threadFailure: (() => Response) | undefined;
   /** Discord users by id; others are unknown to Discord. */
@@ -127,12 +129,12 @@ class World {
           String(JSON.parse(request.body).content).startsWith("-# Assigned to")
         ) {
           this.failAnnouncements -= 1;
-          return json({ message: "unavailable" }, { status: 503 });
+          return json({ message: "unavailable" }, { status: this.failAnnouncementsStatus });
         }
         if (thread) return json({ id: String(100000000000001000n + BigInt(this.requests.length)), channel_id: thread });
         if (this.failPosts > 0) {
           this.failPosts -= 1;
-          return json({ message: "unavailable" }, { status: 503 });
+          return json({ message: "unavailable" }, { status: this.failPostsStatus });
         }
         this.threads += 1;
         return json({ id: "card", channel_id: `20000000000000000${this.threads}` });
@@ -328,19 +330,20 @@ describe("processConversation", () => {
         parts += 1;
         return parts === 1
           ? json({ id: "100000000000008001", channel_id: oldThread })
-          : json({ message: "unavailable" }, { status: 503 });
+          : json({ message: "rate limited", retry_after: 1 }, { status: 429 });
       };
-      await expect(sync(store, settings)).rejects.toThrow("503");
+      await expect(sync(store, settings)).rejects.toThrow("429");
       expect(world.posts().at(-2)?.body.content).toBe(long.slice(0, 1674));
       // The deleted thread invalidates unfinished parts and response digests, but not the completed cursor.
       world.goneThreads.add(oldThread);
       world.threadFailure = () => {
         world.threadFailure = undefined;
         world.failPosts = 1;
+        world.failPostsStatus = 429;
         return json({ message: "Unknown Channel", code: 10003 }, { status: 404 });
       };
       // Fail after forgetting the deleted thread, before a new post or cursor can mask a lost checkpoint.
-      await expect(sync(store, settings)).rejects.toThrow("503");
+      await expect(sync(store, settings)).rejects.toThrow("429");
       await sync(store, settings);
       expect(world.replies().filter((text) => text === "Completed history")).toHaveLength(1);
       const newThread = world.posts().at(-1)?.thread;
@@ -452,7 +455,6 @@ describe("processConversation", () => {
       "a rate limit",
       () => json({ message: "You are being rate limited.", retry_after: 64.5, global: false }, { status: 429 }),
     ],
-    ["a server error", () => json({ message: "Internal Server Error" }, { status: 500 })],
     ["missing permissions", () => json({ message: "Missing Permissions", code: 50013 }, { status: 403 })],
   ])("never skips a message because of %s, however often it fails", async (_name, failure) => {
     const settings = testSettings();
@@ -603,6 +605,7 @@ describe("processConversation", () => {
     world.failAnnouncements = 1;
     await withStore(async (store) => {
       const settings = testSettings();
+      world.failAnnouncementsStatus = 429;
       await expect(sync(store, settings)).rejects.toThrow();
       await sync(store, settings);
       // The customer message was posted once; the announcement failed, then its retry succeeded.

@@ -89,6 +89,7 @@ describe("DiscordForum", () => {
         );
         return json({ id: "m1", channel_id: "thread-9" });
       }),
+      on("GET", `${api}/channels/thread-9/messages`, () => json([])),
     );
     const budget = new Budget(5);
     budget.startSlice(30);
@@ -108,7 +109,7 @@ describe("DiscordForum", () => {
         "send-2",
       ),
     ).rejects.toThrow("outcome is unknown");
-    expect(requests).toHaveLength(1);
+    expect(requests.filter((request) => request.method === "POST")).toHaveLength(1);
   });
 
   it("keeps the send guard after a 500 that may have accepted the webhook", async () => {
@@ -122,6 +123,7 @@ describe("DiscordForum", () => {
           ? json({ message: "accepted, response lost" }, { status: 500 })
           : json({ id: "m2", channel_id: "thread-9" });
       }),
+      on("GET", `${api}/channels/thread-9/messages`, () => json([])),
     );
     const first = new DiscordForum(new DiscordRest("bot-token", new Budget(5).fetch), cache);
     await expect(first.execute("55", { content: "hi" }, "thread-9", "send-500")).rejects.toMatchObject({ status: 500 });
@@ -133,7 +135,29 @@ describe("DiscordForum", () => {
         "send-500",
       ),
     ).rejects.toThrow("outcome is unknown");
-    expect(requests).toHaveLength(1);
+    expect(posts).toBe(1);
+    expect(requests.filter((request) => request.method === "POST")).toHaveLength(1);
+    expect(requests.filter((request) => request.method === "GET")).toHaveLength(1);
+  });
+
+  it("recovers an accepted unknown send from the thread without posting again", async () => {
+    const cache = new MemoryCache();
+    cache.set("forum:55:webhook", "1:abc");
+    const { requests } = mockFetch(
+      on("POST", `${api}/webhooks/1/abc`, () => json({ message: "accepted, response lost" }, { status: 500 })),
+      on("GET", `${api}/channels/thread-9/messages`, () =>
+        json([{ id: "m2", webhook_id: "1", content: "hi", flags: 0 }]),
+      ),
+    );
+    const client = new DiscordForum(new DiscordRest("bot-token", new Budget(5).fetch), cache);
+    await expect(client.execute("55", { content: "hi" }, "thread-9", "send-recover")).rejects.toMatchObject({
+      status: 500,
+    });
+    await expect(client.execute("55", { content: "hi" }, "thread-9", "send-recover")).resolves.toEqual({
+      channelId: "thread-9",
+      messageId: "m2",
+    });
+    expect(requests.filter((request) => request.method === "POST")).toHaveLength(1);
   });
 
   it("retries a refused tag send after the recovery read fails", async () => {

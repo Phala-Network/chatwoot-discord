@@ -73,6 +73,21 @@ export class DiscordForum implements ForumClient {
       const receipt = parseJson(saved);
       if (isRecord(receipt) && typeof receipt.channelId === "string" && typeof receipt.messageId === "string")
         return { channelId: receipt.channelId, messageId: receipt.messageId };
+      if (!key) throw new UnknownSendError();
+      if (saved !== "unknown" || !threadId) throw new UnknownSendError();
+      const webhook = await this.webhook(forumChannelId);
+      try {
+        const confirmed = await this.confirmSend(webhook.id, threadId, message);
+        if (confirmed) {
+          this.cache.set(key, JSON.stringify(confirmed));
+          return confirmed;
+        }
+      } catch (error) {
+        if (error instanceof BudgetExhaustedError || error instanceof JobDeadlineError) throw error;
+        if (error instanceof DiscordHttpError && (error.status === 429 || error.status >= 500)) throw error;
+        if (isUnknownChannel(error) || (error instanceof DiscordHttpError && error.status === 404))
+          throw new UnknownThreadError(threadId);
+      }
       throw new UnknownSendError();
     }
     const webhook = await this.webhook(forumChannelId);
@@ -197,6 +212,19 @@ export class DiscordForum implements ForumClient {
     }
   }
 
+  private async confirmSend(
+    webhookId: string,
+    threadId: string,
+    expected: WebhookMessage,
+  ): Promise<{ channelId: string; messageId: string } | undefined> {
+    const messages = await this.rest.get<RESTGetAPIChannelMessagesResult, RESTGetAPIChannelMessagesQuery>(
+      Routes.channelMessages(threadId),
+      { query: { limit: CARD_PAGE } },
+    );
+    const found = messages.find((message) => message.webhook_id === webhookId && sameMessage(message, expected));
+    return found ? { channelId: threadId, messageId: found.id } : undefined;
+  }
+
   async deleteMessage(forumChannelId: string, threadId: string, messageId: string): Promise<void> {
     const webhook = await this.webhook(forumChannelId);
     try {
@@ -308,4 +336,15 @@ function isUnknownChannel(error: unknown): boolean {
 
 function webhookKey(forumChannelId: string): string {
   return `forum:${forumChannelId}:webhook`;
+}
+
+function sameMessage(message: RESTGetAPIChannelMessagesResult[number], expected: WebhookMessage): boolean {
+  if (expected.content !== undefined && message.content !== expected.content) return false;
+  if (expected.flags !== undefined && message.flags !== expected.flags) return false;
+  if (
+    expected.components !== undefined &&
+    JSON.stringify(message.components ?? []) !== JSON.stringify(expected.components)
+  )
+    return false;
+  return expected.content !== undefined || expected.flags !== undefined || expected.components !== undefined;
 }
