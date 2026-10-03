@@ -7,34 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-10-03
+
 ### Changed
 
-- Clarify that the router calls TypeSafe's System One API (`/v1/systemone`) with the model in `routing.model`
-  (Jev by default); `routing.endpoint` may point to another deployment of that API, for example a proxy or gateway.
-- Hold pending bot-inbox customer messages in the deduplicated conversation job. Status webhooks and the sweep
-  release held work; only one short race re-read is timed, with no per-message polling or routing deadline.
-- Mention triage only for open, unanswered customer messages. Public outgoing bot/human replies count; private,
-  deleted, failed, template and automatic-email messages do not. Preserve once-per-message decisions, history
-  silence, notification budgets and late delivery-failure notices.
-- Resume answer scans by page cursor and re-read the final/answer page before the first notification decision;
-  answers arriving or failing between alarms do not leave a stale cached boolean. Outgoing `message_updated`
-  invalidates unfinished scans, including failed replies retried as sent on already-scanned pages.
-- Document the accepted lost-update limit: the sweep cannot recover a skipped reply's in-place status change
-  without its webhook, so an affected customer message can cause at most one extra triage call.
-- Keep `assignee_type`: bot assignees are Unassigned in cards/tags/queue and never ping a same-id human.
-  `/pending` hands back through the current inbox's account bot assignment. Pending queue tickets show 🤖 without
-  pings/escalations. Queue budget is now 6 requests per account plus 4 message requests.
-- Remove `router.accounts`, `router.waitSeconds` and routing attribute reads. `router.keepLabels` preserves every
-  configured kind in Manage. The router's tokens/secrets are not needed by the relay.
+- Works with chatwoot-router 0.2.0, which routes as each inbox's Chatwoot agent bot: Chatwoot's status replaces the
+  `routing_*` attributes. A customer message of a `pending` conversation in a bot inbox is posted once the bot is done
+  with it; the triage bot is called only if the conversation is then open and the message unanswered (a public reply
+  answers it; a private note, a failed reply, a template, or an automatic email reply does not). A conversation the bot
+  resolved or snoozed reaches no triage bot. The support queue lists `pending` tickets marked 🤖, without pings.
+- A bot assignee is no person: no ping, no assignee tag, "Unassigned" in the card and the queue. `/pending` in a bot
+  inbox hands the ticket back to the bot.
+- `router.accounts` and `router.waitSeconds` are gone; `router.keepLabels` should list every kind label.
 
 ### Upgrade
 
-- Deploy this relay before the new native router. Remove the two old router wait settings and list every kind
-  in `router.keepLabels`. Preserve the Worker name/Hub state and retain the relay's signed account webhook.
-- Stop the old router webhook/cron, deploy the replacement with bot ids/tokens/secrets, then connect bots one
-  account at a time. Open tickets go directly to people/triage; count pending tickets before enabling routing.
-- Keep old Chatwoot attributes through the rollback window. Disconnect bots before rollback, then stop the new
-  router and restore old code/config/webhook if needed; never run both. Sweep wakes held jobs after disconnect.
+- Remove `router.accounts` and `router.waitSeconds`, list every kind in `router.keepLabels`, and deploy this relay
+  before chatwoot-router 0.2.0. Keep the Worker's name.
+- A lost `message_updated` webhook can cause at most one extra triage call for the affected message (see the README).
 
 ## [0.29.0] - 2026-10-02
 
@@ -623,7 +613,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-invocation subrequest budget, and a cron reconciliation sweep for missed webhooks.
 - Verification of Chatwoot webhook HMAC signatures and Discord Ed25519 interaction signatures.
 
-[Unreleased]: https://github.com/Phala-Network/chatwoot-workers/compare/chatwoot-discord-relay@0.29.0...HEAD
+[Unreleased]: https://github.com/Phala-Network/chatwoot-workers/compare/chatwoot-discord-relay@0.30.0...HEAD
+[0.30.0]: https://github.com/Phala-Network/chatwoot-workers/compare/chatwoot-discord-relay@0.29.0...chatwoot-discord-relay@0.30.0
 [0.29.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.28.0...chatwoot-discord-relay@0.29.0
 [0.28.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/Phala-Network/chatwoot-workers/compare/v0.26.0...v0.27.0
