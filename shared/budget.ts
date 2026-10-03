@@ -29,7 +29,6 @@ export class Budget {
   constructor(
     readonly limit: number,
     private readonly fetchImpl: Fetch = (request) => fetch(request),
-    private readonly timeoutMs?: number,
   ) {}
 
   get remaining(): number {
@@ -60,11 +59,11 @@ export class Budget {
     return (request) => this.request(request, timeoutMs);
   }
 
-  readonly fetch: Fetch = (request) => this.request(request, this.timeoutMs ?? METADATA_TIMEOUT_MS);
+  readonly fetch: Fetch = (request) => this.request(request, METADATA_TIMEOUT_MS);
 
   private async request(request: Request, timeoutMs: number): Promise<Response> {
     this.consume();
-    const operation = AbortSignal.timeout(this.timeoutMs ?? timeoutMs);
+    const operation = AbortSignal.timeout(timeoutMs);
     const signal = AbortSignal.any([request.signal, operation, ...(this.slice ? [this.slice] : [])]);
     try {
       const response = await within(this.fetchImpl(new Request(request, { signal })), signal);

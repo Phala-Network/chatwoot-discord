@@ -36,11 +36,11 @@ function runWith(given: typeof settings, action: CommandAction, ...routes: Route
 function runWithPreparation(
   given: typeof settings,
   action: CommandAction,
-  preparation: Parameters<typeof executeCommand>[3],
+  retry: Parameters<typeof executeCommand>[4],
   ...routes: Route[]
 ) {
   const mock = mockFetch(profile, ...routes);
-  const outcome = executeCommand(job(action), given, (request) => fetch(request), preparation);
+  const outcome = executeCommand(job(action), given, (request) => fetch(request), undefined, retry);
   return { outcome, result: outcome.then(({ content }) => content), requests: mock.requests };
 }
 
@@ -608,7 +608,7 @@ describe("executeCommand", () => {
     const { content } = await executeCommand(
       job({ type: "status", status: "resolved" }),
       settings,
-      new Budget(20, hanging, 20).fetch,
+      new Budget(20, hanging).fetchWith(20),
     );
     expect(content).toMatch(/^❌ Chatwoot or Discord did not answer in time\. Check in Chatwoot whether it was done/);
   });
