@@ -2,7 +2,6 @@ export function retryDelay(attempts: number): number {
   return Math.min(5000 * 2 ** attempts, 30 * 60 * 1000);
 }
 
-
 export interface Job {
   key: string;
   payload: string;

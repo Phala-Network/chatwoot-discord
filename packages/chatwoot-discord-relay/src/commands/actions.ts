@@ -235,8 +235,7 @@ export async function executeCommand(
     const retryable = preparation.retryable?.() ?? false;
     if (
       tracked &&
-        tracked &&
-        !retryable &&
+      !retryable &&
       ((error instanceof ChatwootError && error.status >= 500) ||
         error instanceof TypeError ||
         (error instanceof DOMException && ["TimeoutError", "AbortError"].includes(error.name)) ||

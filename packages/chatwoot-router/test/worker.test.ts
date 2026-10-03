@@ -436,17 +436,19 @@ describe("account sweep", () => {
 
 it("measures routing behind a slow conversation", async () => {
   let startedSlow = false;
-  let firstRead = 0;
   let finished = 0;
+  let releaseSlow!: () => void;
+  const slow = new Promise<void>((resolve) => {
+    releaseSlow = resolve;
+  });
   const base = "chatwoot.example.com/api/v1/accounts/1";
   mockFetch(
     on("GET", `${base}/conversations/801`, async () => {
       startedSlow = true;
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await slow;
       return json({}, { status: 503 });
     }),
     on("GET", `${base}/conversations/802`, () => {
-      firstRead ||= Date.now();
       return json({ id: 802, status: "pending", inbox_id: 2 });
     }),
     on("GET", `${base}/inboxes/2/agent_bot`, () => json({ agent_bot: { id: 1, account_id: 1 } })),
@@ -458,10 +460,8 @@ it("measures routing behind a slow conversation", async () => {
   );
   await stub(1, 801).enqueueConversation(1, 801);
   await vi.waitFor(() => expect(startedSlow).toBe(true));
-  const queued = Date.now();
   await stub(1, 802).enqueueConversation(1, 802);
-  await vi.waitFor(() => expect(finished).toBeGreaterThan(0), { timeout: 5000 });
-  console.log(JSON.stringify({ latency: "router", queueAgeMs: firstRead - queued, firstEffectMs: finished - queued }));
-  expect(finished - queued).toBeLessThan(500);
+  await vi.waitFor(() => expect(finished).toBeGreaterThan(0));
+  releaseSlow();
   await drain();
 });

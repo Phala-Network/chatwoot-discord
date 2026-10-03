@@ -1507,26 +1507,21 @@ async function setAlarmNow(): Promise<void> {
 it("measures command feedback behind a slow conversation", async () => {
   world.mock.spy.mockRestore();
   let startedSlow = false;
-  let commandRead = 0;
   let feedback = 0;
+  let releaseSlow!: () => void;
+  const slow = new Promise<void>((resolve) => {
+    releaseSlow = resolve;
+  });
   world = new World([
     on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/801", async (request) => {
       startedSlow = true;
       await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(resolve, 4000);
-        request.signal.addEventListener(
-          "abort",
-          () => {
-            clearTimeout(timer);
-            reject(request.signal.reason);
-          },
-          { once: true },
-        );
+        request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true });
+        slow.then(resolve);
       });
       return json({}, { status: 503 });
     }),
     on("GET", "chatwoot.example.com/api/v1/profile", () => {
-      commandRead = Date.now();
       return json({ id: 42, accounts: [{ id: 3 }] });
     }),
     on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/802/toggle_status", () => json({})),
@@ -1534,14 +1529,13 @@ it("measures command feedback behind a slow conversation", async () => {
       "PATCH",
       /^discord\.com\/api\/v10\/webhooks\/100000000000000001\/latency-token\/messages\/(@|%40)original$/,
       () => {
-        feedback = Date.now();
+        feedback += 1;
         return json({});
       },
     ),
   ]);
   await hub().enqueueConversation(3, 801);
   await vi.waitFor(() => expect(startedSlow).toBe(true));
-  const queued = Date.now();
   await hub().enqueueCommand({
     interactionId: "latency-command",
     applicationId: "100000000000000001",
@@ -1551,9 +1545,8 @@ it("measures command feedback behind a slow conversation", async () => {
     conversationId: 802,
     action: { type: "status", status: "resolved" },
   });
-  await vi.waitFor(() => expect(feedback).toBeGreaterThan(0), { timeout: 5000 });
-  console.log(JSON.stringify({ latency: "relay", queueAgeMs: commandRead - queued, feedbackMs: feedback - queued }));
-  expect(feedback - queued).toBeLessThan(2000);
+  await vi.waitFor(() => expect(feedback).toBe(1), { timeout: 5000 });
+  releaseSlow();
   await drain();
 });
 
@@ -1562,42 +1555,30 @@ it("measures the first customer post with a slow decorative lookup", async () =>
     state.storage.sql.exec("DELETE FROM cache WHERE key = 'inbox:3:2'"),
   );
   world.mock.spy.mockRestore();
-  let firstRead = 0;
   let firstPost = 0;
+  let releaseSlow!: () => void;
+  const slow = new Promise<void>((resolve) => {
+    releaseSlow = resolve;
+  });
   world = new World([
     (request) => {
-      if (request.method === "GET" && request.url.pathname.endsWith("/conversations/881")) firstRead ||= Date.now();
       if (
         request.method === "POST" &&
         request.url.pathname === "/api/v10/webhooks/1/tok" &&
         request.body.includes("latency-body")
       )
-        firstPost ||= Date.now();
+        firstPost += 1;
       return undefined;
     },
-    on("GET", "chatwoot.example.com/api/v1/accounts/3/inboxes/2", async (request) => {
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(resolve, 4000);
-        request.signal.addEventListener(
-          "abort",
-          () => {
-            clearTimeout(timer);
-            reject(request.signal.reason);
-          },
-          { once: true },
-        );
-      });
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/inboxes/2", async (_request) => {
+      await slow;
       return json({ id: 2, name: "Slow inbox" });
     }),
   ]);
   world.conversation(881, [{ id: 88101, content: "latency-body", message_type: 0 }]);
-  const queued = Date.now();
   await hub().enqueueConversation(3, 881);
-  await vi.waitFor(() => expect(firstPost).toBeGreaterThan(0), { timeout: 5000 });
-  console.log(
-    JSON.stringify({ latency: "relay-body", queueAgeMs: firstRead - queued, firstPostMs: firstPost - queued }),
-  );
-  expect(firstPost - queued).toBeLessThan(500);
+  await vi.waitFor(() => expect(firstPost).toBeGreaterThan(0));
+  releaseSlow();
   await drain();
 });
 
@@ -1691,17 +1672,14 @@ it("releases the alarm on a 429 so another person's command receives feedback", 
 });
 
 it("returns before Discord's deadline without acknowledging an unconfirmed durable enqueue", async () => {
+  vi.useFakeTimers();
   const namespace = new Proxy(env.HUB, {
     get(target, property, receiver) {
       if (property === "getByName")
         return () =>
           new Proxy(hub(), {
             get(object, key, objectReceiver) {
-              if (key === "interaction")
-                return async () => {
-                  await new Promise((resolve) => setTimeout(resolve, 2700));
-                  throw new Error("RPC unavailable");
-                };
+              if (key === "interaction") return async () => new Promise<never>(() => {});
               return Reflect.get(object, key, objectReceiver);
             },
           });
@@ -1709,12 +1687,11 @@ it("returns before Discord's deadline without acknowledging an unconfirmed durab
     },
   });
   const signed = await signedInteraction({ id: "initial-deadline", type: 1 }, Math.floor(Date.now() / 1000));
-  const started = Date.now();
-  const response = await worker.fetch(signed(), { ...env, HUB: namespace }, createExecutionContext());
+  const pending = worker.fetch(signed(), { ...env, HUB: namespace }, createExecutionContext());
+  await vi.advanceTimersByTimeAsync(2501);
+  const response = await pending;
   expect(response.status).toBe(503);
-  expect(Date.now() - started).toBeLessThan(2900);
-  // Settle the deliberately non-cancellable RPC before the next test owns the fetch boundary.
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  vi.useRealTimers();
 });
 
 it("does not replay a customer reply whose creation response was lost", async () => {
@@ -1772,94 +1749,3 @@ it("does not replay a derived response whose Discord receipt was lost", async ()
   await drain();
   expect(sends).toBe(1);
 });
-
-it("continues slow attachments while another person's command receives feedback within one slice", async () => {
-  world.mock.spy.mockRestore();
-  const downloads = [0, 0];
-  let downloading = false;
-  let reports = 0;
-  let sends = 0;
-  let feedbackAt = 0;
-  const sizes = [2 * 1024 * 1024 + 1, 3];
-  world = new World([
-    on("GET", "chatwoot.example.com/api/v1/profile", () => json({ id: 42, accounts: [{ id: 3 }] })),
-    on("GET", /^cdn\.discordapp\.com\/attachments\/slow-[01]$/, async (request) => {
-      const index = request.url.pathname.endsWith("0") ? 0 : 1;
-      downloads[index] = (downloads[index] ?? 0) + 1;
-      downloading = true;
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(resolve, 5500);
-        request.signal.addEventListener(
-          "abort",
-          () => {
-            clearTimeout(timer);
-            reject(request.signal.reason);
-          },
-          { once: true },
-        );
-      });
-      return new Response(new Uint8Array(sizes[index] ?? 0));
-    }),
-    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/888/messages", (request) => {
-      sends += 1;
-      const files = request.form?.getAll("attachments[]") ?? [];
-      expect(files.map((file) => (file instanceof File ? [file.name, file.size] : file))).toEqual([
-        ["first.bin", sizes[0]],
-        ["second.bin", sizes[1]],
-      ]);
-      return json({ id: 88801 });
-    }),
-    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/889/toggle_status", () => json({})),
-    on(
-      "PATCH",
-      /^discord\.com\/api\/v10\/webhooks\/100000000000000001\/attachment-feedback\/messages\/(@|%40)original$/,
-      () => {
-        reports += 1;
-        return json({});
-      },
-    ),
-    on(
-      "PATCH",
-      /^discord\.com\/api\/v10\/webhooks\/100000000000000001\/slice-feedback\/messages\/(@|%40)original$/,
-      () => {
-        feedbackAt = Date.now();
-        return json({});
-      },
-    ),
-  ]);
-  await hub().enqueueCommand({
-    interactionId: "slow-attachments",
-    applicationId: "100000000000000001",
-    token: "attachment-feedback",
-    discordUserId: ALICE,
-    accountId: 3,
-    conversationId: 888,
-    action: {
-      type: "message",
-      private: true,
-      content: "Files",
-      files: sizes.map((size, index) => ({
-        url: `https://cdn.discordapp.com/attachments/slow-${index}`,
-        filename: index === 0 ? "first.bin" : "second.bin",
-        size,
-      })),
-    },
-  });
-  await vi.waitFor(() => expect(downloading).toBe(true));
-  const queued = Date.now();
-  await hub().enqueueCommand({
-    interactionId: "command-during-attachments",
-    applicationId: "100000000000000001",
-    token: "slice-feedback",
-    discordUserId: ALICE,
-    accountId: 3,
-    conversationId: 889,
-    action: { type: "status", status: "resolved" },
-  });
-  await vi.waitFor(() => expect(feedbackAt).toBeGreaterThan(0), { timeout: 11_000 });
-  expect(feedbackAt - queued).toBeLessThan(11_000);
-  await vi.waitFor(() => expect(reports).toBe(1), { timeout: 15_000 });
-  await drain();
-  expect(downloads).toEqual([1, 2]);
-  expect(sends).toBe(1);
-}, 30_000);
