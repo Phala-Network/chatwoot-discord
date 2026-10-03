@@ -11,13 +11,14 @@ import { loadSettings } from "./settings.ts";
 import { clearFailures, expectActivity, recordFailure } from "./turn.ts";
 import type { Transition } from "./webhook.ts";
 
-export const ROUTER_NAME = "global";
-const BUDGET = { route: 45, sweep: 1 };
+export function conversationName(accountId: number, conversationId: number): string {
+  return `${accountId}:${conversationId}`;
+}
+const ROUTE_BUDGET = 45;
 const RUN_WALL_MS = 5 * 60 * 1000;
 const id = z.number().int().positive();
 const jobSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("route"), accountId: id, conversationId: id }),
-  z.object({ type: z.literal("sweep"), accountId: id, status: z.enum(["pending", "open"]) }),
 ]);
 type Payload = z.infer<typeof jobSchema>;
 
@@ -38,14 +39,6 @@ export class Router extends DurableObject<Env> {
     await this.schedule();
   }
 
-  async requestSweep(): Promise<void> {
-    for (const accountId of Object.keys((await loadSettings(this.env)).config.routing.accounts)) {
-      for (const status of ["pending", "open"] as const)
-        this.enqueue({ type: "sweep", accountId: Number(accountId), status });
-    }
-    await this.schedule();
-  }
-
   override async alarm(): Promise<void> {
     const settings = await loadSettings(this.env);
     const budget = new Budget(settings.config.subrequestBudget);
@@ -61,27 +54,18 @@ export class Router extends DurableObject<Env> {
         continue;
       }
       const payload = parsed.data;
-      if (budget.remaining < BUDGET[payload.type] || Date.now() - started > RUN_WALL_MS) {
+      if (budget.remaining < ROUTE_BUDGET || Date.now() - started > RUN_WALL_MS) {
         yielded = true;
         break;
       }
       try {
         const ctx = { settings, chatwoot, store: this.store, fetch: budget.fetch };
-        if (payload.type === "route") {
-          if ((await routeConversation(ctx, payload.accountId, payload.conversationId)) === "defer") {
-            this.store.deferJob(job);
-            yielded = true;
-            break;
-          }
-          clearFailures(this.store, payload.accountId, payload.conversationId);
-        } else if (routesAccount(settings, payload.accountId)) {
-          await this.sweep(
-            chatwoot,
-            payload.accountId,
-            payload.status,
-            settings.config.routing.botIds[String(payload.accountId)],
-          );
+        if ((await routeConversation(ctx, payload.accountId, payload.conversationId)) === "defer") {
+          this.store.deferJob(job);
+          yielded = true;
+          break;
         }
+        clearFailures(this.store, payload.accountId, payload.conversationId);
         this.store.completeJob(job);
       } catch (error) {
         if (error instanceof ChatwootError && error.conversationMissing) {
@@ -94,10 +78,7 @@ export class Router extends DurableObject<Env> {
           yielded = true;
           break;
         }
-        const attempts =
-          payload.type === "route"
-            ? recordFailure(this.store, payload.accountId, payload.conversationId)
-            : job.attempts + 1;
+        const attempts = recordFailure(this.store, payload.accountId, payload.conversationId);
         const delay = retryDelay(attempts - 1);
         const logAt = attempts >= 3 ? log.error : log.warn;
         logAt("job failed; will retry", {
@@ -112,39 +93,8 @@ export class Router extends DurableObject<Env> {
     await this.schedule(yielded ? Date.now() : undefined);
   }
 
-  private async sweep(
-    chatwoot: ReturnType<typeof chatwootClient>,
-    accountId: number,
-    status: "pending" | "open",
-    botId: number | undefined,
-  ): Promise<void> {
-    const key = `sweep:${accountId}:${status}`;
-    const saved = id.safeParse(parseJson(this.store.get(key)));
-    const page = saved.success ? saved.data : 1;
-    // Route snapshots decide ownership from live state, including disconnected bot leftovers.
-    const conversations = await chatwoot.listConversations(accountId, page, status);
-    for (const conversation of conversations) {
-      if (
-        conversation.id !== undefined &&
-        (status === "pending" ||
-          (conversation.meta?.assignee_type === "AgentBot" && conversation.meta.assignee?.id === botId))
-      )
-        this.enqueue({ type: "route", accountId, conversationId: conversation.id });
-    }
-    if (conversations.length === 0) {
-      this.store.delete(key);
-      return;
-    }
-    this.store.set(key, String(page + 1));
-    this.enqueue({ type: "sweep", accountId, status });
-  }
-
   private enqueue(payload: Payload): void {
-    const key =
-      payload.type === "sweep"
-        ? `sweep:${payload.accountId}:${payload.status}`
-        : `${payload.type}:${payload.accountId}:${payload.conversationId}`;
-    this.store.enqueue(key, payload.type === "sweep" ? 1 : 0, JSON.stringify(payload));
+    this.store.enqueue(`route:${payload.accountId}:${payload.conversationId}`, 0, JSON.stringify(payload));
   }
 
   private async schedule(at?: number): Promise<void> {

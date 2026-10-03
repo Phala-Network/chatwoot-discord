@@ -1,10 +1,7 @@
-// Counts outbound requests so a Durable Object invocation stays under the Workers subrequest
-// limit (50 per invocation on the Free plan). Work checks `remaining` before starting a unit
-// that must not be cut in half, and yields to a fresh invocation when it is low. Every request
-// also gets a timeout (fetch only takes one as an AbortSignal): a request that never answers
-// would otherwise hold the alarm, and with it the whole queue, until the runtime ends it.
-
+// Every outbound attempt counts, including retries and coordinator RPCs. A job's slice and
+// the operation deadline also bound response bodies; a caller's cancellation is never replaced.
 import type { Fetch } from "./chatwoot/api.ts";
+import { within } from "./deadline.ts";
 
 export class BudgetExhaustedError extends Error {
   constructor() {
@@ -13,28 +10,83 @@ export class BudgetExhaustedError extends Error {
   }
 }
 
-/**
- * How long a request may take, response body included. Generous for the largest transfers (a
- * 50 MB command upload to Chatwoot); a request that times out fails like a network error.
- */
-const REQUEST_TIMEOUT_MS = 60_000;
+export class JobDeadlineError extends Error {
+  constructor() {
+    super("Job time slice is used up");
+    this.name = "JobDeadlineError";
+  }
+}
+
+export const METADATA_TIMEOUT_MS = 1500;
+export const TRANSFER_TIMEOUT_MS = 8000;
+export const JOB_SLICE_MS = 10_000;
 
 export class Budget {
   private used = 0;
+  private slice: AbortSignal | undefined;
 
   constructor(
     readonly limit: number,
     private readonly fetchImpl: Fetch = (request) => fetch(request),
-    private readonly timeoutMs = REQUEST_TIMEOUT_MS,
+    private readonly timeoutMs?: number,
   ) {}
 
   get remaining(): number {
     return this.limit - this.used;
   }
 
-  readonly fetch: Fetch = (request) => {
-    if (this.used >= this.limit) return Promise.reject(new BudgetExhaustedError());
+  startSlice(ms = JOB_SLICE_MS): void {
+    this.slice = AbortSignal.timeout(ms);
+  }
+
+  checkpoint(): void {
+    if (this.slice?.aborted) throw new JobDeadlineError();
+  }
+
+  consume(): void {
+    this.checkpoint();
+    if (this.used >= this.limit) throw new BudgetExhaustedError();
     this.used += 1;
-    return this.fetchImpl(new Request(request, { signal: AbortSignal.timeout(this.timeoutMs) }));
+  }
+
+  readonly fetch: Fetch = async (request) => {
+    this.consume();
+    const transfer =
+      request.headers.get("content-type")?.startsWith("multipart/form-data") ||
+      ["cdn.discordapp.com", "media.discordapp.net"].includes(new URL(request.url).hostname);
+    const inference =
+      request.method === "POST" &&
+      !request.headers.has("api_access_token") &&
+      new URL(request.url).hostname !== "discord.com";
+    const operation = AbortSignal.timeout(
+      this.timeoutMs ?? (transfer ? TRANSFER_TIMEOUT_MS : inference ? JOB_SLICE_MS : METADATA_TIMEOUT_MS),
+    );
+    const signal = AbortSignal.any([request.signal, operation, ...(this.slice ? [this.slice] : [])]);
+    try {
+      const response = await within(this.fetchImpl(new Request(request, { signal })), signal);
+      if (!response.body) return response;
+      const reader = response.body.getReader();
+      const body = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          try {
+            const { done, value } = await within(reader.read(), signal);
+            if (done) controller.close();
+            else controller.enqueue(value);
+          } catch (error) {
+            await reader.cancel().catch(() => {});
+            controller.error(error);
+          }
+        },
+        cancel: (reason) => reader.cancel(reason),
+      });
+      return new Response(body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    } catch (error) {
+      this.checkpoint();
+      throw error;
+    }
   };
 }

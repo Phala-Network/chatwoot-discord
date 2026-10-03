@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Partition routing by account and conversation, with a separate paged sweep coordinator. No state migration is needed: 0.2.x was never deployed. Preserve each conversation namespace and its reply/turn guards for future upgrades.
+
 All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
