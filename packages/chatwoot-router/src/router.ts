@@ -12,8 +12,7 @@ import { clearFailures, expectActivity, recordFailure } from "./turn.ts";
 import type { Transition } from "./webhook.ts";
 
 export const ROUTER_NAME = "global";
-export const ROUTE_BUDGET = 45;
-const BUDGET = { route: ROUTE_BUDGET, sweep: 1 };
+const BUDGET = { route: 45, sweep: 1 };
 const RUN_WALL_MS = 5 * 60 * 1000;
 const id = z.number().int().positive();
 const jobSchema = z.discriminatedUnion("type", [

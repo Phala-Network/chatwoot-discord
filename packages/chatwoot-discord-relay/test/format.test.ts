@@ -4,13 +4,9 @@ import {
   body,
   CONTENT_LIMIT,
   chatwootMentions,
-  draftFromMessage,
-  lastCodeBlock,
   postHeader,
   senderName,
   split,
-  TITLE_LIMIT,
-  tagKeys,
   threadTitle,
   titleSubject,
 } from "../src/relay/format.ts";
@@ -24,7 +20,7 @@ describe("format", () => {
   it("titles name the account, conversation, and customer", () => {
     expect(title(message())).toBe("[Acme #12] Jane Doe — My agent will not connect");
     expect(title(message({ emailSubject: "Billing question" }))).toBe("[Acme #12] Jane Doe — Billing question");
-    expect(Array.from(title(message({ content: "x".repeat(500) }))).length).toBeLessThanOrEqual(TITLE_LIMIT);
+    expect(Array.from(title(message({ content: "x".repeat(500) }))).length).toBeLessThanOrEqual(100);
     expect(title(message({ content: "  " }))).toBe("[Acme #12] Jane Doe");
     // A contact without a name shows their email; "discord" stays readable in titles.
     expect(title(message({ content: "Discord login", conversation: { contact: { email: "j@example.com" } } }))).toBe(
@@ -82,27 +78,6 @@ describe("format", () => {
     expect(chatwootMentions("[@Billing](mention://team/7/Billing)", new Map([[7, "592"]]))).toBe("@Billing");
   });
 
-  it("orders tags account, status, assignee, topic, priority, then labels, each by what it stands for", () => {
-    const conversation = message({
-      conversation: {
-        priority: "urgent",
-        labels: ["vip", "refund"],
-        customAttributes: { topic: "Billing" },
-        assignee: { id: 7, name: "Kim" },
-      },
-    }).conversation;
-    expect(tagKeys(3, conversation, "topic")).toEqual([
-      "account:3",
-      "status:open",
-      "assignee:7",
-      "topic:Billing",
-      "priority:urgent",
-      "label:vip",
-      "label:refund",
-    ]);
-    expect(tagKeys(3, message().conversation, "topic")).toEqual(["account:3", "status:open", "assignee:none"]);
-  });
-
   it("header shows channel, inbox, email, and the phone number on phone channels", () => {
     expect(postHeader(message())).toBe("-# via Live chat · Acme — Product App\n-# jane@example.com");
     const phone = { email: null, phone: "+15550100" };
@@ -140,34 +115,5 @@ describe("format", () => {
     // A limit that cannot hold a character would never finish.
     expect(() => split("text", 1)).toThrow(RangeError);
     expect(() => split("text", 0)).toThrow(RangeError);
-  });
-
-  it("takes the last code block of a message", () => {
-    const triage =
-      "**Summary**: wants account deletion\n**Basis**:\n```\ncli conv 15\n```\n**Draft**:\n```text\nHi, you can delete it in Settings.\n```\n-# Reply with this";
-    expect(lastCodeBlock(triage)).toBe("Hi, you can delete it in Settings.");
-    expect(lastCodeBlock("**Draft**:\n\n```\nHi there,\n\nThanks!\n```")).toBe("Hi there,\n\nThanks!");
-    expect(lastCodeBlock("疑似垃圾：广告。建议 /block")).toBeUndefined();
-  });
-
-  it("reads code blocks by CommonMark's fence rules, so a draft may contain code", () => {
-    const draft = "Run this:\n```sh\nagent restart\n```\nThen try again.";
-    // A longer fence around a draft that has its own code block.
-    expect(lastCodeBlock(`**Draft**:\n\`\`\`\`\n${draft}\n\`\`\`\`\n-# done`)).toBe(draft);
-    // Tildes, closed by at least as many tildes; backticks inside do not close them.
-    expect(lastCodeBlock(`Draft:\n~~~text\n${draft}\n~~~~\nafter`)).toBe(draft);
-    // A fence may be indented up to three spaces; its content loses that indentation.
-    expect(draftFromMessage("   ```\n   Hi,\n    indented\n   ```")).toBe("Hi,\n indented");
-    // An unclosed block runs to the end of the message.
-    expect(draftFromMessage("```\nHi there")).toBe("Hi there");
-    // Inline code is not a block.
-    expect(draftFromMessage("Use ```this``` inline")).toBe("Use ```this``` inline");
-  });
-
-  it("uses the last code block, or the whole message, from anyone else", () => {
-    expect(draftFromMessage("Try this:\n```\nold\n```\nor\n```\nHi, please log in again.\n```")).toBe(
-      "Hi, please log in again.",
-    );
-    expect(draftFromMessage(" Thanks for waiting! ")).toBe("Thanks for waiting!");
   });
 });

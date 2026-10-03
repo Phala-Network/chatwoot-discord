@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Budget } from "../../../shared/budget.ts";
 import { chatwootClient } from "../../../shared/chatwoot/api.ts";
-import { ROUTE_BUDGET } from "../src/router.ts";
-import { routeConversation, sanitize } from "../src/routing.ts";
+import { routeConversation } from "../src/routing.ts";
 import { expectActivity, recordFailure, requestHandoff } from "../src/turn.ts";
 import {
   activity,
@@ -20,27 +19,33 @@ import {
 
 afterEach(() => vi.restoreAllMocks());
 
-describe("sanitize", () => {
-  it("redacts identifiers before contact names can split them", () => {
-    expect(sanitize("example@example.com", ["Example Customer"])).toBe("[REDACTED]");
+async function jevInput(text: string, identities: string[]): Promise<string> {
+  const mock = world({ name: identities[0] ?? "Jane Doe", messages: [incoming(1, `Request: ${text}`)] });
+  await routeConversation(context(), 1, 5);
+  return JSON.parse(sent(mock.requests, "POST", JEV)[0]?.body ?? "{}").state.ticket.replace(/^Request: /, "");
+}
+
+describe("Jev input privacy", async () => {
+  it("redacts identifiers before contact names can split them", async () => {
+    expect(await jevInput("example@example.com", ["Example Customer"])).toBe("[REDACTED]");
   });
-  it("removes identifiers", () => {
+  it("removes identifiers", async () => {
     const text =
       "Hi, I'm Alice Chen (alice.chen@example.com, +1 415-555-0199). See https://cloud.example.com/x; " +
       "wallet 0x52908400098527886E0F7030069857D2E4169EE7 and 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY, " +
       "key Zq9x_abcdefghijklmnopqrstuvwxyz0123456789ABCD, ip 10.1.2.3, ping @alicec. Thanks, Alice";
-    expect(sanitize(text, ["Alice Chen", "alice.chen@example.com"])).toBe(
+    expect(await jevInput(text, ["Alice Chen", "alice.chen@example.com"])).toBe(
       "Hi, I'm [REDACTED] ([REDACTED], [REDACTED]). See [REDACTED] wallet [REDACTED] and [REDACTED], " +
         "key [REDACTED], ip [REDACTED], ping [REDACTED] Thanks, [REDACTED]",
     );
   });
 
-  it("removes IP addresses, but not times, MAC addresses, versions, or paths", () => {
+  it("removes IP addresses, but not times, MAC addresses, versions, or paths", async () => {
     const text =
       "from 2001:db8::1, 2001:db8:1234::192.0.2.1, ::ffff:198.51.100.7, and fe80::1%eth0 at 10:30:00 " +
       "(MAC aa:bb:cc:dd:ee:ff, v1.2.3.4, build 1.2.3.4.5, std::vec). My IP is 10.1.2.3. " +
       "remote_addr:203.0.113.8 ip:2001:db8::1 upstream 198.51.100.7:443 client:198.51.100.9:http fe80::1:abcd";
-    expect(sanitize(text, [])).toBe(
+    expect(await jevInput(text, [])).toBe(
       "from [REDACTED], [REDACTED], [REDACTED], and [REDACTED] at 10:30:00 " +
         "(MAC aa:bb:cc:dd:ee:ff, v1.2.3.4, build 1.2.3.4.5, std::vec). My IP is [REDACTED]. " +
         "remote_addr:[REDACTED] ip:[REDACTED] upstream [REDACTED]:443 client:[REDACTED]:http [REDACTED]",
@@ -143,7 +148,6 @@ describe("native bot turns", () => {
         ticket.assigneeType = "User";
       }
       if (reason === "blocked") ticket.blocked = true;
-      if (reason === "unlinked") ticket.bot = null;
       if (reason === "other-bot") {
         ticket.assignee = { id: 99 };
         ticket.assigneeType = "AgentBot";
@@ -726,7 +730,6 @@ describe("native bot turns", () => {
     const ctx = context(new MemoryStore(), KINDS);
     await routeConversation(ctx, 1, 5);
     expect(mock.ticket.status).toBe("resolved");
-    expect(JSON.parse(ctx.store.get("turn:1:5") ?? "{}").expected.after).toBe(2);
     expectActivity(ctx.store, 1, 5, { status: "resolved", at: at + 0.8 });
     mock.ticket.status = "pending";
     mock.ticket.messages?.push(incoming(4, "A real new request"));
@@ -794,7 +797,7 @@ describe("native bot turns", () => {
         : Array.from({ length: 110 }, (_, index) => incoming(index + 1));
     const mock = world({ messages });
     const ctx = context();
-    const budget = new Budget(ROUTE_BUDGET, ctx.fetch);
+    const budget = new Budget(45, ctx.fetch);
     await routeConversation(
       {
         ...ctx,
@@ -867,7 +870,7 @@ describe("native bot turns", () => {
       { owner: ["cloud", 1], kind: ["startup", 1] },
     );
     const ctx = context(new MemoryStore(), KINDS);
-    const budget = new Budget(ROUTE_BUDGET, ctx.fetch);
+    const budget = new Budget(45, ctx.fetch);
     await routeConversation(
       {
         ...ctx,

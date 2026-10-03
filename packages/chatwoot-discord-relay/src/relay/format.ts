@@ -4,7 +4,7 @@
 import type { RelayAttachment, RelayConversation, RelayItem, RelayMessage } from "../../../../shared/types.ts";
 
 export const CONTENT_LIMIT = 2000;
-export const TITLE_LIMIT = 100;
+const TITLE_LIMIT = 100;
 const USERNAME_LIMIT = 80;
 export const SYSTEM_USERNAME = "Chatwoot";
 

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { chatwootClient } from "../../../shared/chatwoot/api.ts";
 import { DiscordRest } from "../src/discord/rest.ts";
-import { escalationLevel, postQueue, type QueueStore } from "../src/queue.ts";
+import { postQueue, type QueueStore } from "../src/queue.ts";
 import { ALICE, json, mockFetch, on, type Recorded, testSettings } from "./helpers.ts";
 
 const CHANNEL = "100000000000000900";
@@ -169,16 +169,13 @@ describe("support queue", () => {
 
   it("escalates an unassigned ticket once per step of its wait", async () => {
     const store = new MapStore();
-    const hours = [3, 3.5, 4];
+    const hours = [0.5, 3, 3.5, 4, 16, 40];
     const { requests } = world([{ id: 1, waiting: 3 }]);
 
     for (const [index, elapsed] of hours.entries()) {
       await postQueue(context(store), (NOW + (elapsed - 3) * HOUR) * 1000);
-      expect(posted(requests)[index].allowed_mentions.roles).toEqual(elapsed === 3.5 ? [] : [ROLE]);
+      expect(posted(requests)[index].allowed_mentions.roles).toEqual(elapsed === 0.5 || elapsed === 3.5 ? [] : [ROLE]);
     }
-    expect(escalationLevel(0.5)).toBe(0);
-    expect(escalationLevel(16)).toBe(5);
-    expect(escalationLevel(40)).toBe(6);
   });
 
   it("keeps every message within Discord's limit, with the note on what it could not list", async () => {

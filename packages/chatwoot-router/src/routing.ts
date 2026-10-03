@@ -18,7 +18,7 @@ import { confirmedReply, replyHistory } from "./reply.ts";
 import { expectActivity, observeStatus, readTurn, requestHandoff } from "./turn.ts";
 
 /** Jev's answer when no owner fits; also the reserved route name. */
-export const UNCLEAR = "unclear";
+const UNCLEAR = "unclear";
 const UNCLEAR_CRITERION =
   "The message has no concrete request, mixes several of the other areas, concerns another product, or cannot be " +
   "assigned to exactly one of them.";
@@ -288,7 +288,7 @@ function isCustomer(message: ChatwootMessage): boolean {
   );
 }
 
-export function sanitize(text: string, identities: Array<string | null | undefined>): string {
+function sanitize(text: string, identities: Array<string | null | undefined>): string {
   let value = text.normalize("NFKC");
   for (const pattern of REDACTIONS) value = value.replace(pattern, "[REDACTED]");
   const names = identities.flatMap((identity) => (identity ? [identity, ...identity.split(/\s+/)] : []));

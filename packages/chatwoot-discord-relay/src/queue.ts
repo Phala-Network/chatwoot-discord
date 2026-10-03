@@ -69,7 +69,7 @@ const escalationsSchema = z.record(z.string(), z.object({ since: z.number(), lev
 type Escalations = z.infer<typeof escalationsSchema>;
 
 /** How many escalation steps (1, 2, 4, 8, 16 h, then every 24 h) a wait has reached. */
-export function escalationLevel(hours: number): number {
+function escalationLevel(hours: number): number {
   const last = ESCALATION_HOURS.at(-1) ?? 0;
   if (hours < last) return ESCALATION_HOURS.filter((step) => hours >= step).length;
   return ESCALATION_HOURS.length + Math.floor((hours - last) / ESCALATION_REPEAT_HOURS);

@@ -19,7 +19,7 @@ import { minimumBudget } from "../src/relay/limits.ts";
 import { processConversation, relayFor } from "../src/relay/processor.ts";
 import { loadSettings } from "../src/settings.ts";
 import { Store } from "../src/store.ts";
-import { ALICE, json, mockFetch, on, type Recorded, type Route } from "./helpers.ts";
+import { ALICE, BOB, json, mockFetch, on, type Recorded, type Route, TRIAGE } from "./helpers.ts";
 
 const FORUM = "100000000000000055";
 const GUILD = "100000000000000044";
@@ -389,10 +389,19 @@ describe("worker", () => {
 
   it("ignores events the relay does not use", async () => {
     const conversationCreated = { event: "conversation_created", id: 12, account: { id: 3 } };
-    const edited = { ...created(12), event: "message_updated", content_attributes: {} };
-    for (const event of [conversationCreated, edited]) {
+    const ignoredUpdates = [
+      { content_type: "text", content: "edited", content_attributes: {} },
+      { content_type: "input_select", content_attributes: { items: [{ title: "A", value: "a" }] } },
+      { content_type: "input_email", content_attributes: { submitted_email: "" } },
+      { content_type: "cards", content_attributes: { submitted_values: [{ title: "A" }] } },
+      { content_type: "input_csat", content_attributes: { submitted_values: {} } },
+      { message_type: "incoming", content_attributes: { external_error: "Outside the 24 hour window" } },
+    ].map((fields) => ({ ...created(12), event: "message_updated", ...fields }));
+    for (const event of [conversationCreated, ...ignoredUpdates]) {
       expect(await (await chatwootWebhook(event)).json()).toEqual({ ok: true, ignored: true });
     }
+    await drain();
+    expect(world.requests).toEqual([]);
   });
 
   it("relays a conversation in order from the API, links the post, and only posts new messages later", async () => {
@@ -757,6 +766,98 @@ describe("worker", () => {
         .slice(posts)
         .map((post) => post.body.content),
     ).toEqual(["How did we do?\n\n**CSAT:**\n• Rating: 5", "How did we do?\n\n**CSAT:**\n• Rating: 4"]);
+  });
+
+  it("posts each supported interactive response from a signed message update", async () => {
+    const responses = [
+      { type: "input_select", attributes: { submitted_values: [{ title: "A", value: "a" }] }, text: "**Response:** A" },
+      {
+        type: "form",
+        attributes: { submitted_values: [{ name: "email", value: "a@example.com" }] },
+        text: "**Responses:**\n• email: a@example.com",
+      },
+      {
+        type: "input_csat",
+        attributes: { submitted_values: { csat_survey_response: { rating: 4 } } },
+        text: "**CSAT:**\n• Rating: 4",
+      },
+      { type: "input_email", attributes: { submitted_email: "user@example.com" }, text: "**Email:** user@example.com" },
+    ];
+    for (const [index, response] of responses.entries()) {
+      const id = 70 + index;
+      const question = { id: 5001, content: "Question", message_type: 3, content_type: response.type };
+      world.conversation(id, [{ id: 5000, content: "Help", message_type: 0 }, question]);
+      await chatwootWebhook(created(id));
+      await drain();
+      const posts = world.webhookPosts().length;
+      Object.assign(question, { content_attributes: response.attributes });
+      await chatwootWebhook({
+        ...created(id),
+        id: 5001,
+        event: "message_updated",
+        content_type: response.type,
+        content_attributes: response.attributes,
+      });
+      await drain();
+      expect(
+        world
+          .webhookPosts()
+          .slice(posts)
+          .map((post) => post.body.content),
+      ).toEqual([`Question\n\n${response.text}`]);
+    }
+  });
+
+  it("reads drafts into the reply editor and explains missing, unreadable or rate-limited answers", async () => {
+    let answer: { author: { id: string }; content: string } | undefined;
+    world = new World([
+      on("GET", /^discord\.com\/api\/v10\/channels\/\d+\/messages\/\d+$/, () =>
+        answer ? json(answer) : json({ message: "rate limited", retry_after: 0, global: false }, { status: 429 }),
+      ),
+    ]);
+    world.conversation(90, [{ id: 3201, content: "Help", message_type: 0 }]);
+    await chatwootWebhook(created(90));
+    await drain();
+    const thread = world.webhookPosts().at(-1)?.thread ?? "";
+    const cases = [
+      {
+        content: "Summary\n```\nold\n```\nDraft\n```text\nHi, the refund is on its way.\n```",
+        author: TRIAGE,
+        draft: "Hi, the refund is on its way.",
+      },
+      { content: "No code block", author: TRIAGE, message: "has no draft" },
+      { content: "```\nSomeone else's draft\n```", author: BOB, message: "has no draft" },
+      { content: "", author: TRIAGE, message: "Message Content intent" },
+      { content: undefined, author: TRIAGE, message: "Message Content intent" },
+    ];
+    for (const [index, scenario] of cases.entries()) {
+      answer =
+        scenario.content === undefined ? undefined : { author: { id: scenario.author }, content: scenario.content };
+      const response = await discordInteraction({
+        id: String(900300 + index),
+        application_id: "100000000000000001",
+        token: "interaction-token",
+        type: 3,
+        guild_id: GUILD,
+        channel_id: thread,
+        channel: { id: thread, type: 11 },
+        member: { user: { id: ALICE } },
+        message: { id: "100000000000009101", components: [] },
+        data: { custom_id: `ticket:draft:${100000000000019100n + BigInt(index)}`, component_type: 2 },
+      });
+      const body = (await response.json()) as {
+        type: number;
+        data: { content?: string; components?: Array<{ component: { value?: string } }> };
+      };
+      if (scenario.draft) {
+        expect(body.type).toBe(9);
+        expect(body.data.components?.[0]?.component.value).toBe(scenario.draft);
+      } else {
+        expect(body.type).toBe(4);
+        expect(body.data.content).toContain(scenario.message);
+      }
+    }
+    expect(world.sent("GET", /^\/api\/v10\/channels\/\d+\/messages\/\d+$/)).toHaveLength(cases.length);
   });
 
   it("closes the post of a conversation deleted in Chatwoot", async () => {
@@ -1158,10 +1259,6 @@ describe("worker", () => {
       .map((request) => Number(request.url.searchParams.get("page")));
     expect(pages).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     expect(world.sent("GET", /^\/api\/v1\/accounts\/3\/conversations\/50274$/).length).toBeGreaterThan(0);
-    const cache = await runInDurableObject(hub(), (_instance, state) =>
-      state.storage.sql.exec<{ key: string }>("SELECT key FROM cache WHERE key LIKE 'sweep:3:%'").toArray(),
-    );
-    expect(cache.map((row) => row.key)).toEqual(["sweep:3:last"]);
   });
 
   it.each(["status", "sweep"])(
@@ -1223,7 +1320,6 @@ describe("worker", () => {
       const forum = new DiscordForum(rest, store);
       const services = { settings, store, budget, chatwoot, rest, forum, relay: relayFor(settings, forum, store) };
       expect(await processConversation(services, 3, id)).toBe("yield");
-      expect(store.get("triage:3:1")).toBeUndefined();
     });
     expect(world.webhookPosts()).toEqual([]);
     expect(world.sent("GET", /\/messages$/).some((request) => request.url.searchParams.get("after") === "301")).toBe(

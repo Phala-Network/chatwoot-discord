@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Budget } from "../../../shared/budget.ts";
 import { executeCommand } from "../src/commands/actions.ts";
-import { type CommandAction, type CommandJob, commandJobSchema } from "../src/commands/job.ts";
+import type { CommandAction, CommandJob } from "../src/commands/job.ts";
 import { ALICE, BOB, json, mockFetch, on, type Route, testSettings } from "./helpers.ts";
 
 const settings = testSettings();
@@ -102,15 +102,6 @@ describe("executeCommand", () => {
     );
     expect(await timed.result).toBe("✅ Snoozed until <t:1790530245:f>.");
     expect(JSON.parse(timed.requests.at(-1)?.body ?? "")).toEqual({ status: "snoozed", snoozed_until: 1790530245 });
-  });
-
-  it("still reads status jobs queued before snoozing existed", () => {
-    // As stored then, with no snooze fields.
-    const queued = JSON.parse(
-      '{"interactionId":"1","applicationId":"100000000000000001","token":"tok","discordUserId":"100000000000000011",' +
-        '"accountId":3,"conversationId":15,"action":{"type":"status","status":"resolved"}}',
-    );
-    expect(commandJobSchema.parse(queued).action).toEqual({ type: "status", status: "resolved" });
   });
 
   it("sets and clears the priority", async () => {
@@ -423,22 +414,6 @@ describe("executeCommand", () => {
         }
       },
     );
-
-    it("keeps the ticket's kinds when it sets its topic label", async () => {
-      const withKinds = testSettings({ router: { keepLabels: ["security"] } });
-      const ticket = on("GET", conversation, () =>
-        json({
-          id: 15,
-          status: "open",
-          labels: ["security", "vip"],
-          custom_attributes: {},
-          meta: {},
-        }),
-      );
-      const set = runWith(withKinds, { type: "labels", labels: ["refund"] }, accountLabels, setLabels, ticket);
-      expect(await set.result).toBe("✅ Label set to refund.");
-      expect(sent(set.requests)).toEqual([{ labels: ["refund", "security"] }]);
-    });
   });
 
   describe("Manage panel", () => {

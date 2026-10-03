@@ -8,7 +8,6 @@ import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index.ts";
 import { ROUTER_NAME } from "../src/router.ts";
-import { eventTarget } from "../src/webhook.ts";
 import { json, mockFetch, on } from "./helpers.ts";
 import { activity, CW, incoming as customer, JEV, sent, world } from "./world.ts";
 
@@ -78,8 +77,8 @@ async function retryNow() {
 }
 
 describe("bot webhook and durable recovery", () => {
-  it("returns only a customer event's identity and ignores bot messages, private notes and unknown signed events", async () => {
-    expect(eventTarget(incoming(5))).toEqual({ accountId: 1, conversationId: 5 });
+  it("ignores bot messages, private notes and unknown signed events", async () => {
+    const mock = mockFetch();
     for (const payload of [
       { ...incoming(5), message_type: "outgoing" },
       { ...incoming(5), private: true },
@@ -87,9 +86,10 @@ describe("bot webhook and durable recovery", () => {
       { ...incoming(5), event: "unknown" },
       { event: "conversation_created", account: { id: 1 }, id: 5 },
     ]) {
-      expect(eventTarget(payload)).toBeUndefined();
       expect((await webhook(payload)).status).toBe(200);
     }
+    await drain();
+    expect(mock.requests).toEqual([]);
   });
 
   it("authenticates each account and rejects stale, mismatched or invalid signatures", async () => {
@@ -227,9 +227,8 @@ describe("bot webhook and durable recovery", () => {
     proxy = false;
     await retryNow();
     expect(mock.requests).toHaveLength(2);
-    await runInDurableObject(stub(), (_instance, state) =>
-      expect(state.storage.sql.exec("SELECT * FROM jobs").toArray()).toEqual([]),
-    );
+    await retryNow();
+    expect(mock.requests).toHaveLength(2);
   });
 });
 
@@ -237,12 +236,9 @@ function sweepWorld(failPage = false, disconnect = false) {
   const pending = new Set(Array.from({ length: 50 }, (_, index) => index + 11));
   const pages: number[] = [];
   const mock = mockFetch(
-    on("GET", "chatwoot.example.com/api/v1/accounts/1/inboxes", () => json({ payload: [{ id: 2 }, { id: 3 }] })),
-    on("GET", "chatwoot.example.com/api/v1/accounts/2/inboxes", () => json({ payload: [] })),
     on("GET", "chatwoot.example.com/api/v1/accounts/1/inboxes/2/agent_bot", () =>
       json({ agent_bot: disconnect ? null : { id: 1, account_id: 1 } }),
     ),
-    on("GET", "chatwoot.example.com/api/v1/accounts/1/inboxes/3/agent_bot", () => json({ agent_bot: null })),
     on("GET", "chatwoot.example.com/api/v1/accounts/2/conversations", () => json({ data: { payload: [] } })),
     on("GET", base, (request) => {
       expect(request.url.searchParams.get("status")).toBe("all");

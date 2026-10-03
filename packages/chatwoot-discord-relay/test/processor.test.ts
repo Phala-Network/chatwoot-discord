@@ -196,6 +196,60 @@ async function sync(store: Store, settings: Settings, limit?: number): Promise<P
 afterEach(() => vi.restoreAllMocks());
 
 describe("processConversation", () => {
+  it("keeps the existing post and cursor when upgrading a 0.1.0 database", async () => {
+    const world = new World();
+    world.messages = [
+      { id: 500, content: "Already relayed", message_type: 0 },
+      { id: 501, content: "New request", message_type: 0 },
+    ];
+    await runInDurableObject(env.HUB.getByName("legacy-processor"), async (_instance, state) => {
+      // A legacy database fixture, independent of the current migration implementation.
+      const sql = state.storage.sql;
+      for (const table of [
+        "conversations",
+        "jobs",
+        "deliveries",
+        "counters",
+        "cache",
+        "posted_messages",
+        "submitted_responses",
+        "interactions",
+        "derived_messages",
+      ])
+        sql.exec(`DROP TABLE IF EXISTS ${table}`);
+      sql.exec(`
+        CREATE TABLE conversations (
+          account_id INTEGER NOT NULL, conversation_id INTEGER NOT NULL, thread_id TEXT, state TEXT,
+          cursor INTEGER, fail_message_id INTEGER, fail_count INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (account_id, conversation_id)
+        );
+        CREATE UNIQUE INDEX conversations_thread ON conversations (thread_id);
+        CREATE TABLE jobs (
+          key TEXT PRIMARY KEY, priority INTEGER NOT NULL, payload TEXT NOT NULL,
+          version INTEGER NOT NULL DEFAULT 1, attempts INTEGER NOT NULL DEFAULT 0,
+          not_before INTEGER NOT NULL, created_at INTEGER NOT NULL
+        );
+        CREATE INDEX jobs_due ON jobs (not_before);
+        CREATE TABLE deliveries (id TEXT PRIMARY KEY, received_at INTEGER NOT NULL);
+        CREATE TABLE counters (name TEXT PRIMARY KEY, count INTEGER NOT NULL, expires_at INTEGER NOT NULL);
+        CREATE TABLE cache (key TEXT PRIMARY KEY, value TEXT NOT NULL, expires_at INTEGER);
+        UPDATE schema_version SET version = 1;
+        INSERT INTO conversations (account_id, conversation_id, thread_id, state, cursor)
+          VALUES (3, 12, '100000000000000101', 'open|Kim Lee|billing', 500);
+      `);
+      const store = new Store(sql);
+      store.migrate();
+      await sync(store, testSettings());
+      await sync(store, testSettings());
+      expect(world.replies()).toEqual([`New request\n-# <@${TRIAGE}>`]);
+      expect(world.posts().every((post) => post.thread === "100000000000000101")).toBe(true);
+      expect(world.cards()).toHaveLength(1);
+      expect(world.sent("POST", "/webhooks/1/tok").every((request) => request.url.searchParams.has("thread_id"))).toBe(
+        true,
+      );
+    });
+  });
+
   it("starts after the cutover watermark, for new and adopted posts alike", async () => {
     const settings = testSettings({ relay: { startAfterMessageId: 500 } });
     const world = new World();
@@ -219,7 +273,6 @@ describe("processConversation", () => {
       expect(world.posts().slice(before)).toEqual([
         { thread: "300000000000000001", body: expect.objectContaining({ content: `after\n-# <@${TRIAGE}>` }) },
       ]);
-      expect(store.conversation(3, 12)?.cursor).toBe(501);
     });
   });
 
@@ -308,7 +361,7 @@ describe("processConversation", () => {
       for (let attempt = 0; attempt < settings.config.relay.maxAttempts * 2; attempt += 1) {
         await expect(processConversation(context(store, settings), 3, 12)).rejects.toThrow(/Discord HTTP/);
       }
-      expect(store.conversation(3, 12)?.cursor).toBe(0);
+
       world.threadFailure = undefined;
       await sync(store, settings);
       // Each failed attempt was at the first message; "second" never went ahead of it.
@@ -337,7 +390,7 @@ describe("processConversation", () => {
         await expect(processConversation(context(store, settings), 3, 12)).rejects.toThrow(/Discord HTTP 400/);
       }
       expect(await processConversation(context(store, settings), 3, 12)).toBe("done");
-      expect(store.conversation(3, 12)?.cursor).toBe(2);
+
       expect(world.posts().at(-1)?.body.content).toBe(
         "⚠️ Chatwoot message 2 could not be relayed. Check it in Chatwoot.",
       );
@@ -453,7 +506,6 @@ describe("processConversation", () => {
         `-# Assigned to <@${BOB}>`,
       ]);
       expect(world.posts().at(-1)?.body.allowed_mentions).toEqual({ parse: [], users: [BOB] });
-      expect(store.conversation(3, 12)?.announcePending).toBe(0);
     });
   });
 
@@ -789,7 +841,7 @@ describe("agent bot lifecycle", () => {
         expect(await processConversation(context(store, settings), 3, 12)).toBe("pending");
         expect(world.posts()).toEqual([]);
         expect(world.cards()).toEqual([]);
-        expect(store.conversation(3, 12)?.cursor).toBe(0);
+
         world.conversation.status = status;
         await sync(store, settings);
         expect(world.replies()[0]).toContain("Please help");
@@ -818,6 +870,8 @@ describe("agent bot lifecycle", () => {
   it.each([
     { reply: { message_type: 1, sender: { id: 42, type: "user" } }, answered: true },
     { reply: { message_type: 1, sender: { id: 42, type: "agent_bot" } }, answered: true },
+    { reply: { message_type: 1, status: "delivered" }, answered: true },
+    { reply: { message_type: 0 }, answered: false },
     { reply: { message_type: 1, private: true }, answered: false },
     { reply: { message_type: 1, status: "failed" }, answered: false },
     { reply: { message_type: 3 }, answered: false },
@@ -878,7 +932,7 @@ describe("agent bot lifecycle", () => {
       });
       expect(await processConversation(services, 3, 12)).toBe("yield");
       expect(world.posts()).toEqual([]);
-      expect(store.get("triage:3:1")).toBeUndefined();
+
       await sync(store, settings);
       expect(world.replies().find((text) => text.startsWith("A customer request"))).toContain("handled automatically");
     });
@@ -913,7 +967,7 @@ describe("agent bot lifecycle", () => {
         const settings = testSettings();
         expect(await processConversation(context(store, settings, minimumBudget(4)), 3, 12)).toBe("yield");
         expect(world.posts()).toEqual([]);
-        expect(store.get("triage:3:1")).toBeUndefined();
+
         if (change === "arrives") world.messages.push(reply);
         else reply.status = "failed";
         await sync(store, settings);

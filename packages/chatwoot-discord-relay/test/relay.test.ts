@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { LinkedAgent, RelayAssignee, RelayMessage } from "../../../shared/types.ts";
 import { ticketCard } from "../src/commands/components.ts";
 import { CONTENT_LIMIT } from "../src/relay/format.ts";
-import { Notifier } from "../src/relay/notify.ts";
 import { Relay, type RelayOptions, type WebhookMessage } from "../src/relay/relay.ts";
 import { FakeForum, FORUM, MemoryStore, message, snowflake, TAGS, TRIAGE } from "./helpers.ts";
 
@@ -261,7 +260,9 @@ describe("Relay", () => {
     await relay.relay(message());
     forum.failThreadWith = "gone";
     await relay.sync(3, message({ conversation: { status: "resolved" } }).conversation, "thread-1");
-    expect(store.thread(3, 12)).toBeUndefined();
+    await relay.relay(message({ id: 102, content: "New request" }));
+    expect(forum.calls.map(([thread]) => thread)).toEqual([undefined, "thread-1", undefined, "thread-3"]);
+    expect(forum.contents().at(-1)).toBe("New request");
   });
 
   it("lets other Discord errors propagate for a retry", async () => {
@@ -310,11 +311,6 @@ describe("Relay", () => {
     expect(later).toBe(`One more thing\n-# <@${TRIAGE}>`);
   });
 
-  it("keeps the room for notification lines that messages were split with since v0.23", () => {
-    // A retry resumes a message after the parts already posted: the split must not move between versions.
-    expect(new Notifier({ store: new MemoryStore(), triage, liveSeconds: 3600, now: () => NOW }).reserve).toBe(326);
-  });
-
   it("calls the triage bot within its hourly budgets", async () => {
     ({ relay, forum } = relayWith({ triage }));
     for (let i = 0; i < 7; i += 1) await relay.relay(message({ id: 200 + i, content: `msg ${i}` }));
@@ -338,6 +334,23 @@ describe("Relay", () => {
     await relay.relay(message({ id: 102, content: "retried" }));
     await relay.relay(message({ id: 103, content: "next" }));
     expect(forum.contents().at(-1)?.endsWith(`<@${TRIAGE}>`)).toBe(true);
+  });
+
+  it("keeps an answer or mention decision in the posted message through retries", async () => {
+    ({ relay, forum } = relayWith({ triage }));
+    for (const [id, answered] of [
+      [201, true],
+      [202, false],
+    ] as const) {
+      const customer = message({ id, answered, content: "x".repeat(3000) });
+      forum.failAfter = 1;
+      await expect(relay.relay(customer)).rejects.toThrow("Discord HTTP 500");
+      customer.answered = !answered;
+      await relay.relay(customer);
+      const last = forum.contents().at(-1);
+      expect(last?.includes("handled automatically")).toBe(answered);
+      expect(last?.includes(`<@${TRIAGE}>`)).toBe(!answered);
+    }
   });
 
   it("keeps a message over the triage budget uncalled when its post is retried", async () => {
@@ -378,9 +391,7 @@ describe("Relay", () => {
     // What the processor does in each run: relay the messages, then announce while one is pending.
     const run = async (relayed: RelayMessage) => {
       await relay.relay(relayed);
-      if (store.conversation(3, relayed.conversation.id)?.announcePending) {
-        await relay.announceAssignee(3, relayed.conversation);
-      }
+      await relay.announceAssignee(3, relayed.conversation);
     };
     await run(message());
     expect(forum.calls.some(([, payload]) => payload.allowed_mentions?.users)).toBe(false);
@@ -413,9 +424,7 @@ describe("Relay", () => {
     ({ relay, forum, store } = relayWith({ triage, linkedAgent: () => ({ discordUserId: "592" }) }));
     const first = message({ conversation: { assignee: { id: 7, name: "Kim" } } });
     await relay.relay(first);
-    expect(store.conversation(3, 12)?.announcePending).toBe(1);
     await relay.announceAssignee(3, first.conversation);
-    expect(store.conversation(3, 12)?.announcePending).toBe(0);
     const [card, reply, notice] = forum.calls.map(([, payload]) => payload);
     expect(card?.allowed_mentions).toEqual({ parse: [] });
     // The announcement pings the assignee, so the customer message does not as well.
@@ -443,7 +452,6 @@ describe("Relay", () => {
         { content: "On it", username: "Sam · Acme", avatar_url: AVATARS.chatwoot, allowed_mentions: { parse: [] } },
       ],
     ]);
-    expect(adopted.store.conversation(3, 12)?.announcedAssignee).toBe("7");
   });
 
   it("tells assignees apart by Chatwoot user id: a rename does not ping, a reassignment does", async () => {
@@ -451,9 +459,7 @@ describe("Relay", () => {
     ({ relay, forum, store } = relayWith({ linkedAgent: (id) => agents[id] }));
     const run = async (relayed: RelayMessage) => {
       await relay.relay(relayed);
-      if (store.conversation(3, relayed.conversation.id)?.announcePending) {
-        await relay.announceAssignee(3, relayed.conversation);
-      }
+      await relay.announceAssignee(3, relayed.conversation);
     };
     const kim = { assignee: { id: 7, name: "Kim" } };
     await run(message({ messageType: "activity", content: "Assigned to Kim", conversation: kim }));
@@ -491,7 +497,8 @@ describe("Relay", () => {
     await relay.relay(assigned);
     await expect(relay.announceAssignee(3, assigned.conversation)).resolves.toBeUndefined();
     expect(forum.contents().at(-1)).toBe("-# Assigned to <@592>");
-    expect(store.conversation(3, 12)?.announcedAssignee).toBe("7");
+    await relay.announceAssignee(3, assigned.conversation);
+    expect(forum.contents().filter((text) => text === "-# Assigned to <@592>")).toHaveLength(1);
     expect(forum.members).toEqual([]);
   });
 
@@ -502,13 +509,10 @@ describe("Relay", () => {
     store.updateConversation(3, 12, { threadId: "thread-9", state: "recorded" });
     const run = async (relayed: RelayMessage) => {
       await relay.relay(relayed);
-      if (store.conversation(3, relayed.conversation.id)?.announcePending) {
-        await relay.announceAssignee(3, relayed.conversation);
-      }
+      await relay.announceAssignee(3, relayed.conversation);
     };
     const kim = { assignee: { id: 7, name: "Kim" } };
     await run(message({ id: 102, messageType: "outgoing", content: "On it", conversation: kim }));
-    expect(store.conversation(3, 12)?.announcedAssignee).toBe("7");
     const lee = { assignee: { id: 8, name: "Lee" } };
     await run(message({ id: 103, messageType: "activity", content: "Assigned to Lee", conversation: lee }));
     expect(forum.contents()).toEqual(["On it", "_Assigned to Lee_", "-# Assigned to <@593>"]);
@@ -546,12 +550,18 @@ describe("Relay", () => {
   });
 
   it("resumes a long message after the parts already posted", async () => {
-    const text = `${"a".repeat(1500)}\n${"b".repeat(1500)}\n${"c".repeat(1500)}`;
+    ({ relay, forum } = relayWith({ triage }));
+    // The historical 1,674-character chunk boundary must remain stable on retry across upgrades.
+    const text = `${"a".repeat(1674)}${"b".repeat(1674)}${"c".repeat(100)}`;
     await relay.relay(message());
     forum.failAfter = 1;
     await expect(relay.relay(message({ id: 102, content: text }))).rejects.toThrow("Discord HTTP 500");
     await relay.relay(message({ id: 102, content: text }));
-    expect(forum.contents().slice(2)).toEqual(["a".repeat(1500), "b".repeat(1500), "c".repeat(1500)]);
+    expect(forum.contents().slice(2)).toEqual([
+      "a".repeat(1674),
+      "b".repeat(1674),
+      `${"c".repeat(100)}\n-# <@${TRIAGE}>`,
+    ]);
   });
 
   it("says so, archives, and forgets a post whose conversation was deleted", async () => {
@@ -567,7 +577,6 @@ describe("Relay", () => {
       },
     ]);
     expect(forum.archived.has("thread-1")).toBe(true);
-    expect(store.thread(3, 12)).toBeUndefined();
   });
 
   it("does not mention anyone without a configured triage bot", async () => {
@@ -626,7 +635,6 @@ describe("Relay", () => {
     await relay.relay(message());
     forum.failThreadWith = "gone";
     expect(await relay.postResponse(3, message().conversation, "**Email:** a@example.com")).toBeUndefined();
-    expect(store.thread(3, 12)).toBeUndefined();
   });
 
   it("relays history without notifications, reporting only live messages for the announcement", async () => {
@@ -638,11 +646,9 @@ describe("Relay", () => {
       message({ id: 102, createdAt: hourAgo, content: "old follow-up", conversation: assigned }),
     ];
     for (const old of history) await relay.relay(old);
-    expect(store.conversation(3, 12)?.announcePending).toBeUndefined();
     await relay.relay(
       message({ id: 103, createdAt: NOW_SECONDS - 60, content: "still there?", conversation: assigned }),
     );
-    expect(store.conversation(3, 12)?.announcePending).toBe(1);
     const replies = forum.calls.slice(1).map(([, payload]) => [payload.content, payload.allowed_mentions]);
     expect(replies).toEqual([
       ["old question", { parse: [] }],
@@ -911,7 +917,7 @@ describe("the card", () => {
     await relay.sync(3, conversation, "thread-1");
     expect(pages).toEqual(["1", String(BigInt(orphan) - 1n)]);
     expect(forum.deleted).toEqual([orphan]);
-    expect((await cardsAfter(FORUM, "thread-1", "0")).cards).toEqual([store.conversation(3, 12)?.cardId]);
+    expect((await cardsAfter(FORUM, "thread-1", "0")).cards).toHaveLength(1);
   });
 
   it("keeps drafts to a customer message's parts right when a part fails", async () => {

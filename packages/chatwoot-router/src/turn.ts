@@ -17,12 +17,12 @@ const guardSchema = z.object({
 });
 type Guard = z.infer<typeof guardSchema>;
 
-export function readGuard(store: RoutingStore, accountId: number, conversationId: number): Guard {
+function readGuard(store: RoutingStore, accountId: number, conversationId: number): Guard {
   const parsed = guardSchema.safeParse(parseJson(store.get(`turn:${accountId}:${conversationId}`)));
   return parsed.success ? parsed.data : { handoff: false, failures: 0 };
 }
 
-export function saveGuard(store: RoutingStore, accountId: number, conversationId: number, guard: Guard): void {
+function saveGuard(store: RoutingStore, accountId: number, conversationId: number, guard: Guard): void {
   store.set(`turn:${accountId}:${conversationId}`, JSON.stringify(guard));
 }
 
