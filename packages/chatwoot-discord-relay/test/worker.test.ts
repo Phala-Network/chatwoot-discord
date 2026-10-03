@@ -1757,6 +1757,47 @@ it("does not confirm a historical identical note after an unknown mutation", asy
   expect(JSON.parse(feedback?.body ?? "{}").content).toContain("result is unknown");
 });
 
+it("confirms an unknown inbox handoff from the resulting bot assignment", async () => {
+  world.mock.spy.mockRestore();
+  let assigned = false;
+  world = new World([
+    on("GET", "chatwoot.example.com/api/v1/profile", () => json({ id: 42, accounts: [{ id: 3 }] })),
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/890", () =>
+      json({
+        id: 890,
+        status: "open",
+        inbox_id: 2,
+        meta: {
+          assignee: assigned ? { id: 77 } : { id: 42 },
+          assignee_type: assigned ? "AgentBot" : "User",
+        },
+        messages: [],
+      }),
+    ),
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/inboxes/2/agent_bot", () =>
+      json({ agent_bot: { id: 77, account_id: 3 } }),
+    ),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/890/assignments", () => {
+      assigned = true;
+      return json({ error: "response lost" }, { status: 502 });
+    }),
+  ]);
+  await hub().enqueueCommand({
+    interactionId: "handoff-unknown",
+    applicationId: "100000000000000001",
+    token: "handoff-feedback",
+    discordUserId: ALICE,
+    accountId: 3,
+    conversationId: 890,
+    action: { type: "status", status: "pending" },
+  });
+  await drain();
+  const feedback = world.requests.find(
+    (request) => request.method === "PATCH" && request.url.pathname.includes("handoff-feedback"),
+  );
+  expect(JSON.parse(feedback?.body ?? "{}").content).toContain("Handed back to the inbox bot");
+});
+
 it("continues attachments after a bounded slice while another command gets feedback", async () => {
   world.mock.spy.mockRestore();
   const downloads = [0, 0];
