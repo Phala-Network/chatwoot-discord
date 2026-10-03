@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Remove `router.accounts` and `router.waitSeconds`, list every kind in `router.keepLabels`, and deploy this relay
   before chatwoot-router 0.2.0. Keep the Worker's name.
+- `relay.subrequestBudget` must now be at least `relay.maxChunks` + 30 (was + 28), and with `queue` at least
+  6 × accounts + 4 (was 5 × accounts + 4): a run reads more to tell a bot's turn. The default 45 fits up to 6 accounts
+  with the queue; raise it otherwise, or startup fails (`/healthz` 503).
 - A lost `message_updated` webhook can cause at most one extra triage call for the affected message (see the README).
 
 ## [0.29.0] - 2026-10-02
