@@ -19,7 +19,9 @@ may point to another deployment of that API, for example a proxy or gateway.
   association is inactive; disconnect to disable it. `routing.botIds` and both bot credential maps require
   exactly the routed account keys (see [Configuration reference](#configuration-reference)).
 - Signed bot webhooks at `/chatwoot/agent-bot` enqueue a deduplicated conversation job. The five-minute sweep
-  lists **all pending conversations in the account**, including disconnected inboxes, without an age cutoff.
+  lists **all conversations in the account**, including disconnected inboxes, without an age cutoff. It queues pending
+  tickets and any ticket still assigned to the brand bot. For non-pending tickets, the bot releases its own
+  assignment with `POST assignments {assignee_id: null}`, preserving status after a fresh ownership read.
   A page cursor persists across alarms within the request budget. Failed pages retry. An empty page ends a pass; the next starts at page 1 and catches
   conversations skipped by changing pages. Neither event payloads nor sweep rows are decision inputs.
 - Read messages newest-first, unfiltered (including activities), with `before` paging, at most five pages of 20.
@@ -35,7 +37,7 @@ may point to another deployment of that API, for example a proxy or gateway.
   delivery of the same transition timestamp does not start another expectation. Only a status webhook supplies a transition time;
   a read observing pending end requires a newer activity without inferring a time from `updated_at`. The last
   pending observation survives retries, so a retry confirming resolution after a lost response retains that boundary.
-  Other non-pending snapshots exit: metadata updates change `updated_at` without creating a status activity.
+  Other non-pending snapshots only release a remaining brand-bot assignment: metadata updates change `updated_at` without creating a status activity.
   An expected activity not yet present retries normally; an incomplete read or a deleted known boundary hands off.
   Permanently missing activity uses the same three-attempt limit. A new boundary clears the previous turn's failure
   count and handoff. Chatwoot exposes no turn API: a lost webhook plus permanently removed, never-observed activity
@@ -71,7 +73,7 @@ may point to another deployment of that API, for example a proxy or gateway.
   or a turn-history read; failures retry until the handoff succeeds. Other bots and people are untouched. Credentials/service failures need repair before handoff can succeed.
 - A Worker 2xx means the job is durable, not that routing succeeded. Chatwoot's own webhook failure fallback cannot
   cover later alarm failures. Its fallback opens pending on failed `message_created`/`message_updated` delivery unless
-  `keep_pending_on_bot_failure` is enabled; it may leave a bot assignee on open. The relay shows that as unassigned.
+  `keep_pending_on_bot_failure` is enabled; it may leave a bot assignee on open. The router releases that assignment on its next job or sweep.
   Chatwoot makes three delivery attempts for 429/500 responses. Irrelevant valid bot events are acknowledged.
   There is no router account-webhook endpoint.
 
@@ -80,7 +82,8 @@ and are decided on their **new turn's** messages. Snoozed tickets reopen open an
 following a customer message counts as answering it in the relay, even if that message was outside Jev's window.
 
 The API contracts were checked against Chatwoot v4.18.0:
-[assignment](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/services/conversations/assignment_service.rb),
+[assignment service](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/services/conversations/assignment_service.rb)
+and [controller](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/controllers/api/v1/accounts/conversations/assignments_controller.rb),
 [status changes](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/controllers/api/v1/accounts/conversations_controller.rb),
 [activity creation](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/models/concerns/activity_message_handler.rb)
 and its [job](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/jobs/conversations/activity_message_job.rb),

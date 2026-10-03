@@ -4,6 +4,7 @@ import ipRegex from "ip-regex";
 import { z } from "zod";
 import {
   type ChatwootClient,
+  type ChatwootConversation,
   type ChatwootMessage,
   chatwootClient,
   type Fetch,
@@ -112,11 +113,21 @@ export async function routeConversation(
   const bot = chatwootClient(settings.config.chatwoot.baseUrl, token, ctx.fetch);
   const kinds = routing.kinds?.[String(accountId)] ?? {};
   const botId = routing.botIds[String(accountId)];
+  const owns = (conversation: ChatwootConversation | undefined) =>
+    conversation?.meta?.assignee_type === "AgentBot" && conversation.meta.assignee?.id === botId;
   const snapshot = async (inboxId?: number) => {
     const raw = await chatwoot.getConversation(accountId, conversationId);
     if (!raw || raw.inbox_id === undefined || (inboxId !== undefined && raw.inbox_id !== inboxId)) return;
     if (raw.status !== "pending") {
       observeStatus(store, accountId, conversationId, raw.status ?? "open");
+      // Chatwoot's webhook failure fallback can open a ticket without releasing its bot.
+      // Explicit unassignment clears ai_assignee without changing status or claiming it as a user.
+      if (raw.status !== undefined && owns(raw)) {
+        const latest = await chatwoot.getConversation(accountId, conversationId);
+        if (latest?.status !== undefined && latest.status !== "pending" && owns(latest)) {
+          await bot.unassign(accountId, conversationId);
+        }
+      }
       return;
     }
     const conversation = toRelayConversation(conversationId, raw);
@@ -125,14 +136,9 @@ export async function routeConversation(
     if ((await chatwoot.inboxBot(accountId, raw.inbox_id))?.id !== botId) {
       // Disconnect is level-triggered: native bot handoff also clears ai_assignee.
       // Re-read ownership immediately before the mutation; never touch another bot or person.
-      if (raw.meta?.assignee_type === "AgentBot" && raw.meta.assignee?.id === botId) {
+      if (owns(raw)) {
         const latest = await chatwoot.getConversation(accountId, conversationId);
-        if (
-          latest?.status === "pending" &&
-          latest.inbox_id === raw.inbox_id &&
-          latest.meta?.assignee_type === "AgentBot" &&
-          latest.meta.assignee?.id === botId
-        )
+        if (latest?.status === "pending" && latest.inbox_id === raw.inbox_id && owns(latest))
           await bot.setStatus(accountId, conversationId, { status: "open" });
       }
       return;

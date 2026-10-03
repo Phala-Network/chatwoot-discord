@@ -49,6 +49,54 @@ describe("sanitize", () => {
 });
 
 describe("native bot turns", () => {
+  it.each(["open", "resolved", "snoozed"])(
+    "releases the brand bot from %s without changing status or sending messages",
+    async (status) => {
+      const mock = world({ status, bot: null });
+      await routeConversation(context(), 1, 5);
+      await routeConversation(context(), 1, 5);
+      expect(mock.ticket.status).toBe(status);
+      expect(mock.ticket.assignee).toBeNull();
+      const mutations = mock.requests.filter((request) => request.method === "POST");
+      expect(mutations).toHaveLength(1);
+      expect(mutations[0]?.url.pathname).toBe("/api/v1/accounts/1/conversations/5/assignments");
+      expect(mutations[0]?.body).toBe(JSON.stringify({ assignee_id: null }));
+      expect(mutations[0]?.headers.get("api_access_token")).toBe("bot-token");
+    },
+  );
+
+  it.each(["person", "other bot", "pending"])(
+    "preserves a %s takeover while releasing a non-pending brand bot",
+    async (change) => {
+      let reads = 0;
+      const mock = world({
+        status: "open",
+        during: (operation) => {
+          if (operation !== "read" || ++reads !== 2) return;
+          if (change === "pending") mock.ticket.status = "pending";
+          else {
+            mock.ticket.assigneeType = change === "person" ? "User" : "AgentBot";
+            mock.ticket.assignee = { id: 6 };
+          }
+        },
+      });
+      await routeConversation(context(), 1, 5);
+      expect(mock.requests.filter((request) => request.method === "POST")).toEqual([]);
+      expect(mock.ticket.status).toBe(change === "pending" ? "pending" : "open");
+      if (change !== "pending") expect(mock.ticket.assignee?.id).toBe(6);
+    },
+  );
+
+  it("retries a failed non-pending bot release without routing", async () => {
+    const mock = world({ status: "open", fail: { assignments: 1 } });
+    const ctx = context();
+    await expect(routeConversation(ctx, 1, 5)).rejects.toThrow("503");
+    await routeConversation(ctx, 1, 5);
+    expect(mock.ticket.status).toBe("open");
+    expect(mock.ticket.assignee).toBeNull();
+    expect(sent(mock.requests, "POST", JEV)).toEqual([]);
+    expect(sent(mock.requests, "POST", `${CW}/assignments`)).toHaveLength(2);
+  });
   it("calls the configured deployment of TypeSafe's System One API", async () => {
     const endpoint = "jev.example.com/custom/systemone";
     const mock = world({}, { owner: ["sales", 1] }, endpoint);
@@ -66,7 +114,6 @@ describe("native bot turns", () => {
     async (kind) => {
       const mock = world({}, { owner: ["cloud", 1], kind: [kind, 1] });
       const ctx = context(new MemoryStore(), KINDS);
-      await routeConversation(ctx, 1, 5);
       await routeConversation(ctx, 1, 5);
       const mutations = mock.requests.filter(
         (request) => request.method === "POST" && request.url.hostname === "chatwoot.example.com",
@@ -86,7 +133,11 @@ describe("native bot turns", () => {
     "leaves %s conversations alone",
     async (reason) => {
       const ticket: Ticket = {};
-      if (["open", "snoozed", "resolved"].includes(reason)) ticket.status = reason;
+      if (["open", "snoozed", "resolved"].includes(reason)) {
+        ticket.status = reason;
+        ticket.assignee = null;
+        ticket.assigneeType = null;
+      }
       if (reason === "person") {
         ticket.assignee = { id: 1 };
         ticket.assigneeType = "User";
@@ -132,7 +183,11 @@ describe("native bot turns", () => {
         ticket.assignee = null;
         ticket.assigneeType = null;
       }
-      if (reason === "open") ticket.status = "open";
+      if (reason === "open") {
+        ticket.status = "open";
+        ticket.assignee = null;
+        ticket.assigneeType = null;
+      }
       const mock = world(ticket);
       await routeConversation(context(), 1, 5);
       expect(mock.requests.filter((request) => request.method === "POST")).toEqual([]);
@@ -173,9 +228,16 @@ describe("native bot turns", () => {
       };
       const mock = world(ticket, { owner: ["cloud", 1], kind: ["bounty", 1] });
       await routeConversation(context(new MemoryStore(), KINDS), 1, 5);
-      expect(
-        mock.requests.filter((request) => request.method === "POST" && request.url.hostname === "chatwoot.example.com"),
-      ).toHaveLength(change === "unlinked" ? 1 : 0);
+      const mutations = mock.requests.filter(
+        (request) => request.method === "POST" && request.url.hostname === "chatwoot.example.com",
+      );
+      const ended = ["open", "resolved", "snoozed"].includes(change);
+      expect(mutations).toHaveLength(change === "unlinked" || ended ? 1 : 0);
+      if (ended) {
+        expect(mutations[0]?.body).toBe(JSON.stringify({ assignee_id: null }));
+        expect(ticket.status).toBe(change);
+        expect(ticket.assignee).toBeNull();
+      }
       if (change === "unlinked") expect(ticket.status).toBe("open");
     },
   );

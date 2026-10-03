@@ -15,7 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recognize historical public outgoing messages from the account's exact brand bot, including the former relay's
   replies, without moving reply ledgers. Preserve the durable attempt/observed guard across turns and upgrades.
 - Disconnecting an inbox hands its pending brand-bot leftovers to people with native bot `status=open`. The sweep
-  reads all account pending conversations, including old disconnected inboxes, and retries failed handoffs.
+  reads all account conversations, including old disconnected inboxes, and retries failed handoffs.
+- Release the brand bot from non-pending conversations using its standard unassignment API, preserving status and
+  other owners. This also heals Chatwoot webhook-failure fallbacks that opened a ticket without clearing the bot.
 
 ### Changed
 

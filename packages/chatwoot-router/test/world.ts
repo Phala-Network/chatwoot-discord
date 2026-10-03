@@ -101,8 +101,9 @@ export function world(ticket: Ticket = {}, answers: Answers = { owner: ["cloud",
       on("GET", "chatwoot.example.com/api/v1/accounts/1/agents", () =>
         json((ticket.agents ?? [6, 7]).map((id) => ({ id }))),
       ),
-      on("GET", CW, () =>
-        fail("read")
+      on("GET", CW, () => {
+        ticket.during?.("read");
+        return fail("read")
           ? json({}, { status: 503 })
           : json({
               id: 5,
@@ -115,8 +116,8 @@ export function world(ticket: Ticket = {}, answers: Answers = { owner: ["cloud",
                 assignee_type: ticket.assigneeType,
                 sender: { name: ticket.name ?? "Jane Doe", email: "jane@example.com", blocked: ticket.blocked },
               },
-            }),
-      ),
+            });
+      }),
       on("GET", "chatwoot.example.com/api/v1/accounts/1/inboxes/2/agent_bot", () =>
         json({ agent_bot: ticket.bot === undefined ? { id: 1, account_id: 1 } : ticket.bot }),
       ),
@@ -138,7 +139,13 @@ export function world(ticket: Ticket = {}, answers: Answers = { owner: ["cloud",
         ticket.labels = JSON.parse(request.body).labels;
       }),
       mutation("assignments", (request) => {
-        ticket.assignee = { id: JSON.parse(request.body).assignee_id, name: "Owner" };
+        const assigneeId = JSON.parse(request.body).assignee_id;
+        if (assigneeId === null) {
+          ticket.assignee = null;
+          ticket.assigneeType = null;
+          return;
+        }
+        ticket.assignee = { id: assigneeId, name: "Owner" };
         if (ticket.assigneeType === "AgentBot") ticket.status = "open";
         ticket.assigneeType = "User";
         ticket.messages?.push(activity((ticket.messages.at(-1)?.id ?? 0) + 1, "open"));
