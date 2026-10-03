@@ -389,30 +389,22 @@ export class Hub extends DurableObject<Env> {
       services.settings,
       fetch,
       this.store,
-      {
-        retryable: () => this.store.get(key) === undefined,
-        confirmUnknown: (chatwoot, action) => this.confirmUnknownCommand(chatwoot, job, action),
-      },
-      { deferPanel: true },
-      {
-        attachment: async (action, index) => {
-          const file = action.files[index];
-          if (!file) throw new Error("Missing command attachment");
-          services.budget.checkpoint();
-          const cached = this.store.commandFile(
-            job.interactionId,
-            index,
-            file.contentType || "application/octet-stream",
-          );
-          if (cached) return { blob: cached, filename: file.filename || "attachment" };
-          const downloaded = await downloadAttachment(
-            file,
-            services.settings.config.attachments.maxFileBytes,
-            services.budget.fetchWith(TRANSFER_TIMEOUT_MS),
-          );
-          await this.store.saveCommandFile(job.interactionId, index, downloaded.blob);
-          return downloaded;
-        },
+      () => this.store.get(key) === undefined,
+      (chatwoot, action) => this.confirmUnknownCommand(chatwoot, job, action),
+      true,
+      async (action, index) => {
+        const file = action.files[index];
+        if (!file) throw new Error("Missing command attachment");
+        services.budget.checkpoint();
+        const cached = this.store.commandFile(job.interactionId, index, file.contentType || "application/octet-stream");
+        if (cached) return { blob: cached, filename: file.filename || "attachment" };
+        const downloaded = await downloadAttachment(
+          file,
+          services.settings.config.attachments.maxFileBytes,
+          services.budget.fetchWith(TRANSFER_TIMEOUT_MS),
+        );
+        await this.store.saveCommandFile(job.interactionId, index, downloaded.blob);
+        return downloaded;
       },
     );
   }

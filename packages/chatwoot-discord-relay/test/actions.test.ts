@@ -30,17 +30,18 @@ function run(action: CommandAction, ...routes: Route[]) {
 }
 
 function runWith(given: typeof settings, action: CommandAction, ...routes: Route[]) {
-  return runWithPreparation(given, action, {}, ...routes);
+  return runWithPreparation(given, action, undefined, undefined, ...routes);
 }
 
 function runWithPreparation(
   given: typeof settings,
   action: CommandAction,
-  retry: Parameters<typeof executeCommand>[4],
+  retryable: Parameters<typeof executeCommand>[4],
+  confirmUnknown: Parameters<typeof executeCommand>[5],
   ...routes: Route[]
 ) {
   const mock = mockFetch(profile, ...routes);
-  const outcome = executeCommand(job(action), given, (request) => fetch(request), undefined, retry);
+  const outcome = executeCommand(job(action), given, (request) => fetch(request), undefined, retryable, confirmUnknown);
   return { outcome, result: outcome.then(({ content }) => content), requests: mock.requests };
 }
 
@@ -62,12 +63,10 @@ describe("executeCommand", () => {
     const { result } = runWithPreparation(
       settings,
       { type: "status", status: "resolved" },
-      {
-        retryable: () => false,
-        confirmUnknown: async (chatwoot) => {
-          const conversation = await chatwoot.getConversation(3, 15);
-          return conversation?.status === "resolved" ? "Resolved." : undefined;
-        },
+      () => false,
+      async (chatwoot) => {
+        const conversation = await chatwoot.getConversation(3, 15);
+        return conversation?.status === "resolved" ? "Resolved." : undefined;
       },
       on("POST", `${conversation}/toggle_status`, () => {
         status = "resolved";

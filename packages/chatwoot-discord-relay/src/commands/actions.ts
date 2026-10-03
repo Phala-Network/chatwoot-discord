@@ -34,31 +34,18 @@ export interface CommandResult {
   conversationGone: boolean;
 }
 
-export interface CommandRetry {
-  retryable?: () => boolean;
-  /** Confirms a mutation that may have been accepted before its response was lost. */
-  confirmUnknown?: (chatwoot: ChatwootClient, action: CommandAction) => Promise<string | undefined>;
-}
-
-export interface CommandPresentation {
-  deferPanel?: boolean;
-}
-
-export interface CommandFiles {
-  attachment?: (
-    file: CommandJob["action"] & { type: "message" },
-    index: number,
-  ) => Promise<{ blob: Blob; filename: string }>;
-}
-
 export async function executeCommand(
   job: CommandJob,
   settings: Settings,
   fetch: Fetch,
   limits?: RateLimitStore,
-  retry: CommandRetry = {},
-  presentation: CommandPresentation = {},
-  attachments: CommandFiles = {},
+  retryable?: () => boolean,
+  confirmUnknown?: (chatwoot: ChatwootClient, action: CommandAction) => Promise<string | undefined>,
+  deferPanel = false,
+  attachment?: (
+    file: CommandJob["action"] & { type: "message" },
+    index: number,
+  ) => Promise<{ blob: Blob; filename: string }>,
 ): Promise<CommandResult> {
   // The link is checked again here: it may have changed since the command was queued.
   const chatwootUserId = settings.chatwootUserFor(job.discordUserId);
@@ -192,8 +179,8 @@ export async function executeCommand(
         const files = [];
         let total = 0;
         for (const [index, file] of action.files.entries()) {
-          const downloaded = attachments.attachment
-            ? await attachments.attachment(action, index)
+          const downloaded = attachment
+            ? await attachment(action, index)
             : await downloadAttachment(file, limits.maxFileBytes, fetch);
           total += downloaded.blob.size;
           if (total > limits.maxTotalBytes) throw filesTooLarge(limits.maxTotalBytes);
@@ -220,7 +207,7 @@ export async function executeCommand(
       }
     }
     log.info("command done", { action: action.type, discordUserId: job.discordUserId, accountId, conversationId });
-    if ((job.panel === true && !presentation.deferPanel) || action.type === "panel") {
+    if ((job.panel === true && !deferPanel) || action.type === "panel") {
       const ticket = `${settings.account(accountId)?.name ?? "Ticket"} #${conversationId}`;
       return {
         content: message ? `✅ ${message}` : ticket,
@@ -230,23 +217,23 @@ export async function executeCommand(
     }
     return { content: `✅ ${message}`, conversationGone: false };
   } catch (error) {
-    const tracked = typeof retry.retryable === "function";
-    const retryable = retry.retryable?.() ?? false;
+    const tracked = typeof retryable === "function";
+    const canRetry = retryable?.() ?? false;
     if (
       tracked &&
-      !retryable &&
+      !canRetry &&
       ((error instanceof ChatwootError && error.status >= 500) ||
         error instanceof TypeError ||
         (error instanceof DOMException && ["TimeoutError", "AbortError"].includes(error.name)) ||
         error instanceof JobDeadlineError)
     ) {
-      const confirmed = await retry.confirmUnknown?.(chatwoot, action);
+      const confirmed = await confirmUnknown?.(chatwoot, action);
       if (confirmed !== undefined) return { content: `✅ ${confirmed}`, conversationGone: false };
       return { content: UNKNOWN_RESULT, conversationGone: false };
     }
     if (
       tracked &&
-      retryable &&
+      canRetry &&
       (error instanceof TypeError ||
         error instanceof BudgetExhaustedError ||
         error instanceof JobDeadlineError ||
@@ -257,7 +244,7 @@ export async function executeCommand(
     const gone = error instanceof ConversationGoneError || (error instanceof ChatwootError && error.status === 404);
     return {
       content:
-        tracked && !retryable && !(error instanceof ChatwootError) && !(error instanceof UserError)
+        tracked && !canRetry && !(error instanceof ChatwootError) && !(error instanceof UserError)
           ? UNKNOWN_RESULT
           : failure(error, job),
       conversationGone: gone,
