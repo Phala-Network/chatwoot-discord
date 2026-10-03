@@ -153,7 +153,6 @@ export class Store extends QueueStore implements RelayStore, Cache {
 
   async saveCommandFile(interactionId: string, part: number, blob: Blob): Promise<void> {
     this.sql.exec("DELETE FROM command_files WHERE interaction_id = ? AND part = ?", interactionId, part);
-    // SQL rows are limited to 2 MiB. Keep transfers and restoration below the isolate memory cap.
     const size = 64 * 1024;
     for (let offset = 0; offset < blob.size; offset += size) {
       const bytes = await blob.slice(offset, offset + size).arrayBuffer();

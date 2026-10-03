@@ -57,8 +57,6 @@ export async function relayDerived(
   if (!derived || (derived.kind === "response" && conversation.contact.blocked)) return;
   const digest = await sha256(derived.text);
   if (store.postedResponse(accountId, conversation.id, message.id) === digest) return;
-  // A revision belongs to this Chatwoot message, never to its text: A -> B -> A is three
-  // legitimate responses. Advance only with a confirmed receipt; unknown outcomes keep the key.
   const key = `derived-revision:${accountId}:${conversation.id}:${message.id}`;
   const revision = Number(store.get(key) ?? 0);
   const sendKey = `derived:${message.id}:${revision}`;

@@ -374,7 +374,6 @@ function decorativeChatwoot({ settings, budget, store }: ProcessorContext): Chat
   );
 }
 
-/** Cache-aside refresh is owned by a low-priority durable job, with a short negative cache. */
 export async function refreshMetadata(
   context: ProcessorContext,
   payload: { accountId: number; inboxId?: number | undefined; discordUserId?: string | undefined },

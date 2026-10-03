@@ -103,13 +103,10 @@ export class DiscordForum implements ForumClient {
             RESTPostAPIWebhookWithTokenQuery
           >(Routes.webhook(webhook.id, webhook.token), {
             body: tags ? { ...message, applied_tags: tags } : message,
-            // The webhook is this application's, so with_components lets it post any components.
             query: { wait: true, with_components: true, ...(threadId ? { thread_id: threadId } : {}) },
             auth: false,
           });
         } catch (error) {
-          // Clear only a confirmed refusal or a deadline reached before dispatch. In particular,
-          // a refused tag followed by a failed metadata read has never accepted a send.
           if (
             key &&
             ((error instanceof DiscordHttpError && error.status >= 400 && error.status < 500) ||

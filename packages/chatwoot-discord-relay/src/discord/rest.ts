@@ -1,6 +1,3 @@
-// Workers-native Discord REST. Rate limits are persisted and returned to the job scheduler;
-// no request waits inside an alarm. Bucket identity includes its major resource and auth scope.
-
 import type { Fetch } from "../../../../shared/chatwoot/api.ts";
 import { isRecord, parseJson } from "../../../../shared/json.ts";
 import type { RateLimitStore } from "../../../../shared/rate-limit.ts";
@@ -48,7 +45,6 @@ interface DiscordRequest<Body = never, Query extends object = never> {
   query?: Query;
   /** Webhook and interaction-token routes authenticate by URL; send no bot token. */
   auth?: boolean;
-  /** Interaction original-response/follow-up endpoints have no bot global limit. */
   interaction?: boolean;
   signal?: AbortSignal;
 }
@@ -103,7 +99,6 @@ export class DiscordRest {
   ): Promise<Result> {
     const scope = request.interaction ? "interaction" : request.auth === false ? "unauthenticated" : "bot";
     const majorPath = /^\/(?:channels|guilds)\/[^/]+|^\/webhooks\/[^/]+(?:\/[^/]+)?/.exec(path)?.[0] ?? "";
-    // Webhook tokens are part of the resource identity, but never part of a persisted key or log.
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(majorPath));
     const major = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
     const route = `${scope}:${method}:${path.replace(majorPath, majorPath ? "/:major" : "").replace(/\/messages\/[^/]+/, "/messages/:id")}`;
@@ -129,8 +124,6 @@ export class DiscordRest {
       new Request(url, {
         method,
         headers,
-        // Never followed: a redirect could carry the bot token elsewhere, and each hop would be
-        // a subrequest the budget does not count.
         redirect: "manual",
         ...(request.signal ? { signal: request.signal } : {}),
         ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),

@@ -15,7 +15,6 @@ import type { Env } from "./env.ts";
 import { HUB_NAME } from "./hub.ts";
 import { loadSettings } from "./settings.ts";
 
-/** Leave half a second for delivery of the initial response within Discord’s 3 seconds. */
 const INTERACTION_DEADLINE_MS = 2500;
 
 const app = new Hono<{ Bindings: Env }>();
@@ -128,7 +127,6 @@ app.post("/discord/interactions", async (c) => {
           return c.text("bad request", 400);
         }
         deadline.throwIfAborted();
-        // Never acknowledge an action until its queue row is durable. A timeout can mean unknown enqueue.
         return c.json(await hub(c.env).interaction(interaction));
       })(),
       deadline,

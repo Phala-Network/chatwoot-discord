@@ -205,11 +205,6 @@ export class Hub extends DurableObject<Env> {
     await scheduleAlarm(this.ctx, this.store.nextWakeup());
   }
 
-  /** The draft the triage bot's hook sent with an answer, while it is kept. */
-  async answerDraft(answerId: string): Promise<string | null> {
-    return this.store.get(answerKey(answerId)) ?? null;
-  }
-
   async ticketForThread(threadId: string): Promise<{ accountId: number; conversationId: number } | null> {
     return this.store.ticketForThread(threadId) ?? null;
   }
@@ -264,7 +259,6 @@ export class Hub extends DurableObject<Env> {
               : Date.now() - job.createdAt > COMMAND_START_DEADLINE_MS
                 ? { content: EXPIRED, conversationGone: false }
                 : await this.runCommand(payload.job, services);
-          // These SQL writes commit together: feedback retries have no path back to the action.
           this.store.set(`command:${payload.job.interactionId}:result`, JSON.stringify(result), 60 * 60 * 1000);
           this.enqueue({ type: "feedback", job: payload.job, result, expiresAt: job.createdAt + 15 * 60 * 1000 });
           if (result.conversationGone)
@@ -387,8 +381,9 @@ export class Hub extends DurableObject<Env> {
       const before = await beforeClient.getConversation(job.accountId, job.conversationId);
       if (before) {
         beforeMessageId = latestMessageId(before) ?? 0;
-        if (job.action.type === "label" || job.action.type === "labels")
-          beforeLabels = await beforeClient.conversationLabels(job.accountId, job.conversationId);
+        beforeLabels = ["label", "labels"].includes(job.action.type)
+          ? await beforeClient.conversationLabels(job.accountId, job.conversationId)
+          : undefined;
       }
     }
     let confirmed = false;
@@ -478,9 +473,7 @@ export class Hub extends DurableObject<Env> {
           const labels = await chatwoot.conversationLabels(job.accountId, job.conversationId);
           const expected =
             action.change === "add"
-              ? beforeLabels.includes(action.label)
-                ? beforeLabels
-                : [...beforeLabels, action.label]
+              ? [...new Set([...beforeLabels, action.label])]
               : beforeLabels.filter((label) => label !== action.label);
           if (sameLabels(labels, expected))
             return action.change === "add" ? `Label ${action.label} added.` : `Label ${action.label} removed.`;
@@ -490,10 +483,7 @@ export class Hub extends DurableObject<Env> {
           if (beforeLabels === undefined) return undefined;
           const labels = await chatwoot.conversationLabels(job.accountId, job.conversationId);
           const kinds = new Set(settings.config.router?.keepLabels ?? []);
-          const expected = [
-            ...action.labels,
-            ...beforeLabels.filter((label) => kinds.has(label) && !action.labels.includes(label)),
-          ];
+          const expected = [...new Set([...action.labels, ...beforeLabels.filter((label) => kinds.has(label))])];
           if (sameLabels(labels, expected))
             return action.labels.length > 0 ? `Label set to ${action.labels.join(", ")}.` : "Labels removed.";
           return undefined;
@@ -521,7 +511,6 @@ export class Hub extends DurableObject<Env> {
     }
   }
 
-  /** Immediate live status/card convergence, independent of the activity-line job and feedback. */
   private async syncAfterCommand(
     job: { accountId: number; conversationId: number },
     { chatwoot, relay }: ProcessorContext,
@@ -694,8 +683,5 @@ function answerKey(answerId: string): string {
 }
 
 function sameLabels(actual: string[], expected: string[]): boolean {
-  if (actual.length !== expected.length) return false;
-  const actualSorted = [...actual].sort();
-  const expectedSorted = [...expected].sort();
-  return actualSorted.every((label, index) => label === expectedSorted[index]);
+  return actual.length === expected.length && [...actual].sort().join("\0") === [...expected].sort().join("\0");
 }

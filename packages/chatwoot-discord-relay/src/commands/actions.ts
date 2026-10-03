@@ -32,7 +32,6 @@ export interface CommandResult {
   components?: APIMessageTopLevelComponent[] | undefined;
   /** Chatwoot could not find the conversation: it may have been deleted. */
   conversationGone: boolean;
-  /** The requested Chatwoot action was confirmed, so optional presentation may be refreshed. */
   confirmed?: boolean | undefined;
 }
 
@@ -361,7 +360,6 @@ function kindLabels(settings: Settings): ReadonlySet<string> {
   return new Set(settings.config.router?.keepLabels ?? []);
 }
 
-/** Draw feedback from a confirmed result. This phase never executes the original action. */
 export async function commandPanel(
   job: CommandJob,
   result: CommandResult,

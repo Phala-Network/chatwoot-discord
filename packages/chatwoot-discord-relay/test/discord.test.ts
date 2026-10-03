@@ -143,9 +143,12 @@ describe("DiscordForum", () => {
   it("recovers an accepted unknown send from the thread without posting again", async () => {
     const cache = new MemoryCache();
     cache.set("forum:55:webhook", "1:abc");
-    const freshMessage = String(((BigInt(Date.now()) - 1_420_070_400_000n) << 22n) + 1n);
+    let freshMessage = "";
     const { requests } = mockFetch(
-      on("POST", `${api}/webhooks/1/abc`, () => json({ message: "accepted, response lost" }, { status: 500 })),
+      on("POST", `${api}/webhooks/1/abc`, () => {
+        freshMessage = String(((BigInt(Date.now()) - 1_420_070_400_000n) << 22n) + 1n);
+        return json({ message: "accepted, response lost" }, { status: 500 });
+      }),
       on("GET", `${api}/channels/thread-9/messages`, () =>
         json([{ id: freshMessage, webhook_id: "1", content: "hi", flags: 0 }]),
       ),

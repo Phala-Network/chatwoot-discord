@@ -83,7 +83,6 @@ export interface PostFields {
   state: string;
   /** The Chatwoot user id of the assignee the post last announced ("" for none; see assigneeKey). */
   announcedAssignee: string;
-  /** Last confirmed assignee notice, to distinguish repeated assignments without replaying an unknown send. */
   assigneeNoticeId: string;
   /** 1 while a live message is posted and the assignee is not announced after it yet (see announceAssignee). */
   announcePending: number;
@@ -262,7 +261,6 @@ export class Relay {
       if (posted === undefined) return;
       store.updateConversation(accountId, conversation.id, { assigneeNoticeId: posted });
     }
-    // Commit before the best-effort member PUT, so its failure cannot replay the notice.
     store.updateConversation(accountId, conversation.id, {
       announcedAssignee: assigneeKey(conversation),
       announcePending: 0,

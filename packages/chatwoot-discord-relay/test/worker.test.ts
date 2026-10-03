@@ -1767,9 +1767,9 @@ it("continues attachments after a bounded slice while another command gets feedb
     on("GET", "chatwoot.example.com/api/v1/profile", () => json({ id: 42, accounts: [{ id: 3 }] })),
     on("GET", /^cdn\.discordapp\.com\/attachments\/slow-[01]$/, (request) => {
       const index = request.url.pathname.endsWith("0") ? 0 : 1;
-      downloads[index] += 1;
+      downloads[index] = (downloads[index] ?? 0) + 1;
       if (index === 1 && downloads[index] === 1) throw new JobDeadlineError();
-      return Promise.resolve(new Response(new Uint8Array(sizes[index])));
+      return Promise.resolve(new Response(new Uint8Array(sizes[index] ?? 0)));
     }),
     on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/888/messages", (request) => {
       sends += 1;

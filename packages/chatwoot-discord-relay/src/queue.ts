@@ -133,7 +133,6 @@ export async function postQueue(
       save();
       return "yield";
     }
-    // Two independent account/status chains. Pages within each chain always stay sequential.
     const chains = pass.chains.filter((chain) => !chain.done).slice(0, 2);
     const pages = await parallel(
       ...chains.map((chain) => chatwoot.listConversations(chain.accountId, chain.page, chain.status)),
@@ -185,7 +184,6 @@ export async function postQueue(
     const escalationKey = `${ticket.accountId}:${ticket.conversationId}`;
     const level = escalationLevel((nowSeconds - ticket.waitingSince) / 3600);
     const reached = previous[escalationKey]?.since === ticket.waitingSince ? previous[escalationKey].level : 0;
-    // Keep the first part's original content on a retry: its nonce names one hourly snapshot.
     if (pass.part === 0) ticket.escalate = level > reached;
     escalations[escalationKey] = { since: ticket.waitingSince, level };
   }

@@ -34,7 +34,6 @@ interface HandlerDeps {
   settings: Settings;
   /** The conversation the relay mapped to this forum post, if any. */
   ticketForThread(threadId: string): Promise<Ticket | undefined>;
-  /** The draft retained from the triage hook; a missing draft never needs an upstream read. */
   draftOf(threadId: string, answerId: string): Promise<Draft>;
 }
 
