@@ -340,6 +340,78 @@ function sweepWorld(failPage = false, disconnect = false) {
 }
 
 describe("account sweep", () => {
+  it("keeps scanning and delivering behind a failed batch, then recovers durable children", async () => {
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const failed = Array.from({ length: 15 }, (_, index) => 101 + index);
+    const delivered: number[] = [];
+    const pages: number[] = [];
+    let unavailable = true;
+    let pageUnavailable = true;
+    let laterScan = false;
+    mockFetch(
+      on("GET", /^chatwoot.example.com\/api\/v1\/accounts\/\d+\/conversations$/, (request) => {
+        if (!request.url.pathname.includes("/accounts/1/") || request.url.searchParams.get("status") !== "pending")
+          return json({ data: { payload: [] } });
+        const page = Number(request.url.searchParams.get("page"));
+        pages.push(page);
+        if (page === 2 && pageUnavailable) return json({}, { status: 503 });
+        return json({
+          data: {
+            payload: (page === 1 ? [...failed, 199] : page === 2 ? [laterScan ? 399 : 299] : []).map((id) => ({ id })),
+          },
+        });
+      }),
+    );
+    const namespace = new Proxy(env.ROUTER, {
+      get(target, key, receiver) {
+        if (key === "getByName")
+          return () => ({
+            enqueueConversation: async (_account: number, id: number) => {
+              if (unavailable && failed.includes(id)) {
+                if (id === 101) await new Promise<never>(() => {});
+                throw new Error("Child unavailable");
+              }
+              delivered.push(id);
+            },
+          });
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    await runInDurableObject(coordinator(), async (_instance, state) => {
+      vi.spyOn(state.storage, "setAlarm").mockResolvedValue();
+      const bindings = { ...env, ROUTER: namespace };
+      let executor = new Coordinator(state, bindings);
+      await executor.requestSweep();
+      for (let alarm = 0; alarm < 3; alarm++) {
+        await executor.alarm();
+        now++;
+        executor = new Coordinator(state, bindings);
+      }
+      // Already queued healthy work survives a page-read outage and a full failed batch.
+      expect(delivered).toContain(199);
+      expect(pages).toContain(2);
+      pageUnavailable = false;
+      now += 5001;
+      for (let alarm = 0; alarm < 8; alarm++) await executor.alarm();
+      expect(pages).toContain(3);
+      expect(delivered).toContain(299);
+      expect(delivered.some((id) => failed.includes(id))).toBe(false);
+
+      // Enumeration can start a new pass while failed deliveries remain backed off.
+      laterScan = true;
+      await executor.requestSweep();
+      for (let alarm = 0; alarm < 8; alarm++) await executor.alarm();
+      expect(pages.filter((page) => page === 1)).toHaveLength(2);
+      expect(delivered).toContain(399);
+      unavailable = false;
+      now += 30 * 60 * 1000 + 1;
+      executor = new Coordinator(state, bindings);
+      for (let alarm = 0; alarm < 3; alarm++) await executor.alarm();
+      for (const id of failed) expect(delivered.filter((sent) => sent === id)).toHaveLength(1);
+    });
+  });
+
   it("enqueues healthy children before a stalled child settles and retries only the failed delivery", async () => {
     let release = () => {};
     const gate = new Promise<void>((resolve) => {
@@ -347,7 +419,13 @@ describe("account sweep", () => {
     });
     let stalled = true;
     const delivered: number[] = [];
-    mockFetch(on("GET", base, () => json({ data: { payload: [{ id: 991 }, { id: 992 }] } })));
+    mockFetch(
+      on("GET", base, (request) =>
+        json({
+          data: { payload: request.url.searchParams.get("page") === "1" ? [{ id: 991 }, { id: 992 }] : [] },
+        }),
+      ),
+    );
     const namespace = new Proxy(env.ROUTER, {
       get(target, key, receiver) {
         if (key === "getByName")

@@ -259,6 +259,88 @@ it("counts global permits across the sliding window and bounds a control wait by
   expect(budget.remaining).toBe(1);
 });
 
+it("keeps scans, full requests and healthy deliveries moving behind a failed batch and recovers it", async () => {
+  let now = Date.now();
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  const failed = Array.from({ length: 15 }, (_, index) => 101 + index);
+  const delivered: number[] = [];
+  const pages: number[] = [];
+  let unavailable = true;
+  let pageUnavailable = true;
+  let laterScan = false;
+  mockFetch(
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations", (request) => {
+      const page = Number(request.url.searchParams.get("page"));
+      pages.push(page);
+      if (page === 2 && pageUnavailable) return json({}, { status: 503 });
+      return json({
+        data: {
+          payload: (page === 1 ? [...failed, 199] : page === 2 ? [laterScan ? 499 : 299] : page === 3 ? [399] : []).map(
+            (id) => ({
+              id,
+              inbox_id: 2,
+              messages: [{ id }],
+              last_activity_at: id === 399 ? 1 : now / 1000,
+            }),
+          ),
+        },
+      });
+    }),
+  );
+  const namespace = new Proxy(env.CONVERSATION, {
+    get(target, key, receiver) {
+      if (key === "getByName")
+        return () => ({
+          enqueueConversation: async (_account: number, id: number) => {
+            if (unavailable && failed.includes(id)) {
+              if (id === 101) await new Promise<never>(() => {});
+              throw new Error("Child unavailable");
+            }
+            delivered.push(id);
+          },
+        });
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  await runInDurableObject(
+    env.ACCOUNT_SWEEP.getByName(`delivery-isolation:${crypto.randomUUID()}`),
+    async (_instance, state) => {
+      vi.spyOn(state.storage, "setAlarm").mockResolvedValue();
+      const bindings = { ...env, CONVERSATION: namespace };
+      let executor = new AccountSweep(state, bindings);
+      await executor.request(3);
+      for (let alarm = 0; alarm < 3; alarm++) {
+        await executor.alarm();
+        now++;
+        executor = new AccountSweep(state, bindings);
+      }
+      expect(delivered).toContain(199);
+      expect(delivered).not.toContain(399);
+      // A full request restarts page one despite both page-read and child retry backlogs.
+      pageUnavailable = false;
+      await executor.request(3, true);
+      for (let alarm = 0; alarm < 8; alarm++) await executor.alarm();
+      expect(pages.filter((page) => page === 1)).toHaveLength(2);
+      expect(pages).toContain(3);
+      expect(pages).toContain(4);
+      expect(delivered).toContain(299);
+      expect(delivered).toContain(399);
+      expect(delivered.some((id) => failed.includes(id))).toBe(false);
+
+      laterScan = true;
+      await executor.request(3);
+      for (let alarm = 0; alarm < 8; alarm++) await executor.alarm();
+      expect(pages.filter((page) => page === 1)).toHaveLength(3);
+      expect(delivered).toContain(499);
+      unavailable = false;
+      now += 30 * 60 * 1000 + 1;
+      executor = new AccountSweep(state, bindings);
+      for (let alarm = 0; alarm < 3; alarm++) await executor.alarm();
+      for (const id of failed) expect(delivered.filter((sent) => sent === id)).toHaveLength(1);
+    },
+  );
+});
+
 it.each([false, true])(
   "restarts a full sweep at page one despite a saved window and an in-flight old read (%s)",
   async (inFlight) => {
