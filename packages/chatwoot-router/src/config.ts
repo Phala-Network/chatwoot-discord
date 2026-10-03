@@ -13,7 +13,9 @@ export const configSchema = z
     chatwoot: z.strictObject({ baseUrl: z.url({ protocol: /^https?$/ }) }),
     subrequestBudget: z.number().int().min(45).max(1000).default(45),
     routing: z.strictObject({
+      /** TypeSafe's System One API (/v1/systemone), or another deployment such as a proxy or gateway. */
       endpoint: z.url({ protocol: /^https$/ }).default("https://api.typesafe.ai/v1/systemone"),
+      /** Model sent to TypeSafe's System One API; Jev by default. */
       model: z.string().min(1).default("jev-1.13.0"),
       /** Jev's probability an answer needs before it is applied. */
       minConfidence: z.number().min(0.5).max(1).default(0.7),

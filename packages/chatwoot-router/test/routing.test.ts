@@ -49,7 +49,7 @@ describe("sanitize", () => {
 });
 
 describe("native bot turns", () => {
-  it("calls the configured Jev endpoint and applies its routing decision", async () => {
+  it("calls the configured deployment of TypeSafe's System One API", async () => {
     const endpoint = "jev.example.com/custom/systemone";
     const mock = world({}, { owner: ["sales", 1] }, endpoint);
     const ctx = context(new MemoryStore(), { ...ROUTING, endpoint: `https://${endpoint}` });

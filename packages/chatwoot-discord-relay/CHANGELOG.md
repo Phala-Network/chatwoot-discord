@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Clarify that the router calls TypeSafe's System One API (`/v1/systemone`) with the model in `routing.model`
+  (Jev by default); `routing.endpoint` may point to another deployment of that API, for example a proxy or gateway.
 - Hold pending bot-inbox customer messages in the deduplicated conversation job. Status webhooks and the sweep
   release held work; only one short race re-read is timed, with no per-message polling or routing deadline.
 - Mention triage only for open, unanswered customer messages. Public outgoing bot/human replies count; private,

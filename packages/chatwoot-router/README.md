@@ -1,12 +1,16 @@
 # chatwoot-router
 
-A native Chatwoot agent bot that uses [TypeSafe Jev](https://docs.typesafe.ai) to assign owners, add topic and
+A native Chatwoot agent bot that uses [TypeSafe's System One API](https://docs.typesafe.ai) to assign owners, add topic and
 kind labels, send canned responses, and resolve or snooze tickets. Runs on Cloudflare Workers independently
 of [chatwoot-discord-relay](https://github.com/Phala-Network/chatwoot-workers/tree/main/packages/chatwoot-discord-relay). The Workers coordinate through Chatwoot status.
 
 ## How it works
 
 Chatwoot owns the lifecycle: a conversation is the bot's while pending, and people's otherwise.
+
+System One is TypeSafe's class of decision models, and Jev is its first model. The router calls TypeSafe's
+System One API (`/v1/systemone`) with the model in `routing.model` (Jev by default). `routing.endpoint`
+may point to another deployment of that API, for example a proxy or gateway.
 
 - Each routed account has a configured brand bot. Routing is limited to inboxes linked to that exact account's
   bot, discovered through `GET inboxes/{id}/agent_bot`. The wrapped `agent_bot.id` and `account_id` must match;
@@ -164,8 +168,8 @@ no unpublished shared package needs installing.
 | --- | --- | --- | --- |
 | `chatwoot.baseUrl` | HTTP(S) URL | required | Final Chatwoot API URL; redirects are refused. |
 | `subrequestBudget` | integer 45–1000 | `45` | Per-alarm outbound budget; reserve 45 for a bounded turn read and all actions. |
-| `routing.endpoint` | HTTPS URL | `https://api.typesafe.ai/v1/systemone` | Full Jev API endpoint used for classification requests; redirects are refused. |
-| `routing.model` | non-empty string | `jev-1.13.0` | TypeSafe model. |
+| `routing.endpoint` | HTTPS URL | `https://api.typesafe.ai/v1/systemone` | TypeSafe's System One API endpoint; may point to another deployment of that API, for example a proxy or gateway. Redirects are refused. |
+| `routing.model` | non-empty string | `jev-1.13.0` | Model sent to TypeSafe's System One API; Jev by default. |
 | `routing.minConfidence` | number 0.5–1 | `0.7` | Probability an answer needs before it is applied. |
 | `routing.botIds` | object: account id → positive safe integer | required | Brand bot id for every routed account, and no others. |
 | `routing.accounts` | object: account id → (owner name → owner) | required | Routed accounts and the owners Jev chooses from. Owner names are 1–40 lower-case letters, digits, or `_`; `unclear` is reserved. |
@@ -184,7 +188,7 @@ no unpublished shared package needs installing.
 | `CHATWOOT_TOKEN` | Yes | User token for messages, canned responses, inbox discovery and sweep. Must see every routed inbox. |
 | `CHATWOOT_AGENT_BOT_TOKENS` | Yes | JSON object of bot access tokens by account id, e.g. `{"1":"<token>"}`. All mutations use the bot token. |
 | `CHATWOOT_AGENT_BOT_SECRETS` | Yes | JSON object of bot webhook secrets by account id, e.g. `{"1":"<secret>"}`. |
-| `TYPESAFE_API_KEY` | Yes | TypeSafe Jev API key. |
+| `TYPESAFE_API_KEY` | Yes | TypeSafe API key for System One API requests. |
 
 Both bot-secret maps require nonempty values and exactly the `routing.accounts` keys. Missing/invalid entries
 fail startup; `/healthz` returns 503 without credentials in its response. All secrets use `bindings.secret()`.

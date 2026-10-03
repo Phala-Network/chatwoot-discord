@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Configurable `routing.endpoint` for Jev requests. Requires an HTTPS URL and defaults to
-  `https://api.typesafe.ai/v1/systemone`.
+- Configurable `routing.endpoint` for TypeSafe's System One API (`/v1/systemone`), called with the model in
+  `routing.model` (Jev by default). Requires an HTTPS URL and defaults to `https://api.typesafe.ai/v1/systemone`.
+  It may point to another deployment of that API, for example a proxy or gateway.
 
 ### Changed
 

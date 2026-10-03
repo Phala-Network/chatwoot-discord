@@ -17,12 +17,12 @@ const secrets = {
 };
 
 describe("router configuration", () => {
-  it("defaults the Jev endpoint to TypeSafe", () => {
+  it("defaults the endpoint to TypeSafe's System One API", () => {
     expect(parseSettings(config, secrets).config.routing.endpoint).toBe("https://api.typesafe.ai/v1/systemone");
   });
 
   it.each(["http://jev.example.com/v1/systemone", "ftp://jev.example.com/v1/systemone", "not a URL"])(
-    "rejects an invalid or non-HTTPS Jev endpoint %s",
+    "rejects an invalid or non-HTTPS endpoint for TypeSafe's System One API: %s",
     (endpoint) => {
       expect(() => parseSettings({ ...config, routing: { ...config.routing, endpoint } }, secrets)).toThrow(
         /routing.endpoint/,

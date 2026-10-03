@@ -114,7 +114,7 @@ Cron (every 5 min) ─▶ Worker ──▶ Hub Durable Object ──▶ sweep: c
   pings their assignees, and escalates long-unassigned ones to a role ([support queue](#support-queue)). Pending
   tickets show 🤖 without pings/escalation, using the existing wait-age calculation; there is no pending timeout.
 - Optionally, the separate [chatwoot-router](https://github.com/Phala-Network/chatwoot-workers/tree/main/packages/chatwoot-router)
-  Worker assigns a new ticket's owner and topic with TypeSafe Jev ([routing](#routing)).
+  Worker assigns a new ticket's owner and topic through TypeSafe's System One API ([routing](#routing)).
 
 These contracts use Chatwoot v4.18.0's
 [typed assignment](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/services/conversations/assignment_service.rb),
@@ -405,6 +405,10 @@ Worker secrets, never in the configuration, also validated at startup:
 | `TRIAGE_HOOK_SECRET` | 32+ characters; optional | Signs the triage bot's hook ([triage bot hook](#triage-bot-hook)). Unset: the route is off. |
 
 ## Routing
+
+The router calls TypeSafe's System One API (`/v1/systemone`) with the model in its `routing.model` setting
+(Jev by default). System One is TypeSafe's class of decision models; Jev is its first model. The router's
+`routing.endpoint` may point to another deployment of that API, for example a proxy or gateway.
 
 [chatwoot-router](https://github.com/Phala-Network/chatwoot-workers/tree/main/packages/chatwoot-router) runs as each account's native Chatwoot brand bot. The relay
 uses Chatwoot's inbox-bot association and pending status automatically; it needs neither bot credentials nor
