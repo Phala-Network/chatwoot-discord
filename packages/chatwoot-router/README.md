@@ -15,12 +15,12 @@ may point to another deployment of that API, for example a proxy or gateway.
 - Each routed account has a configured brand bot. Routing is limited to inboxes linked to that exact account's
   bot, discovered through `GET inboxes/{id}/agent_bot`. The wrapped `agent_bot.id` and `account_id` must match;
   `agent_bot: null` or `agent_bot: {}` means unlinked. Foreign-account and system bots are rejected. The user token
-  must see every routed inbox. Disconnecting an inbox stops routing. The API does not expose whether the
+  must see every routed inbox. Disconnecting an inbox stops classification/replies and hands any pending ticket still assigned to this bot to people. The API does not expose whether the
   association is inactive; disconnect to disable it. `routing.botIds` and both bot credential maps require
   exactly the routed account keys (see [Configuration reference](#configuration-reference)).
 - Signed bot webhooks at `/chatwoot/agent-bot` enqueue a deduplicated conversation job. The five-minute sweep
-  lists **pending** conversations without an age cutoff. Inbox discovery and page cursors persist across alarms
-  within the request budget. Failed pages retry. An empty page ends a pass; the next starts at page 1 and catches
+  lists **all pending conversations in the account**, including disconnected inboxes, without an age cutoff.
+  A page cursor persists across alarms within the request budget. Failed pages retry. An empty page ends a pass; the next starts at page 1 and catches
   conversations skipped by changing pages. Neither event payloads nor sweep rows are decision inputs.
 - Read messages newest-first, unfiltered (including activities), with `before` paging, at most five pages of 20.
   The latest `conversation_status_changed` activity begins the turn; without one or evidence it is missing, use
@@ -54,11 +54,20 @@ may point to another deployment of that API, for example a proxy or gateway.
   Reopened resolved conversations can lack a bot assignee, in which case assignment would not open
   pending: use native handoff instead. Chatwoot has no atomic compare-and-write API for a change racing a mutation.
 - Only canned replies have an action record, `reply:<account>:<conversation>`, kept across turns and upgrades.
-  Record it **before sending**: a failure or unknown outcome is never resent. Labels, assignment and status use
+  Before sending, read up to five unfiltered history pages (100 messages), past turn boundaries, for a public outgoing
+  message (`message_type=1`, `private=false`, `sender.type=agent_bot`) from this account's exact configured bot id.
+  A confirmed, non-deleted, non-failed reply counts as replied, including replies the old relay sent; preserve an
+  observed record so later removal cannot permit a resend. A complete read to the beginning with none permits the
+  first attempt; an incomplete/failed/ambiguous read or an existing attempt without a visible reply hands off.
+  Record the attempt **before sending**. A failed POST, lost response, malformed receipt or failed/deleted reply
+  persists handoff and never resolves/snoozes or resends. Only a valid creation receipt for this conversation or
+  confirmed history permits the kind's ending status. This confirms creation in Chatwoot, not channel delivery;
+  a delivery failure seen in the final fresh read also hands off. Labels, assignment and status use
   current Chatwoot state, without an effects ledger or custom coordination attributes. A missing canned response
   hands off immediately. After three processing failures (initial, +5s, +10s), persist handoff mode. Further retries
   only revalidate the turn and hand off, with backoff capped at 30 minutes. Handoff failures keep the job; deleted
-  conversations and disconnected inboxes end it. Credentials/service failures need repair before handoff can succeed.
+  conversations end it. Disconnected brand-bot pending tickets use native bot `status=open` handoff without Jev
+  or a turn-history read; failures retry until the handoff succeeds. Other bots and people are untouched. Credentials/service failures need repair before handoff can succeed.
 - A Worker 2xx means the job is durable, not that routing succeeded. Chatwoot's own webhook failure fallback cannot
   cover later alarm failures. Its fallback opens pending on failed `message_created`/`message_updated` delivery unless
   `keep_pending_on_bot_failure` is enabled; it may leave a bot assignee on open. The relay shows that as unassigned.
@@ -75,6 +84,11 @@ The API contracts were checked against Chatwoot v4.18.0:
 [activity creation](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/models/concerns/activity_message_handler.rb)
 and its [job](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/jobs/conversations/activity_message_job.rb),
 [message paging](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/finders/message_finder.rb),
+[message creation](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/builders/messages/message_builder.rb),
+[message JSON](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/views/api/v1/models/_message.json.jbuilder),
+[bot sender](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/models/agent_bot.rb),
+[account access](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/controllers/concerns/ensure_current_account_helper.rb),
+[conversation access](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/policies/conversation_policy.rb),
 [inbox bot response](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/views/api/v1/accounts/inboxes/agent_bot.json.jbuilder),
 [assignees/timestamps](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/presenters/conversations/event_data_presenter.rb),
 [token permissions](https://raw.githubusercontent.com/chatwoot/chatwoot/v4.18.0/app/controllers/concerns/access_token_auth_helper.rb),
@@ -195,21 +209,32 @@ fail startup; `/healthz` returns 503 without credentials in its response. All se
 
 ## Upgrade and rollback
 
-1. Verify user-token inbox visibility and count existing pending tickets. Keep both existing Worker names,
-   Durable Object namespaces and reply records. Existing pending tickets will be routed; open tickets stay human-owned.
-2. Deploy the new relay first. Remove its `router.accounts` and `router.waitSeconds`; keep every kind name in
-   `router.keepLabels`. During the transition existing open tickets can go directly to triage.
-3. Stop the old router's account webhook and cron; replace it in place. Never run both routers. Remove
-   `startAfterConversationId`, `reconcile`, `routing.snoozeUnclear`, `CHATWOOT_WEBHOOK_SECRETS` and
-   `CHATWOOT_BOT_TOKENS` from its configuration. Add `routing.botIds` and the two new required bot secrets.
-   The one-time storage migration removes old jobs/checkpoints/non-reply effects and decision memos. Reply records
-   survive; the pending sweep reconstructs jobs. The Worker never deletes Chatwoot attributes.
-4. Connect the bots one account at a time after both Workers are ready. Keep existing `routing_*` attributes and
-   definitions until the owner's rollback window ends, then remove them manually.
-5. To roll back, **disconnect bots first**, stop the new router/cron, then restore old code, config and account
-   webhook if needed. Do not run old and new routing together. Choose old cutover ids deliberately; retained
-   reply records prevent resends, but lifecycle changes already made are not reversible automatically.
-   Relay sweeps wake held jobs after disconnect; people can open ordinary pending conversations.
+Keep Worker names, Durable Object namespaces, old KV configuration keys and reply attempts. Existing pending
+conversations are reconciled; open conversations remain with people. The user token must see all relevant inboxes.
+
+For the first move from the relay's built-in routing (production baseline 0.27.0):
+
+1. Record the live relay deployment/version id and CONFIG_KEY before rollout; retain its Hub and old secrets.
+   Disconnect all brand bots and prevent competing old deployments. Verify bot identities, owner membership,
+   labels, canned responses and inbox visibility. Historical confirmed brand-bot replies need no ledger migration.
+2. Deploy and verify relay 0.30 first. Remove `routing`, `router.accounts` and `router.waitSeconds`; keep every kind
+   in `router.keepLabels`. Verify the actual version and that built-in routing/in-flight old work stopped.
+3. Bootstrap this Worker by hand with all four secrets in a protected secrets file while bots remain disconnected.
+   Verify KV/domain, upstream permissions and test tickets; health/2xx alone do not prove routing success.
+   If using an infra PR whose push deploys both Workers independently, merge only after both hand deployments pass.
+4. Connect bots one account at a time and verify real routing, handoff, failed/unknown reply handling, historical
+   reply deduplication and Discord/triage behavior, including at least a complete sweep.
+5. To roll back, disconnect bots first and **keep this router running until no pending ticket remains assigned to
+   a disconnected brand bot**. The account sweep uses native bot handoff, clearing the bot assignee. Then stop
+   webhook entry, cron and queued/in-flight router work; stopping cron alone does not cancel DO alarms. Preserve DO
+   state. Restore the recorded live 0.27 version **and its CONFIG_KEY**, without overlapping old/new routing.
+   Evaluate tickets already replied to and old checkpoints before restoring 0.27: that relay does not understand
+   this router's reply guard and can repeat replies. Sent messages and other mutations are not undone by rollback.
+
+Current router upgrades need no custom coordination attributes, compatibility effects or one-time lifecycle
+cleanup. Older unreadable job payloads are dropped; live snapshots and the pending sweep reconstruct work.
+If handoff credentials fail, repair them or let a real owner take the tickets; do not bulk-open with the integration
+user token, which can assign every ticket to that user. Keep old attributes through the owner's rollback window.
 
 Redaction is best effort, not anonymization: other personal information can still reach TypeSafe. Logs contain
 ids and outcomes, never message bodies or credentials. See [SECURITY.md](https://github.com/Phala-Network/chatwoot-workers/blob/main/SECURITY.md),

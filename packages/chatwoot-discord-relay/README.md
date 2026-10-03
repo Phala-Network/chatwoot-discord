@@ -432,7 +432,9 @@ During the relay-first transition, open messages can go straight to triage.
 
 Keep existing `routing_*` attributes/definitions through the owner's rollback window. For rollback, **disconnect
 the bot first**, stop the new router, then restore old versions/config and the old account webhook if required.
-The relay sweep releases held jobs after disconnect. There are no pending-message timers to remove. See the
+Keep the router running until its account-wide sweep has handed disconnected brand-bot pending leftovers to
+people and none remain; then stop it, including queued alarms/in-flight work, and restore the recorded baseline
+version and CONFIG_KEY. The relay sweep releases held jobs after disconnect. There are no pending-message timers to remove. See the
 router's [upgrade and rollback instructions](https://github.com/Phala-Network/chatwoot-workers/tree/main/packages/chatwoot-router#upgrade-and-rollback).
 
 ## Triage bot hook

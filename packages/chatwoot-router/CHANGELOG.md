@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- End a kind's turn with resolved/snoozed only after its canned reply is confirmed to exist in Chatwoot. Failed,
+  unknown or malformed creation outcomes, incomplete history, and attempts without visible replies hand off to
+  people without sending again. A reply seen as failed/deleted in the final fresh read also hands off.
+- Recognize historical public outgoing messages from the account's exact brand bot, including the former relay's
+  replies, without moving reply ledgers. Preserve the durable attempt/observed guard across turns and upgrades.
+- Disconnecting an inbox hands its pending brand-bot leftovers to people with native bot `status=open`. The sweep
+  reads all account pending conversations, including old disconnected inboxes, and retries failed handoffs.
+
+### Changed
+
+- Remove cached inbox discovery, obsolete lifecycle cleanup/coordination effects and the single-use decision reader.
+  Keep bounded turn/history reads and the existing 45-request budget.
+- Document relay-first bootstrap, disconnect-and-drain rollback to the recorded live 0.27 version/config, and the
+  distinction between Chatwoot message creation and channel delivery.
+
 ## [0.2.0] - 2026-10-03
 
 ### Changed
