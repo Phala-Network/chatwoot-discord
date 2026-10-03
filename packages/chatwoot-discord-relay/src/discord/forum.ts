@@ -21,14 +21,11 @@ import {
   Routes,
   WebhookType,
 } from "discord-api-types/v10";
-import { BudgetExhaustedError, JobDeadlineError } from "../../../../shared/budget.ts";
 import { parallel } from "../../../../shared/concurrent.ts";
-import { isRecord, parseJson } from "../../../../shared/json.ts";
 import { log } from "../../../../shared/log.ts";
-import { type ForumClient, UnknownSendError, UnknownThreadError, type WebhookMessage } from "../relay/relay.ts";
+import { Effects } from "../effects.ts";
+import { type ForumClient, type SendOutcome, UnknownThreadError, type WebhookMessage } from "../relay/relay.ts";
 import { DiscordHttpError, type DiscordRest } from "./rest.ts";
-
-export { UnknownSendError } from "../relay/relay.ts";
 
 const WEBHOOK_NAME = "Chatwoot";
 /** Discord answers a request to a deleted post with this code, with HTTP 404 or, for a webhook, 400. */
@@ -56,54 +53,43 @@ export class DiscordForum implements ForumClient {
     message: WebhookMessage,
     threadId?: string,
     sendKey?: string,
-  ): Promise<{ channelId: string; messageId: string }> {
-    const key = sendKey ? `send:${sendKey}` : undefined;
-    const saved = key ? this.cache.get(key) : undefined;
-    if (saved !== undefined) {
-      const receipt = parseJson(saved);
-      if (isRecord(receipt) && typeof receipt.channelId === "string" && typeof receipt.messageId === "string")
-        return { channelId: receipt.channelId, messageId: receipt.messageId };
-      throw new UnknownSendError();
-    }
+  ): Promise<SendOutcome> {
     const webhook = await this.webhook(forumChannelId);
+    const effects = new Effects(this.cache);
+    const key = sendKey ?? crypto.randomUUID();
     try {
-      const sent = await this.withTags(forumChannelId, message.applied_tags, async (tags) => {
-        if (key) this.cache.set(key, "unknown");
+      const effect = await this.withTags(forumChannelId, message.applied_tags, async (tags) => {
+        const request = tags ? { ...message, applied_tags: tags } : message;
+        const existing = effects.read(key);
+        if (existing?.state === "READY") effects.save(key, { state: "READY", request });
         try {
-          return await this.rest.post<
-            RESTPostAPIWebhookWithTokenWaitResult,
-            RESTPostAPIWebhookWithTokenJSONBody,
-            RESTPostAPIWebhookWithTokenQuery
-          >(Routes.webhook(webhook.id, webhook.token), {
-            body: tags ? { ...message, applied_tags: tags } : message,
-            query: { wait: true, with_components: true, ...(threadId ? { thread_id: threadId } : {}) },
-            auth: false,
+          return await effects.run(key, request, async (frozen) => {
+            const sent = await this.rest.post<
+              RESTPostAPIWebhookWithTokenWaitResult,
+              RESTPostAPIWebhookWithTokenJSONBody,
+              RESTPostAPIWebhookWithTokenQuery
+            >(Routes.webhook(webhook.id, webhook.token), {
+              body: frozen,
+              query: { wait: true, with_components: true, ...(threadId ? { thread_id: threadId } : {}) },
+              auth: false,
+            });
+            if (!sent?.channel_id || !/^\d+$/.test(sent.id)) throw new TypeError("Missing Discord message receipt");
+            return { channelId: sent.channel_id, messageId: sent.id };
           });
         } catch (error) {
-          if (isUnknownWrite(error)) throw new UnknownSendError(error);
-          if (
-            key &&
-            ((error instanceof DiscordHttpError && error.status >= 400 && error.status < 500) ||
-              error instanceof BudgetExhaustedError ||
-              (error instanceof JobDeadlineError && !error.requestStarted))
-          )
-            this.cache.delete(key);
+          if (tags?.length && error instanceof DiscordHttpError && (error.status === 400 || error.code === UNKNOWN_TAG))
+            effects.save(key, { state: "READY", request });
           throw error;
         }
       });
-      if (!sent?.channel_id || !sent.id) throw new UnknownSendError();
-      const receipt = { channelId: sent.channel_id, messageId: sent.id };
-      if (key) this.cache.set(key, JSON.stringify(receipt));
-      return receipt;
+      return effect.state === "CONFIRMED" && effect.receipt
+        ? { state: "confirmed", ...effect.receipt }
+        : { state: effect.state === "REJECTED" ? "rejected" : "unknown" };
     } catch (error) {
       if (threadId && isUnknownChannel(error)) throw new UnknownThreadError(threadId);
       if (error instanceof DiscordHttpError && error.status === 404) {
-        if (error.code === UNKNOWN_WEBHOOK) {
-          // Someone deleted the webhook: forget it so the next attempt creates a new one.
-          this.cache.delete(webhookKey(forumChannelId));
-        } else if (threadId) {
-          throw new UnknownThreadError(threadId);
-        }
+        if (error.code === UNKNOWN_WEBHOOK) this.cache.delete(webhookKey(forumChannelId));
+        else if (threadId) throw new UnknownThreadError(threadId);
       }
       throw error;
     }
@@ -180,7 +166,7 @@ export class DiscordForum implements ForumClient {
       const channel = await this.rest.get<RESTGetAPIChannelResult>(Routes.channel(threadId));
       return "parent_id" in channel && channel.parent_id === forumChannelId;
     } catch (error) {
-      if (error instanceof DiscordHttpError && (error.status === 404 || error.status === 403)) return false;
+      if (error instanceof DiscordHttpError && error.status === 404) return false;
       throw error;
     }
   }
@@ -268,12 +254,4 @@ function isUnknownChannel(error: unknown): boolean {
 
 function webhookKey(forumChannelId: string): string {
   return `forum:${forumChannelId}:webhook`;
-}
-
-function isUnknownWrite(error: unknown): boolean {
-  return (
-    (error instanceof DiscordHttpError && error.status >= 500) ||
-    error instanceof TypeError ||
-    (error instanceof DOMException && ["AbortError", "TimeoutError"].includes(error.name))
-  );
 }

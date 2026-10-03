@@ -5,6 +5,7 @@ import type { APIMessageTopLevelComponent } from "discord-api-types/v10";
 import { BudgetExhaustedError, JobDeadlineError } from "../../../../shared/budget.ts";
 import {
   type ChatwootClient,
+  type ChatwootConversation,
   ChatwootError,
   chatwootClient,
   type Fetch,
@@ -15,12 +16,14 @@ import { parallel } from "../../../../shared/concurrent.ts";
 import { errorFields, log } from "../../../../shared/log.ts";
 import type { RateLimitStore } from "../../../../shared/rate-limit.ts";
 import type { Settings } from "../config.ts";
+import { Effects } from "../effects.ts";
 import { clip, defused } from "../relay/format.ts";
 import { downloadAttachment } from "./attachments.ts";
 import { FAILED, filesTooLarge, NOT_LINKED, UNKNOWN_RESULT, UserError } from "./common.ts";
 import { assigneeMenu, panel } from "./components.ts";
 import { PRIORITY_NAMES } from "./definitions.ts";
-import type { CommandAction, CommandJob } from "./job.ts";
+import type { CommandJob } from "./job.ts";
+import { assignmentTarget, mutate, UnknownMutation } from "./mutation.ts";
 
 export interface CommandResult {
   /** The confirmation shown to the invoker (only they see it). */
@@ -39,9 +42,8 @@ export interface CommandExecution {
   settings: Settings;
   fetch: Fetch;
   limits?: RateLimitStore;
-  retryable?: () => boolean;
-  confirmUnknown?: (chatwoot: ChatwootClient, action: CommandAction) => Promise<string | undefined>;
-  deferPanel?: boolean;
+  effects?: Effects;
+  uploadFetch?: Fetch;
   attachment?: (
     file: CommandJob["action"] & { type: "message" },
     index: number,
@@ -49,13 +51,41 @@ export interface CommandExecution {
 }
 
 export async function executeCommand(job: CommandJob, execution: CommandExecution): Promise<CommandResult> {
-  const { settings, fetch, limits, retryable, confirmUnknown, attachment, deferPanel = false } = execution;
+  const { settings, fetch, limits, attachment } = execution;
+  const memory = new Map<string, string>();
+  const effects =
+    execution.effects ??
+    new Effects({
+      get: (key) => memory.get(key),
+      set: (key, value) => {
+        memory.set(key, value);
+      },
+    });
   // The link is checked again here: it may have changed since the command was queued.
   const chatwootUserId = settings.chatwootUserFor(job.discordUserId);
   const token = settings.agentToken(job.discordUserId);
   if (chatwootUserId === undefined || !token) return { content: `❌ ${NOT_LINKED}`, conversationGone: false };
   const chatwoot = chatwootClient(settings.config.chatwoot.baseUrl, token, fetch, limits);
   const { accountId, conversationId, action } = job;
+  const write = <Target extends import("./mutation.ts").MutationTarget>(
+    step: string,
+    target: Target,
+    send: (frozen: Target) => Promise<unknown>,
+  ) => mutate(effects, `command:${job.interactionId}:${step}`, target, chatwoot, job, send);
+  const assign = async (
+    step: string,
+    id: number | null,
+    type: "User" | "AgentBot" = "User",
+    fresh?: ChatwootConversation,
+  ) => {
+    const current = fresh ?? (await existing(chatwoot.getConversation(accountId, conversationId)));
+    const target = assignmentTarget(current, id, type);
+    return write(step, target, (frozen) =>
+      frozen.id === null
+        ? chatwoot.unassign(accountId, conversationId)
+        : chatwoot.assign(accountId, conversationId, frozen.id, frozen.type),
+    );
+  };
 
   try {
     const profile = await chatwoot.getProfile();
@@ -95,7 +125,9 @@ export async function executeCommand(job: CommandJob, execution: CommandExecutio
         // The panel sets the topic label; the ticket's kinds stay.
         const kinds = kindLabels(settings);
         const kept = (conversation.labels ?? []).filter((label) => kinds.has(label) && !action.labels.includes(label));
-        await chatwoot.setLabels(accountId, conversationId, [...action.labels, ...kept]);
+        await write("labels", { kind: "labels", labels: [...action.labels, ...kept] }, (frozen) =>
+          chatwoot.setLabels(accountId, conversationId, frozen.labels),
+        );
         message = action.labels.length > 0 ? `Label set to ${action.labels.join(", ")}.` : "Labels removed.";
         break;
       }
@@ -106,21 +138,27 @@ export async function executeCommand(job: CommandJob, execution: CommandExecutio
           if (conversation.inbox_id === undefined) throw new UserError("This conversation has no inbox.");
           const bot = await chatwoot.inboxBot(accountId, conversation.inbox_id);
           if (bot) {
-            await chatwoot.assign(accountId, conversationId, bot.id, "AgentBot");
+            await write("handoff", assignmentTarget(conversation, bot.id, "AgentBot"), (frozen) =>
+              chatwoot.assign(accountId, conversationId, frozen.id ?? bot.id, frozen.type),
+            );
             message = "Handed back to the inbox bot.";
             break;
           }
         }
-        await chatwoot.setStatus(
-          accountId,
-          conversationId,
-          snoozedUntil === undefined ? { status } : { status, snoozed_until: snoozedUntil },
+        await write("status", { kind: "status", status, snoozedUntil: snoozedUntil ?? null }, (frozen) =>
+          chatwoot.setStatus(
+            accountId,
+            conversationId,
+            frozen.snoozedUntil === null ? { status } : { status, snoozed_until: frozen.snoozedUntil },
+          ),
         );
         message = statusMessage(status, snoozedUntil);
         break;
       }
       case "priority":
-        await chatwoot.setPriority(accountId, conversationId, action.priority);
+        await write("priority", { kind: "priority", priority: action.priority }, (frozen) =>
+          chatwoot.setPriority(accountId, conversationId, frozen.priority),
+        );
         message = action.priority ? `Priority set to ${PRIORITY_NAMES[action.priority]}.` : "Priority removed.";
         break;
       case "block": {
@@ -128,8 +166,12 @@ export async function executeCommand(job: CommandJob, execution: CommandExecutio
         // resolve the conversation and set the contact's `blocked` flag.
         const contactId = (await existing(chatwoot.getConversation(accountId, conversationId))).meta?.sender?.id;
         if (contactId === undefined) throw new UserError("This conversation has no contact to block.");
-        await chatwoot.setStatus(accountId, conversationId, { status: "resolved" });
-        await chatwoot.setContactBlocked(accountId, contactId, true);
+        await write("resolve", { kind: "status", status: "resolved", snoozedUntil: null }, () =>
+          chatwoot.setStatus(accountId, conversationId, { status: "resolved" }),
+        );
+        await write("block", { kind: "contact", id: contactId, blocked: true }, (frozen) =>
+          chatwoot.setContactBlocked(accountId, frozen.id, frozen.blocked),
+        );
         message = "Contact blocked and conversation resolved. Their new messages will not be posted here.";
         break;
       }
@@ -137,7 +179,9 @@ export async function executeCommand(job: CommandJob, execution: CommandExecutio
         // Chatwoot's "Unblock contact": clears the contact's `blocked` flag; the conversation stays as it is.
         const contactId = (await existing(chatwoot.getConversation(accountId, conversationId))).meta?.sender?.id;
         if (contactId === undefined) throw new UserError("This conversation has no contact to unblock.");
-        await chatwoot.setContactBlocked(accountId, contactId, false);
+        await write("block", { kind: "contact", id: contactId, blocked: false }, (frozen) =>
+          chatwoot.setContactBlocked(accountId, frozen.id, frozen.blocked),
+        );
         message = "Contact unblocked. Their new messages will be posted here again.";
         break;
       }
@@ -147,13 +191,13 @@ export async function executeCommand(job: CommandJob, execution: CommandExecutio
         const agents = await chatwoot.listAgents(accountId);
         const assignee = agents.find((agent) => agent.id === action.chatwootUserId);
         if (!assignee) throw new UserError("That agent is not in this Chatwoot account.");
-        await chatwoot.assign(accountId, conversationId, action.chatwootUserId);
+        await assign("assign", action.chatwootUserId);
         // The name Chatwoot shows as the assignee, which is also the post's assignee tag.
         message = `Assigned to ${assignee.name ?? "the agent"}.`;
         break;
       }
       case "unassign":
-        await chatwoot.unassign(accountId, conversationId);
+        await assign("assign", null);
         message = "Unassigned.";
         break;
       case "label": {
@@ -165,29 +209,30 @@ export async function executeCommand(job: CommandJob, execution: CommandExecutio
         );
         if (change === "add") {
           if (!known.includes(label)) throw new UserError(`There is no label "${label}" in this Chatwoot account.`);
-          if (!current.includes(label)) await chatwoot.setLabels(accountId, conversationId, [...current, label]);
+          if (!current.includes(label))
+            await write("labels", { kind: "labels", labels: [...current, label] }, (frozen) =>
+              chatwoot.setLabels(accountId, conversationId, frozen.labels),
+            );
           message = `Label ${label} added.`;
         } else {
           if (!current.includes(label)) throw new UserError(`This conversation has no label "${label}".`);
-          await chatwoot.setLabels(
-            accountId,
-            conversationId,
-            current.filter((name) => name !== label),
+          await write("labels", { kind: "labels", labels: current.filter((name) => name !== label) }, (frozen) =>
+            chatwoot.setLabels(accountId, conversationId, frozen.labels),
           );
           message = `Label ${label} removed.`;
         }
         break;
       }
       case "message": {
-        const limits = settings.config.attachments;
-        const files = [];
+        const attachmentLimits = settings.config.attachments;
+        const files: Array<Awaited<ReturnType<typeof downloadAttachment>>> = [];
         let total = 0;
         for (const [index, file] of action.files.entries()) {
           const downloaded = attachment
             ? await attachment(action, index)
-            : await downloadAttachment(file, limits.maxFileBytes, fetch);
+            : await downloadAttachment(file, attachmentLimits.maxFileBytes, fetch);
           total += downloaded.blob.size;
-          if (total > limits.maxTotalBytes) throw filesTooLarge(limits.maxTotalBytes);
+          if (total > attachmentLimits.maxTotalBytes) throw filesTooLarge(attachmentLimits.maxTotalBytes);
           files.push(downloaded);
         }
         if (!action.private) {
@@ -196,14 +241,24 @@ export async function executeCommand(job: CommandJob, execution: CommandExecutio
           // 24-hour window (Conversations::MessageWindowService at v4.18.0).
           if (conversation.can_reply === false) throw new UserError(CANNOT_REPLY);
           // A public reply to an unassigned conversation assigns it to the replying agent.
-          if (!personAssignee(conversation)) await chatwoot.assign(accountId, conversationId, profile.id);
+          if (!personAssignee(conversation)) await assign("assign", profile.id, "User", conversation);
         }
-        await chatwoot.createMessage(accountId, conversationId, {
-          content: action.content,
-          private: action.private,
-          files,
-          // Only a Chatwoot build that reads it sends from the agent's address.
-          sendAsAgent: settings.config.chatwoot.sendAsAgent && action.sendAsAgent === true,
+        const uploadClient = chatwootClient(
+          settings.config.chatwoot.baseUrl,
+          token,
+          execution.uploadFetch ?? fetch,
+          limits,
+        );
+        await write("message", { kind: "message" }, async () => {
+          const receipt = await uploadClient.createMessage(accountId, conversationId, {
+            content: action.content,
+            private: action.private,
+            files,
+            // Only a Chatwoot build that reads it sends from the agent's address.
+            sendAsAgent: settings.config.chatwoot.sendAsAgent && action.sendAsAgent === true,
+          });
+          if (!receipt) throw new TypeError("Missing Chatwoot message receipt");
+          return { id: receipt.id };
         });
         // Customers see an agent's display name (`available_name`).
         message = action.private ? "Note added." : `Sent to the customer as ${profile.available_name || profile.name}.`;
@@ -211,7 +266,7 @@ export async function executeCommand(job: CommandJob, execution: CommandExecutio
       }
     }
     log.info("command done", { action: action.type, discordUserId: job.discordUserId, accountId, conversationId });
-    if ((job.panel === true && !deferPanel) || action.type === "panel") {
+    if (action.type === "panel") {
       const ticket = `${settings.account(accountId)?.name ?? "Ticket"} #${conversationId}`;
       return {
         content: message ? `✅ ${message}` : ticket,
@@ -222,36 +277,16 @@ export async function executeCommand(job: CommandJob, execution: CommandExecutio
     }
     return { content: `✅ ${message}`, conversationGone: false, confirmed: true };
   } catch (error) {
-    const tracked = typeof retryable === "function";
-    const canRetry = retryable?.() ?? false;
+    if (error instanceof UnknownMutation) return { content: UNKNOWN_RESULT, conversationGone: false };
     if (
-      tracked &&
-      !canRetry &&
-      ((error instanceof ChatwootError && error.status >= 500) ||
-        error instanceof TypeError ||
-        (error instanceof DOMException && ["TimeoutError", "AbortError"].includes(error.name)) ||
-        error instanceof JobDeadlineError)
-    ) {
-      const confirmed = await confirmUnknown?.(chatwoot, action);
-      if (confirmed !== undefined) return { content: `✅ ${confirmed}`, conversationGone: false, confirmed: true };
-      return { content: UNKNOWN_RESULT, conversationGone: false };
-    }
-    if (
-      tracked &&
-      canRetry &&
-      (error instanceof TypeError ||
-        error instanceof BudgetExhaustedError ||
-        error instanceof JobDeadlineError ||
-        (error instanceof DOMException && ["TimeoutError", "AbortError"].includes(error.name)) ||
-        (error instanceof ChatwootError && (error.status === 429 || error.status >= 500)))
+      error instanceof BudgetExhaustedError ||
+      error instanceof JobDeadlineError ||
+      (error instanceof ChatwootError && error.status === 429)
     )
       throw error;
     const gone = error instanceof ConversationGoneError || (error instanceof ChatwootError && error.status === 404);
     return {
-      content:
-        tracked && !canRetry && !(error instanceof ChatwootError) && !(error instanceof UserError)
-          ? UNKNOWN_RESULT
-          : failure(error, job),
+      content: failure(error, job),
       conversationGone: gone,
     };
   }

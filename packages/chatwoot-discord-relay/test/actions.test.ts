@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Budget } from "../../../shared/budget.ts";
-import { type CommandExecution, executeCommand } from "../src/commands/actions.ts";
+import { type CommandExecution, commandPanel, executeCommand } from "../src/commands/actions.ts";
 import type { CommandAction, CommandJob } from "../src/commands/job.ts";
 import { ALICE, BOB, json, mockFetch, on, type Route, testSettings } from "./helpers.ts";
 
@@ -23,30 +23,25 @@ function job(action: CommandAction, discordUserId = ALICE): CommandJob {
 const profile = on("GET", `${cw}/profile`, () =>
   json({ id: 42, name: "Alice Example", available_name: "Alice", email: "alice@example.com", accounts: [{ id: 3 }] }),
 );
-const ok = (method: string, path: string) => on(method, path, () => json({}));
+const ok = (method: string, path: string) =>
+  on(method, path, () =>
+    json(path.endsWith("/messages") ? { id: 900, content: "ok", message_type: 1, private: true } : {}),
+  );
 
 function run(action: CommandAction, ...routes: Route[]) {
   return runWith(settings, action, ...routes);
 }
 
 function runWith(given: typeof settings, action: CommandAction, ...routes: Route[]) {
-  return runWithPreparation(given, action, undefined, undefined, ...routes);
-}
-
-function runWithPreparation(
-  given: typeof settings,
-  action: CommandAction,
-  retryable: CommandExecution["retryable"],
-  confirmUnknown: CommandExecution["confirmUnknown"],
-  ...routes: Route[]
-) {
-  const mock = mockFetch(profile, ...routes);
+  const mock = mockFetch(
+    profile,
+    ...routes,
+    on("GET", conversation, () => json({ id: 15, status: "open", inbox_id: 2 })),
+  );
   const execution: CommandExecution = {
     settings: given,
     fetch: (request) => fetch(request),
   };
-  if (retryable) execution.retryable = retryable;
-  if (confirmUnknown) execution.confirmUnknown = confirmUnknown;
   const outcome = executeCommand(job(action), execution);
   return { outcome, result: outcome.then(({ content }) => content), requests: mock.requests };
 }
@@ -66,14 +61,9 @@ describe("executeCommand", () => {
 
   it("confirms a Chatwoot mutation accepted before a 500 response", async () => {
     let status = "open";
-    const { result } = runWithPreparation(
+    const { result } = runWith(
       settings,
       { type: "status", status: "resolved" },
-      () => false,
-      async (chatwoot) => {
-        const conversation = await chatwoot.getConversation(3, 15);
-        return conversation?.status === "resolved" ? "Resolved." : undefined;
-      },
       on("POST", `${conversation}/toggle_status`, () => {
         status = "resolved";
         return json({ error: "proxy lost the response" }, { status: 502 });
@@ -537,10 +527,11 @@ describe("executeCommand", () => {
 
     it("draws it again after a change from the panel, with what was done", async () => {
       const mock = mockFetch(profile, agents, ok("POST", `${conversation}/assignments`), state, labels);
-      const { content, components } = await executeCommand(
-        { ...job({ type: "assign", chatwootUserId: 43 }), panel: true },
-        { settings, fetch: (request) => fetch(request) },
-      );
+      const command = { ...job({ type: "assign" as const, chatwootUserId: 43 }), panel: true };
+      const result = await executeCommand(command, { settings, fetch: (request) => fetch(request) });
+      const content = result.content;
+      expect(result.components).toBeUndefined();
+      const components = await commandPanel(command, result, settings, (request) => fetch(request));
       expect(content).toBe("✅ Assigned to Bob Example.");
       expect(card(components).parts[0]).toBe("### Acme #15 · Jane <\u200b@123>\n✅ Assigned to Bob Example.");
       expect(mock.requests.some((request) => request.url.pathname.endsWith("/assignments"))).toBe(true);
@@ -602,7 +593,7 @@ describe("executeCommand", () => {
         json({ error: "PG::ConnectionBad secret details" }, { status: 500 }),
       ),
     );
-    expect(await result).toBe("❌ That did not work. Please do it in Chatwoot.");
+    expect(await result).toBe("❌ The result is unknown. Check in Chatwoot before trying again.");
   });
 
   it("gives up on a request that does not answer in time, saying it may have been done", async () => {
@@ -617,6 +608,6 @@ describe("executeCommand", () => {
       settings,
       fetch: new Budget(20, hanging).fetchWith(20),
     });
-    expect(content).toMatch(/^❌ Chatwoot or Discord did not answer in time\. Check in Chatwoot whether it was done/);
+    expect(content).toContain("result is unknown");
   });
 });

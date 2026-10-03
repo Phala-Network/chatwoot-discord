@@ -57,17 +57,15 @@ export async function relayDerived(
   if (!derived || (derived.kind === "response" && conversation.contact.blocked)) return;
   const digest = await sha256(derived.text);
   if (store.postedResponse(accountId, conversation.id, message.id) === digest) return;
-  const key = `derived-revision:${accountId}:${conversation.id}:${message.id}`;
-  const revision = Number(store.get(key) ?? 0);
+  const revision = relay.observe(accountId, conversation.id, `derived:${message.id}`, digest);
   const sendKey = `derived:${message.id}:${revision}`;
+  if (derived.kind === "response") relay.customerEvent(accountId, conversation.id, sendKey);
   const discordId =
     derived.kind === "response"
       ? await relay.postResponse(accountId, conversation, derived.text, sendKey)
       : await relay.notify(accountId, conversation, derived.text, sendKey);
-  if (discordId === undefined) return;
   store.savePostedResponse(accountId, conversation.id, message.id, digest);
-  store.saveDerivedMessage(accountId, conversation.id, message.id, discordId);
-  store.set(key, String(revision + 1));
+  if (discordId) store.saveDerivedMessage(accountId, conversation.id, message.id, discordId);
   log.info(derived.kind === "response" ? "response posted" : "delivery failure posted", {
     accountId,
     conversationId: conversation.id,

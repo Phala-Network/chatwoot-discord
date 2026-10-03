@@ -30,15 +30,15 @@ import { ChatwootError, chatwootClient, toRelayConversation } from "../../../sha
 import { parseJson } from "../../../shared/json.ts";
 import { errorFields, log } from "../../../shared/log.ts";
 import { retryDelay } from "../../../shared/store.ts";
-import { type CommandExecution, commandPanel, executeCommand, statusMessage } from "./commands/actions.ts";
+import { type CommandExecution, commandPanel, executeCommand } from "./commands/actions.ts";
 import { downloadAttachment } from "./commands/attachments.ts";
-import { UNKNOWN_RESULT } from "./commands/common.ts";
 import { text } from "./commands/components.ts";
 import { type HandlerResult, handleInteraction } from "./commands/handler.ts";
-import { type CommandAction, type CommandJob, commandJobSchema } from "./commands/job.ts";
+import { type CommandJob, commandJobSchema } from "./commands/job.ts";
 import { relaysInbox, type Settings } from "./config.ts";
 import { DiscordForum } from "./discord/forum.ts";
 import { DiscordHttpError, DiscordRest } from "./discord/rest.ts";
+import { Effects } from "./effects.ts";
 import type { Env } from "./env.ts";
 import { postQueue } from "./queue.ts";
 import {
@@ -250,14 +250,11 @@ export class Hub extends DurableObject<Env> {
           const saved = resultSchema.safeParse(
             parseJson(this.store.get(`command:${payload.job.interactionId}:result`)),
           );
-          const attempted = this.store.get(`command:${payload.job.interactionId}:started`) !== undefined;
           const result = saved.success
             ? saved.data
-            : attempted
-              ? { content: UNKNOWN_RESULT, conversationGone: false }
-              : Date.now() - job.createdAt > COMMAND_START_DEADLINE_MS
-                ? { content: EXPIRED, conversationGone: false }
-                : await this.runCommand(payload.job, services);
+            : Date.now() - job.createdAt > COMMAND_START_DEADLINE_MS
+              ? { content: EXPIRED, conversationGone: false }
+              : await this.runCommand(payload.job, services);
           this.store.set(`command:${payload.job.interactionId}:result`, JSON.stringify(result), 60 * 60 * 1000);
           this.enqueue({ type: "feedback", job: payload.job, result, expiresAt: job.createdAt + 15 * 60 * 1000 });
           if (result.conversationGone)
@@ -365,49 +362,13 @@ export class Hub extends DurableObject<Env> {
   }
 
   private async runCommand(job: CommandJob, services: ProcessorContext) {
-    const key = `command:${job.interactionId}:started`;
-    const token = services.settings.agentToken(job.discordUserId);
-    let beforeLabels: string[] | undefined;
-    if (token && ["label", "labels"].includes(job.action.type)) {
-      const beforeClient = chatwootClient(
-        services.settings.config.chatwoot.baseUrl,
-        token,
-        services.budget.fetchWith(METADATA_TIMEOUT_MS),
-        this.store,
-      );
-      const before = await beforeClient.getConversation(job.accountId, job.conversationId);
-      if (before) beforeLabels = await beforeClient.conversationLabels(job.accountId, job.conversationId);
-    }
-    let confirmed = false;
-    const fetch = async (request: Request) => {
-      services.budget.checkpoint();
-      if (services.budget.remaining < 1) throw new BudgetExhaustedError();
-      const mutation = request.method !== "GET" && request.method !== "HEAD";
-      if (mutation) {
-        services.budget.requireTime(
-          request.headers.get("content-type")?.startsWith("multipart/form-data")
-            ? TRANSFER_TIMEOUT_MS
-            : METADATA_TIMEOUT_MS,
-        );
-        this.store.set(key, "unknown", 60 * 60 * 1000);
-      }
-      const response = await services.budget.fetchWith(
-        request.headers.get("content-type")?.startsWith("multipart/form-data")
-          ? TRANSFER_TIMEOUT_MS
-          : METADATA_TIMEOUT_MS,
-      )(request);
-      if (mutation && response.status === 429 && !confirmed) this.store.delete(key);
-      if (mutation && response.ok) confirmed = true;
-      return response;
-    };
+    const fetch = services.budget.fetchWith(METADATA_TIMEOUT_MS);
     const execution: CommandExecution = {
       settings: services.settings,
       fetch,
       limits: this.store,
-      retryable: () => this.store.get(key) === undefined,
-      confirmUnknown: (chatwoot, action) =>
-        this.confirmUnknownCommand(chatwoot, job, action, services.settings, beforeLabels),
-      deferPanel: true,
+      effects: new Effects(this.store),
+      uploadFetch: services.budget.fetchWith(TRANSFER_TIMEOUT_MS),
       attachment: async (action, index) => {
         const file = action.files[index];
         if (!file) throw new Error("Missing command attachment");
@@ -424,68 +385,6 @@ export class Hub extends DurableObject<Env> {
       },
     };
     return executeCommand(job, execution);
-  }
-
-  private async confirmUnknownCommand(
-    chatwoot: ReturnType<typeof chatwootClient>,
-    job: CommandJob,
-    action: CommandAction,
-    settings: Settings,
-    beforeLabels: string[] | undefined,
-  ): Promise<string | undefined> {
-    try {
-      const conversation = await chatwoot.getConversation(job.accountId, job.conversationId);
-      if (!conversation) return undefined;
-      switch (action.type) {
-        case "status":
-          if (action.status === "pending" && conversation.inbox_id !== undefined) {
-            const bot = await chatwoot.inboxBot(job.accountId, conversation.inbox_id);
-            if (bot) {
-              if (conversation.meta?.assignee_type !== "AgentBot" || conversation.meta.assignee?.id !== bot.id)
-                return undefined;
-              return "Handed back to the inbox bot.";
-            }
-          }
-          if (String(conversation.status) !== action.status) return undefined;
-          if (action.status === "snoozed" && (conversation.snoozed_until ?? undefined) !== action.snoozedUntil)
-            return undefined;
-          return statusMessage(action.status, action.snoozedUntil);
-        case "priority":
-          if (conversation.priority === action.priority)
-            return action.priority ? `Priority set to ${action.priority}.` : "Priority removed.";
-          return undefined;
-        case "assign":
-          if (conversation.meta?.assignee?.id === action.chatwootUserId && conversation.meta?.assignee_type === "User")
-            return `Assigned to the agent.`;
-          return undefined;
-        case "unassign":
-          return conversation.meta?.assignee ? undefined : "Unassigned.";
-        case "label": {
-          if (beforeLabels === undefined) return undefined;
-          const labels = await chatwoot.conversationLabels(job.accountId, job.conversationId);
-          const expected =
-            action.change === "add"
-              ? [...new Set([...beforeLabels, action.label])]
-              : beforeLabels.filter((label) => label !== action.label);
-          if (sameLabels(labels, expected))
-            return action.change === "add" ? `Label ${action.label} added.` : `Label ${action.label} removed.`;
-          return undefined;
-        }
-        case "labels": {
-          if (beforeLabels === undefined) return undefined;
-          const labels = await chatwoot.conversationLabels(job.accountId, job.conversationId);
-          const kinds = new Set(settings.config.router?.keepLabels ?? []);
-          const expected = [...new Set([...action.labels, ...beforeLabels.filter((label) => kinds.has(label))])];
-          if (sameLabels(labels, expected))
-            return action.labels.length > 0 ? `Label set to ${action.labels.join(", ")}.` : "Labels removed.";
-          return undefined;
-        }
-        default:
-          return undefined;
-      }
-    } catch {
-      return undefined;
-    }
   }
 
   private async syncAfterCommand(
@@ -655,8 +554,4 @@ function requiredBudget(payload: JobPayload): number {
 
 function answerKey(answerId: string): string {
   return `answer:${answerId}`;
-}
-
-function sameLabels(actual: string[], expected: string[]): boolean {
-  return actual.length === expected.length && [...actual].sort().join("\0") === [...expected].sort().join("\0");
 }

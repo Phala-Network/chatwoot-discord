@@ -42,28 +42,13 @@ export class UnknownThreadError extends Error {
   }
 }
 
-/** Thrown when Discord may have accepted a message but did not return its receipt. */
-export class UnknownSendError extends Error {
-  readonly status: number | undefined;
-
-  constructor(cause?: unknown) {
-    super("Discord send outcome is unknown; automatic replay is prohibited");
-    this.name = "UnknownSendError";
-    this.status =
-      typeof cause === "object" && cause !== null && "status" in cause && typeof cause.status === "number"
-        ? cause.status
-        : undefined;
-  }
-}
+export type SendOutcome =
+  | { state: "confirmed"; channelId: string; messageId: string }
+  | { state: "unknown" | "rejected" };
 
 export interface ForumClient {
   /** Executes the forum's webhook. Without `threadId`, `message.thread_name` starts a new post. */
-  execute(
-    forumChannelId: string,
-    message: WebhookMessage,
-    threadId?: string,
-    sendKey?: string,
-  ): Promise<{ channelId: string; messageId: string }>;
+  execute(forumChannelId: string, message: WebhookMessage, threadId?: string, sendKey?: string): Promise<SendOutcome>;
   /**
    * Modifies a post of the forum. Discord rejects changes to an archived post unless the same
    * request unarchives it. Throws UnknownThreadError if the post no longer exists.
@@ -115,6 +100,9 @@ export interface PostFields {
 }
 
 export interface RelayStore {
+  get(key: string): string | undefined;
+  set(key: string, value: string, ttlMs?: number): void;
+  delete(key: string): void;
   /** What is recorded about the conversation's post; a field is undefined until it is set. */
   conversation(
     accountId: number,
@@ -186,7 +174,7 @@ export class Relay {
    * deleted and empty messages, and messages from a blocked contact are not relayed. A message
    * that notifies leaves an announcement pending (see `announceAssignee`).
    */
-  async relay(message: RelayMessage): Promise<void> {
+  async relay(message: RelayMessage): Promise<boolean | undefined> {
     if (!RELAYED_TYPES.has(message.messageType) || message.deleted) return;
     // A blocked contact's messages are muted in Chatwoot (no notifications); keep them out of Discord too.
     if (message.messageType === "incoming" && message.conversation.contact.blocked) return;
@@ -196,7 +184,11 @@ export class Relay {
     const { store } = this.options;
     const accountId = message.account.id;
     const conversation = message.conversation;
-    const parts = this.parts(message, text);
+    const planKey = `plan:${accountId}:${conversation.id}:${message.id}`;
+    const saved = store.get(planKey);
+    const parts: WebhookMessage[] = saved ? JSON.parse(saved) : this.parts(message, text);
+    if (!saved) store.set(planKey, JSON.stringify(parts));
+    if (message.messageType === "incoming") this.customerEvent(accountId, conversation.id, `message:${message.id}`);
     let threadId = store.conversation(accountId, conversation.id)?.threadId;
     if (threadId) {
       try {
@@ -208,13 +200,8 @@ export class Relay {
       }
     }
     if (!threadId) {
-      try {
-        threadId = await this.createPost(message);
-      } catch (error) {
-        if (!(error instanceof UnknownSendError)) throw error;
-        this.logUnknownSend(accountId, conversation.id, message.id);
-        return;
-      }
+      threadId = await this.createPost(message);
+      if (!threadId) return false;
       if (!(await this.post(message, parts, threadId))) return;
     }
     this.unarchived(accountId, conversation);
@@ -231,8 +218,13 @@ export class Relay {
     const { store } = this.options;
     const post = store.conversation(accountId, conversationId);
     // A part of a customer message stands for the whole message: its first part.
-    const source = store.firstPart(accountId, conversationId, sourceId) ?? sourceId;
-    if (!post?.threadId || !isAfter(answerId, post.answerId) || !answersLatest(source, post.customerMessageId)) {
+    const source = store.firstPart(accountId, conversationId, sourceId);
+    if (
+      !source ||
+      !post?.threadId ||
+      !isAfter(answerId, post.answerId) ||
+      !answersLatest(source, post.customerMessageId)
+    ) {
       return;
     }
     store.updateConversation(accountId, conversationId, { answerId, answerSourceId: source, cardCovered: 1 });
@@ -254,10 +246,9 @@ export class Relay {
         accountId,
         conversation,
         { ...notice, allowed_mentions: { parse: [], users: [discordId] } },
-        `assignee:${store.conversation(accountId, conversation.id)?.assigneeNoticeId ?? "initial"}`,
+        `assignee:${this.observe(accountId, conversation.id, "assignee", assigneeKey(conversation))}`,
       );
-      if (posted === undefined) return;
-      store.updateConversation(accountId, conversation.id, { assigneeNoticeId: posted });
+      if (posted) store.updateConversation(accountId, conversation.id, { assigneeNoticeId: posted });
     }
     store.updateConversation(accountId, conversation.id, {
       announcedAssignee: assigneeKey(conversation),
@@ -446,29 +437,31 @@ export class Relay {
     const { store, forum } = this.options;
     const accountId = message.account.id;
     const conversationId = message.conversation.id;
-    const forumChannelId = this.forumOf(accountId);
-    const fromCustomer = message.messageType === "incoming";
     const posted = store.postedParts(accountId, conversationId, message.id);
-    if (fromCustomer && posted[0]) this.customerWrote(accountId, conversationId, posted[0]);
-    for (let part = posted.length; part < parts.length; part += 1) {
-      const payload = parts[part];
-      if (!payload) break;
-      let messageId: string;
-      try {
-        ({ messageId } = await forum.execute(
-          forumChannelId,
-          payload,
-          threadId,
-          `message:${accountId}:${conversationId}:${message.id}:${part}:${threadId}`,
-        ));
-      } catch (error) {
-        if (!(error instanceof UnknownSendError)) throw error;
-        this.logUnknownSend(accountId, conversationId, message.id, threadId, part);
-        return false;
+    let incomplete = false;
+    for (const [part, frozen] of parts.entries()) {
+      if (posted[part]) {
+        if (part === 0 && message.messageType === "incoming")
+          this.customerWrote(accountId, conversationId, posted[part]);
+        continue;
       }
-      store.savePostedPart(accountId, conversationId, message.id, part, messageId);
+      const payload = incomplete ? { ...frozen, content: frozen.content?.replace(/\n-#.*$/, "") } : frozen;
+      this.unarchived(accountId, message.conversation);
       store.updateConversation(accountId, conversationId, { cardCovered: 1 });
-      if (fromCustomer && part === 0) this.customerWrote(accountId, conversationId, messageId);
+      const outcome = await forum.execute(
+        this.forumOf(accountId),
+        payload,
+        threadId,
+        `message:${accountId}:${conversationId}:${message.id}:${part}:${threadId}`,
+      );
+      if (outcome.state !== "confirmed") {
+        incomplete = true;
+        this.logUnknownSend(accountId, conversationId, message.id, threadId, part);
+        continue;
+      }
+      store.savePostedPart(accountId, conversationId, message.id, part, outcome.messageId);
+      if (message.messageType === "incoming" && part === 0)
+        this.customerWrote(accountId, conversationId, outcome.messageId);
     }
     return true;
   }
@@ -478,7 +471,7 @@ export class Relay {
    * itself follows as the first reply. Bots act on replies but not on a forum post's opening
    * message, so this lets the first customer message reach a triage bot like any other.
    */
-  private async createPost(message: RelayMessage): Promise<string> {
+  private async createPost(message: RelayMessage): Promise<string | undefined> {
     const { store, forum, frontendUrl } = this.options;
     const accountId = message.account.id;
     const conversation = message.conversation;
@@ -496,12 +489,9 @@ export class Relay {
     };
     const tags = this.postTags(accountId, conversation);
     if (tags.length > 0) post.applied_tags = tags;
-    const { channelId: threadId } = await forum.execute(
-      target.forumChannelId,
-      post,
-      undefined,
-      `post:${accountId}:${conversation.id}`,
-    );
+    const outcome = await forum.execute(target.forumChannelId, post, undefined, `post:${accountId}:${conversation.id}`);
+    if (outcome.state !== "confirmed") return undefined;
+    const threadId = outcome.channelId;
     store.updateConversation(accountId, conversation.id, {
       threadId,
       titleSubject: subject,
@@ -528,28 +518,23 @@ export class Relay {
     const { store, forum } = this.options;
     const threadId = store.conversation(accountId, conversation.id)?.threadId;
     if (!threadId) return undefined;
-    let messageId: string;
+    this.unarchived(accountId, conversation);
+    store.updateConversation(accountId, conversation.id, { cardCovered: 1 });
     try {
-      ({ messageId } = await forum.execute(
+      const outcome = await forum.execute(
         this.forumOf(accountId),
         message,
         threadId,
         `notice:${accountId}:${conversation.id}:${threadId}:${sendKey}`,
-      ));
+      );
+      if (outcome.state === "confirmed") return outcome.messageId;
+      this.logUnknownSend(accountId, conversation.id, undefined, threadId);
+      return undefined;
     } catch (error) {
-      if (error instanceof UnknownThreadError) {
-        store.forgetThread(accountId, conversation.id);
-        return undefined;
-      }
-      if (error instanceof UnknownSendError) {
-        this.logUnknownSend(accountId, conversation.id, undefined, threadId);
-        return undefined;
-      }
-      throw error;
+      if (!(error instanceof UnknownThreadError)) throw error;
+      store.forgetThread(accountId, conversation.id);
+      return undefined;
     }
-    this.unarchived(accountId, conversation);
-    store.updateConversation(accountId, conversation.id, { cardCovered: 1 });
-    return messageId;
   }
 
   private logUnknownSend(
@@ -598,6 +583,7 @@ export class Relay {
     const forumChannelId = this.forumOf(accountId);
     const recorded = store.conversation(accountId, conversationId);
     const card: WebhookMessage = { flags: MessageFlags.IsComponentsV2, components };
+    if (store.get(`card:${accountId}:${conversationId}:${threadId}:unknown`)) return;
     const cardId = recorded?.cardId;
     if (cardId && recorded?.cardCovered !== 1) {
       if (await forum.editMessage(forumChannelId, threadId, cardId, card)) return;
@@ -605,20 +591,27 @@ export class Relay {
     if (cardId) {
       await forum.deleteMessage(forumChannelId, threadId, cardId);
     }
-    const cardKey = `card:${accountId}:${conversationId}:${threadId}:${cardId ?? "initial"}:${JSON.stringify(components)}`;
-    try {
-      const { messageId } = await forum.execute(
-        forumChannelId,
-        { ...card, username: SYSTEM_USERNAME, avatar_url: avatars.chatwoot, allowed_mentions: { parse: [] } },
-        threadId,
-        cardKey,
-      );
-      store.updateConversation(accountId, conversationId, { cardId: messageId, cardCovered: 0 });
-    } catch (error) {
-      if (!(error instanceof UnknownSendError)) throw error;
+    const key = `card:${accountId}:${conversationId}:${threadId}`;
+    if (store.get(`${key}:unknown`)) return;
+    let revision = Number(store.get(`${key}:revision`) ?? 0);
+    if (!store.get(`${key}:placing`)) {
+      revision += 1;
+      store.set(`${key}:revision`, String(revision));
+      store.set(`${key}:placing`, "1");
+    }
+    const outcome = await forum.execute(
+      forumChannelId,
+      { ...card, username: SYSTEM_USERNAME, avatar_url: avatars.chatwoot, allowed_mentions: { parse: [] } },
+      threadId,
+      `${key}:${revision}`,
+    );
+    if (outcome.state === "confirmed") {
+      store.updateConversation(accountId, conversationId, { cardId: outcome.messageId, cardCovered: 0 });
+      store.delete(`${key}:placing`);
+    } else {
+      store.set(`${key}:unknown`, "1");
+      store.updateConversation(accountId, conversationId, { cardCovered: 0 });
       this.logUnknownSend(accountId, conversationId, undefined, threadId);
-      // The guard prevents replaying this card. Keep a marker so sweeps do not submit it again.
-      store.updateConversation(accountId, conversationId, { cardId: "unknown", cardCovered: 0 });
     }
   }
 
@@ -649,6 +642,28 @@ export class Relay {
       assignee: assignee ? (assignee.name ?? `#${assignee.id ?? "?"}`) : null,
       labels: conversation.labels,
     };
+  }
+
+  observe(accountId: number, conversationId: number, kind: string, value: string): number {
+    const key = `observed:${accountId}:${conversationId}:${kind}`;
+    const old: { value: string; revision: number } | undefined =
+      JSON.parse(this.options.store.get(key) ?? "null") ?? undefined;
+    if (old?.value === value) return old.revision;
+    const revision = (old?.revision ?? 0) + 1;
+    this.options.store.set(key, JSON.stringify({ value, revision }));
+    return revision;
+  }
+
+  customerEvent(accountId: number, conversationId: number, event: string): void {
+    const key = `customer:${accountId}:${conversationId}`;
+    if (this.options.store.get(key) === event) return;
+    this.options.store.set(key, event);
+    this.options.store.updateConversation(accountId, conversationId, {
+      answerId: "",
+      answerSourceId: "",
+      customerMessageId: "",
+      cardCovered: 1,
+    });
   }
 
   /** Records the customer's latest message (Discord message `messageId`), which only moves forward. */
@@ -684,5 +699,5 @@ function isAfter(id: string, other: string | undefined): boolean {
  * starts at `latest`: the source is that message (any of its parts) or later.
  */
 function answersLatest(sourceId: string, latest: string | undefined): boolean {
-  return !latest || BigInt(sourceId) >= BigInt(latest);
+  return !!latest && BigInt(sourceId) >= BigInt(latest);
 }

@@ -3,7 +3,7 @@
 import type { RelayMessage } from "../../../shared/types.ts";
 import { buildSettings, configSchema, type Settings, secretsSchema } from "../src/config.ts";
 import type { ForumClient, PostFields, RelayStore, WebhookMessage } from "../src/relay/relay.ts";
-import { UnknownSendError, UnknownThreadError } from "../src/relay/relay.ts";
+import { UnknownThreadError } from "../src/relay/relay.ts";
 
 export const ALICE = "100000000000000011";
 export const BOB = "100000000000000012";
@@ -47,6 +47,15 @@ export function snowflake(): string {
 }
 
 export class MemoryStore implements RelayStore {
+  get(key: string) {
+    return this.decisions.get(key);
+  }
+  set(key: string, value: string) {
+    this.decisions.set(key, value);
+  }
+  delete(key: string) {
+    this.decisions.delete(key);
+  }
   rows = new Map<string, Partial<PostFields>>();
   parts = new Map<string, string[]>();
   counters = new Map<string, number>();
@@ -149,7 +158,7 @@ export class FakeForum implements ForumClient {
   constructor(public guildId = "100000000000000044") {}
 
   async execute(_forum: string, payload: WebhookMessage, threadId?: string, sendKey?: string) {
-    if (sendKey && this.unknownSends.has(sendKey)) throw new UnknownSendError();
+    if (sendKey && this.unknownSends.has(sendKey)) return { state: "unknown" as const };
     if (threadId && this.failAfter !== undefined) {
       if (this.failAfter === 0) {
         this.failAfter = undefined;
@@ -169,9 +178,9 @@ export class FakeForum implements ForumClient {
     if (threadId && this.loseAnswer) {
       this.loseAnswer = false;
       if (sendKey) this.unknownSends.add(sendKey);
-      throw new UnknownSendError();
+      return { state: "unknown" as const };
     }
-    return { channelId: threadId ?? `thread-${this.calls.length}`, messageId };
+    return { state: "confirmed" as const, channelId: threadId ?? `thread-${this.calls.length}`, messageId };
   }
 
   async updateThread(_forum: string, threadId: string, patch: ThreadPatch) {

@@ -36,6 +36,45 @@ const triage = { userId: TRIAGE, name: "Triage bot", perConversationPerHour: 5, 
 const resolved = { status: "resolved" };
 const tagsFor = (status: string) => ({ archived: false, applied_tags: ["t-acme", `t-${status}`] });
 
+it("keeps an unknown card unaddressable while later body, tags and archive converge", async () => {
+  const { relay, forum, store } = relayWith({ card: ticketCard });
+  await relay.relay(message());
+  forum.loseAnswer = true;
+  await relay.sync(3, message().conversation, "thread-1");
+  await relay.relay(message({ id: 102, conversation: resolved }));
+  await relay.sync(3, message({ conversation: resolved }).conversation, "thread-1");
+  expect(forum.calls.filter(([, body]) => body.components)).toHaveLength(1);
+  expect(forum.edits).toEqual([]);
+  expect(forum.deleted).toEqual([]);
+  expect(store.conversation(3, 12)?.cardId).toBeUndefined();
+  expect(forum.archived.has("thread-1")).toBe(true);
+});
+
+it("continues the frozen unsent tail after an unknown chunk without calling triage", async () => {
+  const { relay, forum } = relayWith({ triage });
+  await relay.relay(message({ id: 100 }));
+  const start = forum.calls.length;
+  forum.loseAnswer = true;
+  const incoming = message({ content: "x".repeat(5000) });
+  await relay.relay(incoming);
+  await relay.relay(incoming);
+  const tail = forum.calls.slice(start);
+  expect(tail).toHaveLength(3);
+  expect(tail.at(-1)?.[1].content).not.toContain(`<@${TRIAGE}>`);
+});
+
+it("invalidates a draft before a customer's unknown send and rearchives the thread", async () => {
+  const { relay, forum } = relayWith({ card: ticketCard });
+  await relay.relay(message());
+  relay.answered(3, 12, snowflake(), forum.ids.at(-1) ?? "");
+  await relay.sync(3, message({ conversation: resolved }).conversation, "thread-1");
+  forum.loseAnswer = true;
+  await relay.relay(message({ id: 102, conversation: resolved }));
+  await relay.sync(3, message({ conversation: resolved }).conversation, "thread-1");
+  expect(JSON.stringify(forum.calls.at(-1)?.[1].components)).not.toContain("ticket:draft:");
+  expect(forum.archived.has("thread-1")).toBe(true);
+});
+
 describe("Relay", () => {
   let forum: FakeForum;
   let relay: Relay;
