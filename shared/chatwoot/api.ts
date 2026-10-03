@@ -98,6 +98,7 @@ const emailSchema = z.object({
 
 const messageSchema = z.object({
   id: z.number(),
+  conversation_id: z.number().optional(),
   content: text,
   message_type: z.number(),
   content_type: text,
@@ -446,7 +447,11 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
      * multipart/form-data body; the generated type renders its `attachments[]` binaries as
      * strings, so the serializer appends the files itself.
      */
-    createMessage(accountId: number, conversationId: number, message: NewMessage): Promise<void> {
+    async createMessage(
+      accountId: number,
+      conversationId: number,
+      message: NewMessage,
+    ): Promise<ChatwootMessage | undefined> {
       const fields = {
         content: message.content,
         message_type: "outgoing",
@@ -463,14 +468,17 @@ export function chatwootClient(baseUrl: string, token: string, fetch: Fetch) {
         for (const file of message.files) form.append("attachments[]", file.blob, file.filename);
         return form;
       };
-      return ensureOk(
-        "create message",
-        client.POST("/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages", {
+      const { data, response } = await client.POST(
+        "/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages",
+        {
           params: { path: { account_id: accountId, conversation_id: conversationId } },
           body: fields,
           ...(message.files.length === 0 ? {} : { bodySerializer: () => multipart(fields) }),
-        }),
+        },
       );
+      if (!response.ok) throw new ChatwootError(response.status, "create message", notFound(response));
+      const parsed = messageSchema.safeParse(data);
+      return parsed.success ? parsed.data : undefined;
     },
   };
 }

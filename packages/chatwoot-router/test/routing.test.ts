@@ -82,7 +82,7 @@ describe("native bot turns", () => {
     },
   );
 
-  it.each(["open", "snoozed", "resolved", "person", "blocked", "unlinked", "other-bot"])(
+  it.each(["open", "snoozed", "resolved", "person", "blocked", "other-bot"])(
     "leaves %s conversations alone",
     async (reason) => {
       const ticket: Ticket = {};
@@ -93,7 +93,10 @@ describe("native bot turns", () => {
       }
       if (reason === "blocked") ticket.blocked = true;
       if (reason === "unlinked") ticket.bot = null;
-      if (reason === "other-bot") ticket.bot = { id: 99, account_id: 1 };
+      if (reason === "other-bot") {
+        ticket.assignee = { id: 99 };
+        ticket.assigneeType = "AgentBot";
+      }
       const mock = world(ticket);
       await routeConversation(context(), 1, 5);
       expect(mock.requests.filter((request) => request.method === "POST")).toEqual([]);
@@ -124,7 +127,8 @@ describe("native bot turns", () => {
       await routeConversation(context(new MemoryStore(), KINDS), 1, 5);
       expect(
         mock.requests.filter((request) => request.method === "POST" && request.url.hostname === "chatwoot.example.com"),
-      ).toEqual([]);
+      ).toHaveLength(change === "unlinked" ? 1 : 0);
+      if (change === "unlinked") expect(ticket.status).toBe("open");
     },
   );
 
@@ -287,7 +291,7 @@ describe("native bot turns", () => {
     expect(sent(mock.requests, "POST", `${CW}/assignments`)).toHaveLength(0);
   });
 
-  it.each(["labels", "assignments", "toggle_status", "messages"])(
+  it.each(["labels", "assignments", "toggle_status"])(
     "recovers a lost %s response without duplicate observable effects",
     async (operation) => {
       const mock = world(
@@ -329,10 +333,120 @@ describe("native bot turns", () => {
   it("does not resend a failed or unknown canned reply, even when it never arrived", async () => {
     const mock = world({ fail: { messages: 1 } }, { owner: ["cloud", 1], kind: ["bounty", 1] });
     const ctx = context(new MemoryStore(), KINDS);
-    await expect(routeConversation(ctx, 1, 5)).rejects.toThrow("503");
+    await routeConversation(ctx, 1, 5);
     await routeConversation(ctx, 1, 5);
     expect(sent(mock.requests, "POST", `${CW}/messages`)).toHaveLength(1);
+    expect(mock.ticket.status).toBe("open");
+    expect(sent(mock.requests, "POST", `${CW}/toggle_status`).map((request) => JSON.parse(request.body))).toEqual([
+      { status: "open" },
+    ]);
+  });
+
+  it("hands off a lost reply response even if Chatwoot committed the message", async () => {
+    const mock = world({ lose: { messages: 1 } }, { owner: ["cloud", 1], kind: ["bounty", 1] });
+    const ctx = context(new MemoryStore(), KINDS);
+    await routeConversation(ctx, 1, 5);
+    await routeConversation(ctx, 1, 5);
+    expect(mock.ticket.status).toBe("open");
+    expect(sent(mock.requests, "POST", `${CW}/messages`)).toHaveLength(1);
+    expect(sent(mock.requests, "POST", `${CW}/toggle_status`).map((request) => JSON.parse(request.body))).toEqual([
+      { status: "open" },
+    ]);
+  });
+
+  it.each(["historical relay", "restart after POST"])("uses a confirmed %s reply across turns", async (source) => {
+    const mock = world(
+      {
+        messages: [
+          { id: 1, message_type: 1, private: false, sender: { type: "agent_bot", id: 1 } },
+          activity(2),
+          incoming(3, "A new report"),
+        ],
+      },
+      { owner: ["cloud", 1], kind: ["bounty", 1] },
+    );
+    const ctx = context(new MemoryStore(), KINDS);
+    if (source === "restart after POST") ctx.store.set("reply:1:5", "attempted");
+    await routeConversation(ctx, 1, 5);
     expect(mock.ticket.status).toBe("resolved");
+    expect(sent(mock.requests, "POST", `${CW}/messages`)).toEqual([]);
+    expect(sent(mock.requests, "GET", "chatwoot.example.com/api/v1/accounts/1/canned_responses")).toEqual([]);
+  });
+
+  it.each(["failed", "deleted", "no sender", "no visibility", "no bot id", "bounded", "read failure"])(
+    "hands off %s reply history without sending or resolving",
+    async (reason) => {
+      const reply = { id: 1, message_type: 1, private: false, sender: { type: "agent_bot", id: 1 } };
+      const messages = [reply, activity(2), incoming(3)];
+      if (reason === "bounded")
+        messages.splice(
+          1,
+          2,
+          ...Array.from({ length: 100 }, (_, i) => ({ id: i + 2, message_type: 2 })),
+          activity(102),
+          incoming(103),
+        );
+      const ticket: Ticket = { messages };
+      if (reason === "failed") Object.assign(reply, { status: "failed" });
+      if (reason === "deleted") Object.assign(reply, { content_attributes: { deleted: true } });
+      if (reason === "no sender") Object.assign(reply, { sender: null });
+      if (reason === "no visibility") Object.assign(reply, { private: null });
+      if (reason === "no bot id") Object.assign(reply, { sender: { type: "agent_bot" } });
+      if (reason === "read failure")
+        ticket.during = (operation) => {
+          if (operation === "labels") ticket.fail = { "messages-read": 1 };
+        };
+      const mock = world(ticket, { owner: ["cloud", 1], kind: ["bounty", 1] });
+      await routeConversation(context(new MemoryStore(), KINDS), 1, 5);
+      expect(mock.ticket.status).toBe("open");
+      expect(sent(mock.requests, "POST", `${CW}/messages`)).toEqual([]);
+    },
+  );
+
+  it.each(["private", "different bot", "template", "user with same id"])(
+    "does not count a %s message as a brand bot reply",
+    async (reason) => {
+      const reply = { id: 1, message_type: 1, private: false, sender: { type: "agent_bot", id: 1 } };
+      if (reason === "private") reply.private = true;
+      if (reason === "different bot") reply.sender.id = 2;
+      if (reason === "template") reply.message_type = 3;
+      if (reason === "user with same id") reply.sender.type = "user";
+      const mock = world({ messages: [reply, activity(2), incoming(3)] }, { owner: ["cloud", 1], kind: ["bounty", 1] });
+      await routeConversation(context(new MemoryStore(), KINDS), 1, 5);
+      expect(mock.ticket.status).toBe("resolved");
+      expect(sent(mock.requests, "POST", `${CW}/messages`)).toHaveLength(1);
+    },
+  );
+
+  it("finds an older brand reply on the fifth page beyond the current turn", async () => {
+    const mock = world(
+      {
+        messages: [
+          { id: 1, message_type: 1, private: false, sender: { type: "agent_bot", id: 1 } },
+          ...Array.from({ length: 80 }, (_, i) => ({ id: i + 2, message_type: 2 })),
+          activity(82),
+          incoming(83),
+        ],
+      },
+      { owner: ["cloud", 1], kind: ["bounty", 1] },
+    );
+    await routeConversation(context(new MemoryStore(), KINDS), 1, 5);
+    expect(mock.ticket.status).toBe("resolved");
+    expect(sent(mock.requests, "POST", `${CW}/messages`)).toEqual([]);
+  });
+
+  it("hands off a successful POST whose response does not confirm the brand reply", async () => {
+    const mock = world(
+      {
+        during: (operation) => {
+          if (operation === "messages") Object.assign(mock.ticket.messages?.at(-1) ?? {}, { sender: null });
+        },
+      },
+      { owner: ["cloud", 1], kind: ["bounty", 1] },
+    );
+    await routeConversation(context(new MemoryStore(), KINDS), 1, 5);
+    expect(mock.ticket.status).toBe("open");
+    expect(sent(mock.requests, "POST", `${CW}/messages`)).toHaveLength(1);
   });
 
   it("hands off immediately on a missing canned response, and keeps retrying a failed handoff", async () => {
@@ -704,7 +818,7 @@ describe("native bot turns", () => {
     },
   );
 
-  it("honors an old release's reply record across a new turn", async () => {
+  it("hands off an old attempt record without a confirmed message", async () => {
     const mock = world({}, { owner: ["cloud", 1], kind: ["startup", 1] });
     const ctx = context(new MemoryStore(), KINDS);
     ctx.store.set("reply:1:5", JSON.stringify({ inputId: 0, handled: 0, kind: "startup" }));

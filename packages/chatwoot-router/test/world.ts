@@ -87,12 +87,12 @@ export function world(ticket: Ticket = {}, answers: Answers = { owner: ["cloud",
     if (counts) counts[operation] = (counts[operation] ?? 0) - 1;
     return true;
   };
-  const mutation = (operation: string, apply: (request: Recorded) => void) =>
+  const mutation = (operation: string, apply: (request: Recorded) => unknown) =>
     on("POST", `${CW}/${operation}`, (request) => {
       if (fail(operation)) return json({}, { status: 503 });
-      apply(request);
+      const result = apply(request);
       ticket.during?.(operation);
-      return json({}, { status: fail(operation, true) ? 503 : 200 });
+      return json(result ?? {}, { status: fail(operation, true) ? 503 : 200 });
     });
   return {
     ticket,
@@ -152,12 +152,16 @@ export function world(ticket: Ticket = {}, answers: Answers = { owner: ["cloud",
         ticket.messages?.push(activity((ticket.messages.at(-1)?.id ?? 0) + 1, ticket.status));
       }),
       mutation("messages", (request) => {
-        ticket.messages?.push({
-          id: (ticket.messages.at(-1)?.id ?? 0) + 1,
+        const message = {
+          id: (ticket.messages?.at(-1)?.id ?? 0) + 1,
+          conversation_id: 5,
           content: JSON.parse(request.body).content,
           message_type: 1,
-          sender: { type: "agent_bot" },
-        });
+          private: false,
+          sender: { type: "agent_bot", id: 1 },
+        };
+        ticket.messages?.push(message);
+        return message;
       }),
       on("POST", endpoint, () => {
         if (fail("jev")) return json({}, { status: 503 });

@@ -11,7 +11,9 @@ import {
   toRelayConversation,
 } from "../../../shared/chatwoot/api.ts";
 import { parseJson } from "../../../shared/json.ts";
+import { errorFields, log } from "../../../shared/log.ts";
 import type { Settings } from "./config.ts";
+import { confirmedReply, replyHistory } from "./reply.ts";
 import { expectActivity, observeStatus, readTurn, requestHandoff } from "./turn.ts";
 
 /** Jev's answer when no owner fits; also the reserved route name. */
@@ -120,7 +122,22 @@ export async function routeConversation(
     const conversation = toRelayConversation(conversationId, raw);
     if (conversation.contact.blocked || conversation.assignee) return;
     if (raw.meta?.assignee && (raw.meta.assignee_type !== "AgentBot" || raw.meta.assignee.id !== botId)) return;
-    if ((await chatwoot.inboxBot(accountId, raw.inbox_id))?.id !== botId) return;
+    if ((await chatwoot.inboxBot(accountId, raw.inbox_id))?.id !== botId) {
+      // Disconnect is level-triggered: native bot handoff also clears ai_assignee.
+      // Re-read ownership immediately before the mutation; never touch another bot or person.
+      if (raw.meta?.assignee_type === "AgentBot" && raw.meta.assignee?.id === botId) {
+        const latest = await chatwoot.getConversation(accountId, conversationId);
+        if (
+          latest?.status === "pending" &&
+          latest.inbox_id === raw.inbox_id &&
+          latest.meta?.assignee_type === "AgentBot" &&
+          latest.meta.assignee?.id === botId &&
+          !toRelayConversation(conversationId, latest).contact.blocked
+        )
+          await bot.setStatus(accountId, conversationId, { status: "open" });
+      }
+      return;
+    }
     observeStatus(store, accountId, conversationId, "pending");
     return { raw, conversation };
   };
@@ -204,14 +221,30 @@ export async function routeConversation(
   ];
   if (labels.length !== current.conversation.labels.length) await bot.setLabels(accountId, conversationId, labels);
   const replyKey = `reply:${accountId}:${conversationId}`;
-  if (kind?.cannedResponse && store.get(replyKey) === undefined) {
-    const content = await chatwoot.cannedResponse(accountId, kind.cannedResponse);
-    if (!content?.trim()) return handoff();
-    current = await fresh();
-    if (current === "defer" || !current) return current;
-    if (current.handoff) return handoff(current);
-    store.set(replyKey, "attempted");
-    await bot.createMessage(accountId, conversationId, { content, private: false, files: [] });
+  if (kind?.cannedResponse) {
+    let history: Awaited<ReturnType<typeof replyHistory>>;
+    try {
+      history = await replyHistory(chatwoot, accountId, conversationId, botId);
+    } catch (error) {
+      log.warn("reply history unavailable; handing off", { accountId, conversationId, ...errorFields(error) });
+      return handoff();
+    }
+    if (history === "unknown" || (history === "complete-none" && store.get(replyKey) !== undefined)) return handoff();
+    if (history === "complete-none") {
+      const content = await chatwoot.cannedResponse(accountId, kind.cannedResponse);
+      if (!content?.trim()) return handoff();
+      current = await fresh();
+      if (current === "defer" || !current) return current;
+      if (current.handoff) return handoff(current);
+      store.set(replyKey, "attempted");
+      try {
+        const message = await bot.createMessage(accountId, conversationId, { content, private: false, files: [] });
+        if (!confirmedReply(message, botId) || message?.conversation_id !== conversationId) return handoff();
+      } catch (error) {
+        log.warn("reply creation unconfirmed; handing off", { accountId, conversationId, ...errorFields(error) });
+        return handoff();
+      }
+    }
   }
   if (assignee !== undefined && !kind?.status) {
     // AssignmentService silently assigns nobody for a user outside this account.
