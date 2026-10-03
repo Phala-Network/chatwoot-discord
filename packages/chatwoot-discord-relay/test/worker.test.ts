@@ -2086,6 +2086,7 @@ it.each(["digest", "registry"] as const)(
     world.mock.spy.mockRestore();
     let blocked = false;
     let feedback = false;
+    let discoveryAttempts = 0;
     let release = () => {};
     const gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -2099,6 +2100,7 @@ it.each(["digest", "registry"] as const)(
           ? "chatwoot.example.com/api/v1/accounts/3/conversations"
           : "discord.com/api/v10/applications/@me",
         async () => {
+          if (kind === "registry" && ++discoveryAttempts === 1) return json({ retry_after: 0.05 }, { status: 429 });
           blocked = true;
           await gate;
           return kind === "digest" ? json({ data: { payload: [] } }) : json({ id: "100000000000000001" });
@@ -2129,12 +2131,20 @@ it.each(["digest", "registry"] as const)(
         } else {
           const executor = new ForumRegistry(state, env);
           await executor.lookup(FORUM);
-          await executor.alarm();
+          // This harness disables automatic alarms. Drive any persisted permit deferral
+          // before the slow read, just as the real Registry would resume its next alarm.
+          await vi.waitFor(
+            async () => {
+              await executor.alarm();
+              expect(blocked).toBe(true);
+            },
+            { timeout: 3000 },
+          );
         }
       },
     );
     try {
-      await vi.waitFor(() => expect(blocked).toBe(true));
+      await vi.waitFor(() => expect(blocked).toBe(true), { timeout: 3000 });
       await enqueueCommand({
         interactionId: `fault-${kind}`,
         applicationId: "100000000000000001",

@@ -12,6 +12,8 @@ export default defineConfig({
   test: {
     // Structured logs from passing tests are noise; failures still print theirs.
     silent: "passed-only",
+    // Real dispatch-latency measurements must not compete with another file's Workers runtime.
+    fileParallelism: false,
     setupFiles: ["./test/setup.ts"],
     // discord-api-types ships CommonJS that re-exports through helpers the Workers pool cannot
     // follow (its enums come through empty). Pre-bundle it to ESM, as the build does.
