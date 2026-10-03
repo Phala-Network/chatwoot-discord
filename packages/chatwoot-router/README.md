@@ -19,10 +19,11 @@ may point to another deployment of that API, for example a proxy or gateway.
   association is inactive; disconnect to disable it. `routing.botIds` and both bot credential maps require
   exactly the routed account keys (see [Configuration reference](#configuration-reference)).
 - Signed bot webhooks at `/chatwoot/agent-bot` enqueue a deduplicated conversation job. The five-minute sweep
-  lists **all conversations in the account**, including disconnected inboxes, without an age cutoff. It queues pending
-  tickets and any ticket still assigned to the brand bot. For non-pending tickets, the bot releases its own
-  assignment with `POST assignments {assignee_id: null}`, preserving status after a fresh ownership read.
-  A page cursor persists across alarms within the request budget. Failed pages retry. An empty page ends a pass; the next starts at page 1 and catches
+  lists only **pending and open conversations in the account**, including disconnected inboxes, without an age
+  cutoff. Pending tickets route or hand off; open tickets still assigned to the brand bot release that assignment
+  with `POST assignments {assignee_id: null}`, preserving status after a fresh ownership read. Resolved/snoozed
+  history is not scanned. Each status has its own persistent page cursor within the request budget. Failed pages
+  retry. An empty page ends that status's pass; the next starts at page 1 and catches
   conversations skipped by changing pages. Neither event payloads nor sweep rows are decision inputs.
 - Read messages newest-first, unfiltered (including activities), with `before` paging, at most five pages of 20.
   The latest `conversation_status_changed` activity begins the turn; without one or evidence it is missing, use
@@ -51,8 +52,12 @@ may point to another deployment of that API, for example a proxy or gateway.
   Bot and user assignees are distinguished by `assignee_type`.
 - Before **each** action, re-read the inbox link, pending status, assignee, turn boundary, inputs and public human
   replies. A changed input defers the job to decide again. Apply topic/kind labels, then the kind's canned reply,
-  then exactly one ending action: the kind's resolved/snoozed status, a confident owner's assignment, or explicit
-  bot `status=open` handoff. Preserve human topic labels and validate that an owner still belongs to the account.
+  then end the turn: set the kind's resolved/snoozed status and immediately release the bot, assign a confident
+  owner, or use explicit bot `status=open` handoff. Chatwoot keeps the bot on resolve/snooze, so release is part of
+  that same ending, with a fresh ownership/status read. A failed release keeps the durable job for retry, even
+  though the sweep excludes closed history. Clearing only the bot creates no assignment/status activity and does
+  not move the turn boundary; Chatwoot still dispatches assignment/update events. Preserve human topic labels and
+  validate that an owner still belongs to the account.
   Successful person assignment ends the turn without a bot-handoff reporting event; nothing follows it.
   Reopened resolved conversations can lack a bot assignee, in which case assignment would not open
   pending: use native handoff instead. Chatwoot has no atomic compare-and-write API for a change racing a mutation.
@@ -233,9 +238,10 @@ For the first move from the relay's built-in routing (production baseline 0.27.0
 4. Connect bots one account at a time and verify real routing, handoff, failed/unknown reply handling, historical
    reply deduplication and Discord/triage behavior, including at least a complete sweep.
 5. To roll back, disconnect bots first and **keep this router running until no pending ticket remains assigned to
-   a disconnected brand bot and no non-pending ticket remains assigned to that bot**. Repeat full account passes
-   until both sets are empty: pending uses native bot handoff; non-pending uses explicit unassignment without
-   changing status. Preserve human/other-bot owners. Then stop
+   a disconnected brand bot and no non-pending ticket remains assigned to that bot**. Complete pending/open
+   account passes and let failed ending releases finish through their durable retries: pending uses native bot
+   handoff, open leftovers use explicit unassignment, and kind endings release resolved/snoozed tickets in the
+   same turn. Confirm cleared bot ownership across statuses; preserve human/other-bot owners. Then stop
    webhook entry, cron and queued/in-flight router work; stopping cron alone does not cancel DO alarms. Preserve DO
    namespace and storage, including reply and turn guards. Restore the recorded live 0.27 version **and its
    CONFIG_KEY**, without overlapping old/new routing. Relay 0.27 uses its original Hub's

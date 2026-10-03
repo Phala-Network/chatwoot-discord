@@ -17,7 +17,7 @@ const RUN_WALL_MS = 5 * 60 * 1000;
 const id = z.number().int().positive();
 const jobSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("route"), accountId: id, conversationId: id }),
-  z.object({ type: z.literal("sweep"), accountId: id }),
+  z.object({ type: z.literal("sweep"), accountId: id, status: z.enum(["pending", "open"]) }),
 ]);
 type Payload = z.infer<typeof jobSchema>;
 
@@ -40,7 +40,8 @@ export class Router extends DurableObject<Env> {
 
   async requestSweep(): Promise<void> {
     for (const accountId of Object.keys((await loadSettings(this.env)).config.routing.accounts)) {
-      this.enqueue({ type: "sweep", accountId: Number(accountId) });
+      for (const status of ["pending", "open"] as const)
+        this.enqueue({ type: "sweep", accountId: Number(accountId), status });
     }
     await this.schedule();
   }
@@ -74,7 +75,12 @@ export class Router extends DurableObject<Env> {
           }
           clearFailures(this.store, payload.accountId, payload.conversationId);
         } else if (routesAccount(settings, payload.accountId)) {
-          await this.sweep(chatwoot, payload.accountId, settings.config.routing.botIds[String(payload.accountId)]);
+          await this.sweep(
+            chatwoot,
+            payload.accountId,
+            payload.status,
+            settings.config.routing.botIds[String(payload.accountId)],
+          );
         }
         this.store.completeJob(job);
       } catch (error) {
@@ -109,17 +115,18 @@ export class Router extends DurableObject<Env> {
   private async sweep(
     chatwoot: ReturnType<typeof chatwootClient>,
     accountId: number,
+    status: "pending" | "open",
     botId: number | undefined,
   ): Promise<void> {
-    const key = `sweep:${accountId}:all`;
+    const key = `sweep:${accountId}:${status}`;
     const saved = id.safeParse(parseJson(this.store.get(key)));
     const page = saved.success ? saved.data : 1;
     // Route snapshots decide ownership from live state, including disconnected bot leftovers.
-    const conversations = await chatwoot.listConversations(accountId, page);
+    const conversations = await chatwoot.listConversations(accountId, page, status);
     for (const conversation of conversations) {
       if (
         conversation.id !== undefined &&
-        (conversation.status === "pending" ||
+        (status === "pending" ||
           (conversation.meta?.assignee_type === "AgentBot" && conversation.meta.assignee?.id === botId))
       )
         this.enqueue({ type: "route", accountId, conversationId: conversation.id });
@@ -129,13 +136,13 @@ export class Router extends DurableObject<Env> {
       return;
     }
     this.store.set(key, String(page + 1));
-    this.enqueue({ type: "sweep", accountId });
+    this.enqueue({ type: "sweep", accountId, status });
   }
 
   private enqueue(payload: Payload): void {
     const key =
       payload.type === "sweep"
-        ? `sweep:${payload.accountId}`
+        ? `sweep:${payload.accountId}:${payload.status}`
         : `${payload.type}:${payload.accountId}:${payload.conversationId}`;
     this.store.enqueue(key, payload.type === "sweep" ? 1 : 0, JSON.stringify(payload));
   }

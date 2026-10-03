@@ -77,7 +77,7 @@ export function clearFailures(store: RoutingStore, accountId: number, conversati
   if (guard.failures) saveGuard(store, accountId, conversationId, { ...guard, failures: 0 });
 }
 
-export class ActivityPendingError extends Error {
+class ActivityPendingError extends Error {
   constructor() {
     super("Chatwoot status activity is not available yet");
     this.name = "ActivityPendingError";

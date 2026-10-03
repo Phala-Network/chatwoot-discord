@@ -188,6 +188,22 @@ describe("bot webhook and durable recovery", () => {
     expect(sent(mock.requests, "POST", JEV)).toEqual([]);
   });
 
+  it("finishes a snoozed turn's failed release through its durable retry without scanning closed history", async () => {
+    const mock = world({ fail: { assignments: 1 } }, { owner: ["unclear", 1], kind: ["newsletter", 1] });
+    expect((await webhook(incoming(5))).status).toBe(200);
+    await drain();
+    expect(mock.ticket.status).toBe("snoozed");
+    expect(mock.ticket.assignee?.id).toBe(1);
+    await retryNow();
+    expect(mock.ticket.status).toBe("snoozed");
+    expect(mock.ticket.assignee).toBeNull();
+    expect(sent(mock.requests, "POST", JEV)).toHaveLength(1);
+    expect(sent(mock.requests, "POST", `${CW}/toggle_status`)).toHaveLength(1);
+    expect(sent(mock.requests, "POST", `${CW}/assignments`)).toHaveLength(2);
+    await retryNow();
+    expect(sent(mock.requests, "POST", `${CW}/assignments`)).toHaveLength(2);
+  });
+
   it("waits for a late handback activity, then classifies only its new input", async () => {
     const mock = world();
     await webhook({
@@ -234,6 +250,15 @@ describe("bot webhook and durable recovery", () => {
 
 function sweepWorld(failPage = false, disconnect = false) {
   const pending = new Set(Array.from({ length: 50 }, (_, index) => index + 11));
+  const statuses = new Map([...pending].map((id) => [id, "pending"]));
+  const assigned = new Set(pending);
+  const conversation = (id: number) => ({
+    id,
+    inbox_id: 2,
+    status: statuses.get(id),
+    last_activity_at: 1,
+    meta: { assignee_type: assigned.has(id) ? "AgentBot" : null, assignee: assigned.has(id) ? { id: 1 } : null },
+  });
   const pages: number[] = [];
   const mock = mockFetch(
     on("GET", "chatwoot.example.com/api/v1/accounts/1/inboxes/2/agent_bot", () =>
@@ -241,8 +266,18 @@ function sweepWorld(failPage = false, disconnect = false) {
     ),
     on("GET", "chatwoot.example.com/api/v1/accounts/2/conversations", () => json({ data: { payload: [] } })),
     on("GET", base, (request) => {
-      expect(request.url.searchParams.get("status")).toBe("all");
+      const status = request.url.searchParams.get("status");
+      expect(["pending", "open"]).toContain(status);
       const page = Number(request.url.searchParams.get("page"));
+      if (status === "open")
+        return json({
+          data: {
+            payload: [...statuses]
+              .filter(([, value]) => value === "open")
+              .slice((page - 1) * 25, page * 25)
+              .map(([id]) => conversation(id)),
+          },
+        });
       pages.push(page);
       if (page === 2 && failPage) {
         failPage = false;
@@ -250,24 +285,26 @@ function sweepWorld(failPage = false, disconnect = false) {
       }
       return json({
         data: {
-          payload: [...pending]
-            .slice((page - 1) * 25, page * 25)
-            .map((id) => ({ id, inbox_id: 2, status: "pending", last_activity_at: 1 })),
+          payload: [...pending].slice((page - 1) * 25, page * 25).map(conversation),
         },
       });
     }),
     on("GET", new RegExp(`^${RegExp.escape(base)}/\\d+$`), (request) =>
-      json({
-        id: Number(request.url.pathname.split("/").at(-1)),
-        inbox_id: 2,
-        status: "pending",
-        meta: { assignee_type: "AgentBot", assignee: { id: 1 } },
-      }),
+      json(conversation(Number(request.url.pathname.split("/").at(-1)))),
     ),
+    on("POST", new RegExp(`^${RegExp.escape(base)}/\\d+/assignments$`), (request) => {
+      expect(JSON.parse(request.body)).toEqual({ assignee_id: null });
+      assigned.delete(Number(request.url.pathname.split("/").at(-2)));
+      return json({});
+    }),
     on("GET", new RegExp(`^${RegExp.escape(base)}/\\d+/messages$`), () => json({ payload: [customer(1)] })),
     on("POST", new RegExp(`^${RegExp.escape(base)}/\\d+/labels$`), () => json({})),
     on("POST", new RegExp(`^${RegExp.escape(base)}/\\d+/toggle_status$`), (request) => {
-      pending.delete(Number(request.url.pathname.split("/").at(-2)));
+      const id = Number(request.url.pathname.split("/").at(-2));
+      const status = JSON.parse(request.body).status;
+      statuses.set(id, status);
+      if (status === "open") assigned.delete(id);
+      pending.delete(id);
       return json({});
     }),
     on("POST", JEV, () =>
@@ -284,7 +321,7 @@ function sweepWorld(failPage = false, disconnect = false) {
 }
 
 describe("account sweep", () => {
-  it("releases non-pending brand-bot assignments while preserving statuses and other owners", async () => {
+  it("scans only pending and open, releasing open bot leftovers and preserving closed history and other owners", async () => {
     const conversations = [
       { id: 11, status: "open", meta: { assignee_type: "AgentBot", assignee: { id: 1 } } },
       { id: 12, status: "resolved", meta: { assignee_type: "AgentBot", assignee: { id: 1 } } },
@@ -296,8 +333,14 @@ describe("account sweep", () => {
     const mock = mockFetch(
       on("GET", "chatwoot.example.com/api/v1/accounts/2/conversations", () => json({ data: { payload: [] } })),
       on("GET", base, (request) => {
-        expect(request.url.searchParams.get("status")).toBe("all");
-        return json({ data: { payload: request.url.searchParams.get("page") === "1" ? conversations : [] } });
+        const status = request.url.searchParams.get("status");
+        expect(["pending", "open"]).toContain(status);
+        return json({
+          data: {
+            payload:
+              request.url.searchParams.get("page") === "1" ? conversations.filter((row) => row.status === status) : [],
+          },
+        });
       }),
       on("GET", new RegExp(`^${RegExp.escape(base)}/\\d+$`), (request) => {
         const conversation = conversations.find((row) => row.id === Number(request.url.pathname.split("/").at(-1)));
@@ -317,10 +360,10 @@ describe("account sweep", () => {
     await stub().requestSweep();
     await drain();
     expect(conversations.map((row) => row.status)).toEqual(["open", "resolved", "snoozed", "open", "open", "open"]);
-    expect(conversations.slice(0, 3).map((row) => row.meta.assignee)).toEqual([null, null, null]);
+    expect(conversations.slice(0, 3).map((row) => row.meta.assignee)).toEqual([null, { id: 1 }, { id: 1 }]);
     expect(conversations[3]?.meta.assignee).toEqual({ id: 1 });
     expect(conversations[4]?.meta.assignee).toEqual({ id: 2 });
-    expect(mock.requests.filter((request) => request.method === "POST")).toHaveLength(3);
+    expect(mock.requests.filter((request) => request.method === "POST")).toHaveLength(1);
   });
 
   it("continues across alarm budgets and covers page shifts in the next full pass, including old tickets", async () => {

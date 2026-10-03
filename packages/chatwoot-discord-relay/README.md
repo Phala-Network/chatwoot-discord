@@ -431,8 +431,10 @@ at a time. Never run both routers. Existing open tickets remain with people; exi
 During the relay-first transition, open messages can go straight to triage.
 
 Keep existing `routing_*` attributes/definitions through the owner's rollback window. For rollback, disconnect
-bots and keep the router running until repeated full account sweeps leave no brand-bot-owned tickets: pending
-uses native handoff, non-pending uses explicit unassignment preserving status. Then stop router entry, cron,
+bots and keep the router running until pending/open account sweeps and durable ending retries leave no
+brand-bot-owned tickets. Pending uses native handoff; open leftovers use explicit unassignment; resolved/snoozed
+kind endings release the bot in the same turn, preserving status. Confirm cleared ownership across statuses,
+then stop router entry, cron,
 queued alarms and in-flight work, retaining its DO namespace/storage (reply attempts/observed records and turn
 guards cannot be rebuilt from history). Restore the recorded live relay 0.27 version and CONFIG_KEY with its
 original Hub. Its `kind-reply:<account>:<conversation>` ledger is independent of the Router's

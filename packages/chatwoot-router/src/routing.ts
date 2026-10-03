@@ -115,6 +115,12 @@ export async function routeConversation(
   const botId = routing.botIds[String(accountId)];
   const owns = (conversation: ChatwootConversation | undefined) =>
     conversation?.meta?.assignee_type === "AgentBot" && conversation.meta.assignee?.id === botId;
+  const release = async () => {
+    const latest = await chatwoot.getConversation(accountId, conversationId);
+    if (latest?.status !== undefined && latest.status !== "pending" && owns(latest)) {
+      await bot.unassign(accountId, conversationId);
+    }
+  };
   const snapshot = async (inboxId?: number) => {
     const raw = await chatwoot.getConversation(accountId, conversationId);
     if (!raw || raw.inbox_id === undefined || (inboxId !== undefined && raw.inbox_id !== inboxId)) return;
@@ -122,12 +128,7 @@ export async function routeConversation(
       observeStatus(store, accountId, conversationId, raw.status ?? "open");
       // Chatwoot's webhook failure fallback can open a ticket without releasing its bot.
       // Explicit unassignment clears ai_assignee without changing status or claiming it as a user.
-      if (raw.status !== undefined && owns(raw)) {
-        const latest = await chatwoot.getConversation(accountId, conversationId);
-        if (latest?.status !== undefined && latest.status !== "pending" && owns(latest)) {
-          await bot.unassign(accountId, conversationId);
-        }
-      }
+      if (raw.status !== undefined && owns(raw)) await release();
       return;
     }
     const conversation = toRelayConversation(conversationId, raw);
@@ -268,6 +269,8 @@ export async function routeConversation(
   if (kind?.status) {
     await bot.setStatus(accountId, conversationId, { status: kind.status });
     expectActivity(store, accountId, conversationId, { status: kind.status });
+    // Status keeps ai_assignee in Chatwoot. Finish this turn by releasing it without another activity.
+    await release();
   } else if (assignee !== undefined && current.raw.meta?.assignee_type === "AgentBot") {
     await bot.assign(accountId, conversationId, assignee);
     expectActivity(store, accountId, conversationId, { status: "open" });

@@ -127,10 +127,58 @@ describe("native bot turns", () => {
         "labels",
         ...(["startup", "bounty"].includes(kind) ? ["messages"] : []),
         kind === "startup" ? "assignments" : "toggle_status",
+        ...(kind === "startup" ? [] : ["assignments"]),
       ]);
       expect(mutations.every((request) => request.headers.get("api_access_token") === "bot-token")).toBe(true);
       expect(sent(mock.requests, "POST", JEV)).toHaveLength(1);
       expect(mock.ticket.status).toBe(kind === "startup" ? "open" : kind === "newsletter" ? "snoozed" : "resolved");
+      if (kind !== "startup") expect(mock.ticket.assignee).toBeNull();
+    },
+  );
+
+  it.each(["spam", "newsletter"])(
+    "retries a failed release after %s without repeating the ending or classification",
+    async (kind) => {
+      const mock = world({ fail: { assignments: 1 } }, { owner: ["unclear", 1], kind: [kind, 1] });
+      const ctx = context(new MemoryStore(), KINDS);
+      await expect(routeConversation(ctx, 1, 5)).rejects.toThrow("503");
+      expect(mock.ticket.status).toBe(kind === "spam" ? "resolved" : "snoozed");
+      expect(mock.ticket.assignee?.id).toBe(1);
+      await routeConversation(ctx, 1, 5);
+      expect(mock.ticket.assignee).toBeNull();
+      expect(sent(mock.requests, "POST", JEV)).toHaveLength(1);
+      expect(sent(mock.requests, "POST", `${CW}/toggle_status`)).toHaveLength(1);
+      expect(sent(mock.requests, "POST", `${CW}/messages`)).toEqual([]);
+      expect(mock.ticket.messages?.filter((message) => message.message_type === 2)).toHaveLength(1);
+      // Releasing the bot must not create a later boundary that hides the next turn's input.
+      mock.ticket.status = "pending";
+      mock.ticket.messages?.push(incoming(3, "New request"));
+      mock.answers.kind = ["none", 1];
+      await routeConversation(ctx, 1, 5);
+      expect(JSON.parse(sent(mock.requests, "POST", JEV)[1]?.body ?? "{}").state.ticket).toBe("New request");
+    },
+  );
+
+  it.each(["person", "other bot", "pending"])(
+    "preserves a %s takeover after writing a kind's status",
+    async (change) => {
+      const mock = world(
+        {
+          during: (operation) => {
+            if (operation !== "toggle_status") return;
+            if (change === "pending") mock.ticket.status = "pending";
+            else {
+              mock.ticket.assignee = { id: 6 };
+              mock.ticket.assigneeType = change === "person" ? "User" : "AgentBot";
+            }
+          },
+        },
+        { owner: ["unclear", 1], kind: ["spam", 1] },
+      );
+      await routeConversation(context(new MemoryStore(), KINDS), 1, 5);
+      expect(sent(mock.requests, "POST", `${CW}/assignments`)).toEqual([]);
+      expect(mock.ticket.status).toBe(change === "pending" ? "pending" : "resolved");
+      expect(mock.ticket.assignee?.id).toBe(change === "pending" ? 1 : 6);
     },
   );
 
