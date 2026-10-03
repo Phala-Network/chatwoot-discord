@@ -42,6 +42,14 @@ export class UnknownThreadError extends Error {
   }
 }
 
+/** Thrown when Discord may have accepted a message but did not return its receipt. */
+export class UnknownSendError extends Error {
+  constructor() {
+    super("Discord send outcome is unknown; automatic replay is prohibited");
+    this.name = "UnknownSendError";
+  }
+}
+
 export interface ForumClient {
   /** Executes the forum's webhook. Without `threadId`, `message.thread_name` starts a new post. */
   execute(
@@ -61,11 +69,6 @@ export interface ForumClient {
   ): Promise<void>;
   /** Edits a message the forum's webhook posted; false if the message no longer exists. */
   editMessage(forumChannelId: string, threadId: string, messageId: string, message: WebhookMessage): Promise<boolean>;
-  /**
-   * The cards (Components V2 messages) the forum's webhook posted among the page of a post's
-   * messages that follows message `after`, and the last message of that page when more follow.
-   */
-  cardsAfter(forumChannelId: string, threadId: string, after: string): Promise<{ cards: string[]; next?: string }>;
   /** Deletes a message the forum's webhook posted; a message that is already gone counts as deleted. */
   deleteMessage(forumChannelId: string, threadId: string, messageId: string): Promise<void>;
   /** True if `threadId` is a post that still exists in the forum. */
@@ -94,7 +97,7 @@ export interface PostFields {
   title: string;
   /** The Chatwoot message the title's subject comes from. */
   titleMessageId: number;
-  /** The post's card (unset: none yet; see unknownCards for cards not known). */
+  /** The post's card (unset: none yet). */
   cardId: string;
   /** 1 once a message was posted after the card, which then moves to the bottom. */
   cardCovered: number;
@@ -154,23 +157,6 @@ export interface RelayOptions {
 
 /** A stored state that matches no conversation: the post's archived flag must be applied again. */
 const OUT_OF_DATE = "";
-const UNKNOWN_CARDS = "?";
-/** Discord's epoch (ms since the Unix epoch), and how far its clock may be from the Worker's. */
-const DISCORD_EPOCH = 1420070400000n;
-const CLOCK_SKEW_MS = 60_000n;
-
-/**
- * The card id recorded while the post may hold cards of unknown ids after Discord message `after`:
- * an answer to posting one may have been lost, or the post was adopted. They are looked for, and
- * deleted, before a card is posted.
- */
-export function unknownCards(after: string): string {
-  return `${UNKNOWN_CARDS}${after}`;
-}
-
-export function isUnknownCard(cardId: string | undefined): boolean {
-  return cardId?.startsWith(UNKNOWN_CARDS) === true;
-}
 /** Discord applies at most this many tags to a post. */
 const MAX_TAGS = 5;
 const RELAYED_TYPES = new Set(["incoming", "outgoing", "activity"]);
@@ -208,7 +194,7 @@ export class Relay {
     let threadId = store.conversation(accountId, conversation.id)?.threadId;
     if (threadId) {
       try {
-        await this.post(message, parts, threadId);
+        if (!(await this.post(message, parts, threadId))) return;
       } catch (error) {
         if (!(error instanceof UnknownThreadError)) throw error;
         store.forgetThread(accountId, conversation.id); // The post was deleted in Discord; start a new one.
@@ -216,8 +202,14 @@ export class Relay {
       }
     }
     if (!threadId) {
-      threadId = await this.createPost(message);
-      await this.post(message, parts, threadId);
+      try {
+        threadId = await this.createPost(message);
+      } catch (error) {
+        if (!(error instanceof UnknownSendError)) throw error;
+        this.logUnknownSend(accountId, conversation.id, message.id);
+        return;
+      }
+      if (!(await this.post(message, parts, threadId))) return;
     }
     this.unarchived(accountId, conversation);
     if (this.notifier.notifies(message)) store.updateConversation(accountId, conversation.id, { announcePending: 1 });
@@ -282,8 +274,7 @@ export class Relay {
     const source = recorded?.answerSourceId;
     const draft = source && answersLatest(source, recorded?.customerMessageId) ? recorded?.answerId : undefined;
     const card = this.options.card?.(this.cardTicket(accountId, conversation), draft);
-    const cardDue =
-      card !== undefined && (!recorded?.cardId || isUnknownCard(recorded.cardId) || recorded.cardCovered === 1);
+    const cardDue = card !== undefined && (!recorded?.cardId || recorded.cardCovered === 1);
     const stateChanged = recorded?.state !== state;
     if (!stateChanged && !cardDue) return;
     // Until everything below is applied, the post counts as out of date, so a failure or a yield
@@ -445,7 +436,7 @@ export class Relay {
    * Posts the parts not yet posted, recording each one. A customer's message is their latest from
    * its first part on, so a later part that fails leaves no earlier draft offered.
    */
-  private async post(message: RelayMessage, parts: WebhookMessage[], threadId: string): Promise<void> {
+  private async post(message: RelayMessage, parts: WebhookMessage[], threadId: string): Promise<boolean> {
     const { store, forum } = this.options;
     const accountId = message.account.id;
     const conversationId = message.conversation.id;
@@ -456,16 +447,24 @@ export class Relay {
     for (let part = posted.length; part < parts.length; part += 1) {
       const payload = parts[part];
       if (!payload) break;
-      const { messageId } = await forum.execute(
-        forumChannelId,
-        payload,
-        threadId,
-        `message:${accountId}:${conversationId}:${message.id}:${part}:${threadId}`,
-      );
+      let messageId: string;
+      try {
+        ({ messageId } = await forum.execute(
+          forumChannelId,
+          payload,
+          threadId,
+          `message:${accountId}:${conversationId}:${message.id}:${part}:${threadId}`,
+        ));
+      } catch (error) {
+        if (!(error instanceof UnknownSendError)) throw error;
+        this.logUnknownSend(accountId, conversationId, message.id, threadId, part);
+        return false;
+      }
       store.savePostedPart(accountId, conversationId, message.id, part, messageId);
       store.updateConversation(accountId, conversationId, { cardCovered: 1 });
       if (fromCustomer && part === 0) this.customerWrote(accountId, conversationId, messageId);
     }
+    return true;
   }
 
   /**
@@ -532,13 +531,35 @@ export class Relay {
         `notice:${accountId}:${conversation.id}:${threadId}:${sendKey}`,
       ));
     } catch (error) {
-      if (!(error instanceof UnknownThreadError)) throw error;
-      store.forgetThread(accountId, conversation.id);
-      return undefined;
+      if (error instanceof UnknownThreadError) {
+        store.forgetThread(accountId, conversation.id);
+        return undefined;
+      }
+      if (error instanceof UnknownSendError) {
+        this.logUnknownSend(accountId, conversation.id, undefined, threadId);
+        return undefined;
+      }
+      throw error;
     }
     this.unarchived(accountId, conversation);
     store.updateConversation(accountId, conversation.id, { cardCovered: 1 });
     return messageId;
+  }
+
+  private logUnknownSend(
+    accountId: number,
+    conversationId: number,
+    messageId: number | undefined,
+    threadId?: string,
+    part?: number,
+  ): void {
+    log.warn("Discord message send outcome unknown", {
+      accountId,
+      conversationId,
+      ...(messageId === undefined ? {} : { messageId }),
+      ...(threadId === undefined ? {} : { threadId }),
+      ...(part === undefined ? {} : { part }),
+    });
   }
 
   /**
@@ -572,30 +593,27 @@ export class Relay {
     const recorded = store.conversation(accountId, conversationId);
     const card: WebhookMessage = { flags: MessageFlags.IsComponentsV2, components };
     const cardId = recorded?.cardId;
-    if (cardId && !isUnknownCard(cardId) && recorded?.cardCovered !== 1) {
+    if (cardId && recorded?.cardCovered !== 1) {
       if (await forum.editMessage(forumChannelId, threadId, cardId, card)) return;
     }
-    if (isUnknownCard(cardId)) {
-      // Page by page, recording how far it got, so a yield continues where it stopped.
-      for (let after: string | undefined = cardId?.slice(UNKNOWN_CARDS.length); after !== undefined; ) {
-        const page = await forum.cardsAfter(forumChannelId, threadId, after);
-        for (const id of page.cards) await forum.deleteMessage(forumChannelId, threadId, id);
-        after = page.next;
-        if (after) store.updateConversation(accountId, conversationId, { cardId: unknownCards(after) });
-      }
-    } else if (cardId) {
+    if (cardId) {
       await forum.deleteMessage(forumChannelId, threadId, cardId);
     }
-    // Should Discord's answer be lost, the card posted is looked for after this moment.
-    const now = BigInt((this.options.now?.() ?? new Date()).getTime());
-    const moment = String((now - CLOCK_SKEW_MS - DISCORD_EPOCH) << 22n);
-    store.updateConversation(accountId, conversationId, { cardId: unknownCards(moment) });
-    const { messageId } = await forum.execute(
-      forumChannelId,
-      { ...card, username: SYSTEM_USERNAME, avatar_url: avatars.chatwoot, allowed_mentions: { parse: [] } },
-      threadId,
-    );
-    store.updateConversation(accountId, conversationId, { cardId: messageId, cardCovered: 0 });
+    const cardKey = `card:${accountId}:${conversationId}:${threadId}:${cardId ?? "initial"}:${JSON.stringify(components)}`;
+    try {
+      const { messageId } = await forum.execute(
+        forumChannelId,
+        { ...card, username: SYSTEM_USERNAME, avatar_url: avatars.chatwoot, allowed_mentions: { parse: [] } },
+        threadId,
+        cardKey,
+      );
+      store.updateConversation(accountId, conversationId, { cardId: messageId, cardCovered: 0 });
+    } catch (error) {
+      if (!(error instanceof UnknownSendError)) throw error;
+      this.logUnknownSend(accountId, conversationId, undefined, threadId);
+      // The guard prevents replaying this card. Keep a marker so sweeps do not submit it again.
+      store.updateConversation(accountId, conversationId, { cardId: "unknown", cardCovered: 0 });
+    }
   }
 
   /** A message from Chatwoot itself. */

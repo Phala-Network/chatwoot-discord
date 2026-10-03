@@ -867,15 +867,14 @@ describe("the card", () => {
     expect(forum.archived.has("thread-1")).toBe(false);
   });
 
-  it("posts one card after an answer to posting it was lost, deleting the one Discord kept", async () => {
+  it("does not replay a card when its creation response was lost", async () => {
     const { relay, forum } = relayWith({ card: ticketCard });
     const conversation = message().conversation;
     await relay.relay(message());
     forum.loseAnswer = true;
-    await expect(relay.sync(3, conversation, "thread-1")).rejects.toThrow();
     await relay.sync(3, conversation, "thread-1");
-    const { cards } = await forum.cardsAfter(FORUM, "thread-1", "0");
-    expect(cards).toEqual([forum.ids.at(-1)]);
+    await relay.sync(3, conversation, "thread-1");
+    expect(forum.calls.filter(([, payload]) => payload.flags === 1 << 15)).toHaveLength(1);
   });
 
   it("archives a resolved post again when that failed after its card moved", async () => {
@@ -931,28 +930,6 @@ describe("the card", () => {
     await relay.postResponse(3, conversation, "• Rating: 5", "response-5");
     await relay.sync(3, conversation, "thread-1");
     expect(draftOffered()).toBe("ticket:reply");
-  });
-
-  it("looks for cards of unknown id page by page, from where it stopped", async () => {
-    const forum = new FakeForum();
-    const { relay, store } = relayWith({ card: ticketCard, forum });
-    const conversation = message().conversation;
-    await relay.relay(message());
-    await relay.sync(3, conversation, "thread-1");
-    const orphan = forum.ids.at(-1) ?? "";
-    // The post was adopted: its cards are not known.
-    store.updateConversation(3, 12, { cardId: `?${"1"}` });
-    const pages: string[] = [];
-    const cardsAfter = forum.cardsAfter.bind(forum);
-    forum.cardsAfter = async (forumId, thread, after) => {
-      pages.push(after);
-      // Two pages: the first ends at the orphan card.
-      return after === "1" ? { cards: [], next: String(BigInt(orphan) - 1n) } : cardsAfter(forumId, thread, after);
-    };
-    await relay.sync(3, conversation, "thread-1");
-    expect(pages).toEqual(["1", String(BigInt(orphan) - 1n)]);
-    expect(forum.deleted).toEqual([orphan]);
-    expect((await cardsAfter(FORUM, "thread-1", "0")).cards).toHaveLength(1);
   });
 
   it("keeps drafts to a customer message's parts right when a part fails", async () => {

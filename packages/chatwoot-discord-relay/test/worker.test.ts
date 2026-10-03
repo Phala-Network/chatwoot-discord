@@ -619,9 +619,9 @@ describe("worker", () => {
     await chatwootWebhook(created(14));
     await drain();
     expect(world.webhookPosts().map((post) => post.thread)).toEqual([thread]);
-    // The adopted post may hold a card from before: it is looked for before one is posted.
-    expect(world.sent("GET", new RegExp(`^/api/v10/channels/${thread}/messages$`))).toHaveLength(1);
-    // Posted on adoption, then moved under the new message.
+    // The adopted post gets a card, then a new card is posted below the new message. Existing
+    // messages are never read to guess which card a lost send created.
+    expect(world.sent("GET", new RegExp(`^/api/v10/channels/${thread}/messages$`))).toHaveLength(0);
     expect(world.cards().map((card) => card.thread)).toEqual([thread, thread]);
     expect(world.sent("DELETE", /^\/api\/v10\/webhooks\/1\/tok\/messages\//)).toHaveLength(1);
   });
@@ -1142,14 +1142,14 @@ describe("worker", () => {
     await sweep();
     expect(reads()).toBe(before); // up to date: not queued
 
-    // A post from before cards gets its card.
+    // A cleared card row does not replay a send whose durable guard already has a receipt.
     await runInDurableObject(hub(), (_instance, state) => {
       state.storage.sql.exec("UPDATE conversations SET card_id = NULL WHERE conversation_id = 32");
     });
     const cards = world.cards().length;
     await sweep();
     expect(reads()).toBe(before + 1);
-    expect(world.cards()).toHaveLength(cards + 1);
+    expect(world.cards()).toHaveLength(cards);
 
     // A card left covered (its move failed) is moved.
     await runInDurableObject(hub(), (_instance, state) => {
@@ -1157,7 +1157,7 @@ describe("worker", () => {
     });
     await sweep();
     expect(reads()).toBe(before + 2);
-    expect(world.cards()).toHaveLength(cards + 2);
+    expect(world.cards()).toHaveLength(cards + 1);
 
     const conversation = world.conversations.get(32);
     if (conversation) conversation.status = "resolved"; // missed webhook
@@ -1168,7 +1168,7 @@ describe("worker", () => {
     });
   });
 
-  it("gives a post from before cards its card, however long ago its ticket was active", async () => {
+  it("does not replay a cleared card send, however long ago its ticket was active", async () => {
     world.conversation(34, [{ id: 3401, content: "hello", message_type: 0 }]);
     await chatwootWebhook(created(34));
     await drain();
@@ -1179,9 +1179,9 @@ describe("worker", () => {
     });
     const cards = world.cards().length;
     await sweep();
-    expect(world.cards()).toHaveLength(cards + 1);
+    expect(world.cards()).toHaveLength(cards);
     await sweep();
-    expect(world.cards()).toHaveLength(cards + 1);
+    expect(world.cards()).toHaveLength(cards);
   });
 
   it("runs a command that comes during a sweep before the sweep's next page", async () => {
@@ -1759,8 +1759,7 @@ it("does not confirm a concurrent identical note after an unknown mutation", asy
     discordUserId: ALICE,
     accountId: 3,
     conversationId: 886,
-    action: { type: "message", private: true, content: "Same note", files: [],
-    },
+    action: { type: "message", private: true, content: "Same note", files: [] },
   });
   await drain();
   const feedback = world.requests.find(

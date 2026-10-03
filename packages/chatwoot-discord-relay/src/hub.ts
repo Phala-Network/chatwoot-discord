@@ -48,7 +48,6 @@ import {
   refreshMetadata,
   relayFor,
 } from "./relay/processor.ts";
-import { isUnknownCard } from "./relay/relay.ts";
 import { processMessageUpdate } from "./relay/updates.ts";
 import { loadSettings } from "./settings.ts";
 import { type Job, Store } from "./store.ts";
@@ -367,11 +366,9 @@ export class Hub extends DurableObject<Env> {
 
   private async runCommand(job: CommandJob, services: ProcessorContext) {
     const key = `command:${job.interactionId}:started`;
-    const agentId = services.settings.chatwootUserFor(job.discordUserId);
     const token = services.settings.agentToken(job.discordUserId);
-    let beforeMessageId: number | undefined;
     let beforeLabels: string[] | undefined;
-    if (agentId !== undefined && token && ["message", "label", "labels"].includes(job.action.type)) {
+    if (token && ["label", "labels"].includes(job.action.type)) {
       const beforeClient = chatwootClient(
         services.settings.config.chatwoot.baseUrl,
         token,
@@ -379,12 +376,7 @@ export class Hub extends DurableObject<Env> {
         this.store,
       );
       const before = await beforeClient.getConversation(job.accountId, job.conversationId);
-      if (before) {
-        beforeMessageId = latestMessageId(before) ?? 0;
-        beforeLabels = ["label", "labels"].includes(job.action.type)
-          ? await beforeClient.conversationLabels(job.accountId, job.conversationId)
-          : undefined;
-      }
+      if (before) beforeLabels = await beforeClient.conversationLabels(job.accountId, job.conversationId);
     }
     let confirmed = false;
     const fetch = async (request: Request) => {
@@ -414,7 +406,7 @@ export class Hub extends DurableObject<Env> {
       limits: this.store,
       retryable: () => this.store.get(key) === undefined,
       confirmUnknown: (chatwoot, action) =>
-        this.confirmUnknownCommand(chatwoot, job, action, services.settings, agentId, beforeMessageId, beforeLabels),
+        this.confirmUnknownCommand(chatwoot, job, action, services.settings, beforeLabels),
       deferPanel: true,
       attachment: async (action, index) => {
         const file = action.files[index];
@@ -439,8 +431,6 @@ export class Hub extends DurableObject<Env> {
     job: CommandJob,
     action: CommandAction,
     settings: Settings,
-    agentId: number | undefined,
-    beforeMessageId: number | undefined,
     beforeLabels: string[] | undefined,
   ): Promise<string | undefined> {
     try {
@@ -488,21 +478,6 @@ export class Hub extends DurableObject<Env> {
           const expected = [...new Set([...action.labels, ...beforeLabels.filter((label) => kinds.has(label))])];
           if (sameLabels(labels, expected))
             return action.labels.length > 0 ? `Label set to ${action.labels.join(", ")}.` : "Labels removed.";
-          return undefined;
-        }
-        case "message": {
-          if (beforeMessageId === undefined || agentId === undefined) return undefined;
-          const messages = await chatwoot.listMessages(job.accountId, job.conversationId);
-          const found = messages.some(
-            (message) =>
-              message.id > beforeMessageId &&
-              message.sender?.id === agentId &&
-              message.message_type === 1 &&
-              message.private === action.private &&
-              message.content === action.content &&
-              !message.content_attributes?.deleted,
-          );
-          if (found) return action.private ? "Note added." : "Message sent to the customer.";
           return undefined;
         }
         default:
@@ -565,9 +540,7 @@ export class Hub extends DurableObject<Env> {
       const behind = needsCursor || (latest !== undefined && latest > cursor);
       const stale =
         row?.threadId !== undefined &&
-        (row.state !== relay.stateOf(toRelayConversation(conversationId, conversation)) ||
-          row.cardCovered === 1 ||
-          isUnknownCard(row.cardId));
+        (row.state !== relay.stateOf(toRelayConversation(conversationId, conversation)) || row.cardCovered === 1);
       if (behind || stale) {
         this.enqueue({ type: "conversation", accountId, conversationId });
         queued += 1;

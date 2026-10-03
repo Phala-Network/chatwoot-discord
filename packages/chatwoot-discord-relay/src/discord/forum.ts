@@ -2,11 +2,8 @@
 // name, and its guild (for post links).
 
 import {
-  MessageFlags,
   type RESTDeleteAPIWebhookWithTokenMessageQuery,
   type RESTDeleteAPIWebhookWithTokenMessageResult,
-  type RESTGetAPIChannelMessagesQuery,
-  type RESTGetAPIChannelMessagesResult,
   type RESTGetAPIChannelResult,
   type RESTGetAPIChannelWebhooksResult,
   type RESTGetCurrentApplicationResult,
@@ -28,8 +25,10 @@ import { BudgetExhaustedError, JobDeadlineError } from "../../../../shared/budge
 import { parallel } from "../../../../shared/concurrent.ts";
 import { isRecord, parseJson } from "../../../../shared/json.ts";
 import { log } from "../../../../shared/log.ts";
-import { type ForumClient, UnknownThreadError, type WebhookMessage } from "../relay/relay.ts";
+import { type ForumClient, UnknownSendError, UnknownThreadError, type WebhookMessage } from "../relay/relay.ts";
 import { DiscordHttpError, type DiscordRest } from "./rest.ts";
+
+export { UnknownSendError } from "../relay/relay.ts";
 
 const WEBHOOK_NAME = "Chatwoot";
 /** Discord answers a request to a deleted post with this code, with HTTP 404 or, for a webhook, 400. */
@@ -38,22 +37,12 @@ const UNKNOWN_WEBHOOK = 10015;
 const UNKNOWN_MESSAGE = 10008;
 const UNKNOWN_TAG = 10087;
 const APPLICATION_KEY = "discord:application";
-/** Messages per page when looking for a post's cards (Discord's maximum). */
-const CARD_PAGE = 100;
-const DISCORD_EPOCH_MS = 1_420_070_400_000n;
 
 export interface Cache {
   get(key: string): string | undefined;
   /** `ttlMs` undefined keeps the value until it is deleted. */
   set(key: string, value: string, ttlMs?: number): void;
   delete(key: string): void;
-}
-
-export class UnknownSendError extends Error {
-  constructor() {
-    super("Discord send outcome is unknown; automatic replay is prohibited");
-    this.name = "UnknownSendError";
-  }
 }
 
 export class DiscordForum implements ForumClient {
@@ -74,28 +63,12 @@ export class DiscordForum implements ForumClient {
       const receipt = parseJson(saved);
       if (isRecord(receipt) && typeof receipt.channelId === "string" && typeof receipt.messageId === "string")
         return { channelId: receipt.channelId, messageId: receipt.messageId };
-      if (!key) throw new UnknownSendError();
-      const attempt = unknownAttempt(saved);
-      if (!attempt || !threadId) throw new UnknownSendError();
-      const webhook = await this.webhook(forumChannelId);
-      try {
-        const confirmed = await this.confirmSend(webhook.id, threadId, message, attempt.started);
-        if (confirmed) {
-          this.cache.set(key, JSON.stringify(confirmed));
-          return confirmed;
-        }
-      } catch (error) {
-        if (error instanceof BudgetExhaustedError || error instanceof JobDeadlineError) throw error;
-        if (error instanceof DiscordHttpError && (error.status === 429 || error.status >= 500)) throw error;
-        if (isUnknownChannel(error) || (error instanceof DiscordHttpError && error.status === 404))
-          throw new UnknownThreadError(threadId);
-      }
       throw new UnknownSendError();
     }
     const webhook = await this.webhook(forumChannelId);
     try {
       const sent = await this.withTags(forumChannelId, message.applied_tags, async (tags) => {
-        if (key) this.cache.set(key, JSON.stringify({ state: "unknown", started: snowflakeAt(Date.now()) }));
+        if (key) this.cache.set(key, "unknown");
         try {
           return await this.rest.post<
             RESTPostAPIWebhookWithTokenWaitResult,
@@ -181,50 +154,6 @@ export class DiscordForum implements ForumClient {
       }
       throw error;
     }
-  }
-
-  async cardsAfter(
-    forumChannelId: string,
-    threadId: string,
-    after: string,
-  ): Promise<{ cards: string[]; next?: string }> {
-    const webhook = await this.webhook(forumChannelId);
-    try {
-      // A message's author and flags are given without the Message Content intent.
-      const messages = await this.rest.get<RESTGetAPIChannelMessagesResult, RESTGetAPIChannelMessagesQuery>(
-        Routes.channelMessages(threadId),
-        { query: { after, limit: CARD_PAGE } },
-      );
-      const cards = messages
-        .filter(
-          (message) => message.webhook_id === webhook.id && ((message.flags ?? 0) & MessageFlags.IsComponentsV2) !== 0,
-        )
-        .map((message) => message.id);
-      if (messages.length < CARD_PAGE) return { cards };
-      const next = messages.map((message) => BigInt(message.id)).reduce((a, b) => (a > b ? a : b));
-      return { cards, next: String(next) };
-    } catch (error) {
-      if (isUnknownChannel(error) || (error instanceof DiscordHttpError && error.status === 404)) {
-        throw new UnknownThreadError(threadId);
-      }
-      throw error;
-    }
-  }
-
-  private async confirmSend(
-    webhookId: string,
-    threadId: string,
-    expected: WebhookMessage,
-    started: string,
-  ): Promise<{ channelId: string; messageId: string } | undefined> {
-    const messages = await this.rest.get<RESTGetAPIChannelMessagesResult, RESTGetAPIChannelMessagesQuery>(
-      Routes.channelMessages(threadId),
-      { query: { limit: CARD_PAGE } },
-    );
-    const found = messages.find(
-      (message) => message.webhook_id === webhookId && atOrAfter(message.id, started) && sameMessage(message, expected),
-    );
-    return found ? { channelId: threadId, messageId: found.id } : undefined;
   }
 
   async deleteMessage(forumChannelId: string, threadId: string, messageId: string): Promise<void> {
@@ -338,34 +267,4 @@ function isUnknownChannel(error: unknown): boolean {
 
 function webhookKey(forumChannelId: string): string {
   return `forum:${forumChannelId}:webhook`;
-}
-
-function snowflakeAt(timeMs: number): string {
-  return String((BigInt(timeMs) - DISCORD_EPOCH_MS) << 22n);
-}
-
-function atOrAfter(messageId: string, started: string): boolean {
-  try {
-    return BigInt(messageId) >= BigInt(started);
-  } catch {
-    return false;
-  }
-}
-
-function unknownAttempt(value: string): { started: string } | undefined {
-  const parsed = parseJson(value);
-  return isRecord(parsed) && parsed.state === "unknown" && typeof parsed.started === "string"
-    ? { started: parsed.started }
-    : undefined;
-}
-
-function sameMessage(message: RESTGetAPIChannelMessagesResult[number], expected: WebhookMessage): boolean {
-  if (expected.content !== undefined && message.content !== expected.content) return false;
-  if (expected.flags !== undefined && message.flags !== expected.flags) return false;
-  if (
-    expected.components !== undefined &&
-    JSON.stringify(message.components ?? []) !== JSON.stringify(expected.components)
-  )
-    return false;
-  return expected.content !== undefined || expected.flags !== undefined || expected.components !== undefined;
 }

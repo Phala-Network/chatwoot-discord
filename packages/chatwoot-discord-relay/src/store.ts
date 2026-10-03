@@ -4,7 +4,7 @@
 
 import { QueueStore } from "../../../shared/store.ts";
 import type { Cache } from "./discord/forum.ts";
-import { type PostFields, type RelayStore, unknownCards } from "./relay/relay.ts";
+import type { PostFields, RelayStore } from "./relay/relay.ts";
 
 const MIGRATIONS: string[] = [
   `CREATE TABLE conversations (
@@ -314,17 +314,15 @@ export class Store extends QueueStore implements RelayStore, Cache {
 
   /** Maps a conversation to an existing post that no other conversation is mapped to. */
   adoptThread(accountId: number, conversationId: number, threadId: string): void {
-    // The adopted post may hold cards anywhere: they are looked for before one is posted.
     this.sql.exec(
-      `INSERT INTO conversations (account_id, conversation_id, thread_id, card_id) VALUES (?, ?, ?, ?)
+      `INSERT INTO conversations (account_id, conversation_id, thread_id) VALUES (?, ?, ?)
        ON CONFLICT (account_id, conversation_id) DO UPDATE SET thread_id = excluded.thread_id, state = NULL,
          announced_assignee = NULL, assignee_notice_id = NULL, announce_pending = NULL, title_subject = NULL, title = NULL, title_message_id = NULL,
-         card_id = excluded.card_id, card_covered = NULL, answer_id = NULL, answer_source_id = NULL,
+         card_id = NULL, card_covered = NULL, answer_id = NULL, answer_source_id = NULL,
          customer_message_id = NULL`,
       accountId,
       conversationId,
       threadId,
-      unknownCards(threadId),
     );
   }
 
