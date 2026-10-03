@@ -44,6 +44,8 @@ export function isInvalidRequest(error: unknown): boolean {
 
 interface DiscordRequest<Body = never, Query extends object = never> {
   body?: Body;
+  /** Prepare time-sensitive notification content only after the dispatch permits arrive. */
+  prepareBody?: () => Body;
   query?: Query;
   /** Webhook and interaction-token routes authenticate by URL; send no bot token. */
   auth?: boolean;
@@ -118,6 +120,7 @@ export class DiscordRest {
     const headers = new Headers({ "user-agent": USER_AGENT });
     if (request.auth !== false) headers.set("authorization", `Bot ${this.token}`);
     if (request.body !== undefined) headers.set("content-type", "application/json");
+    const body = request.prepareBody ? request.prepareBody() : request.body;
 
     const response = await this.fetch(
       new Request(url, {
@@ -125,7 +128,7 @@ export class DiscordRest {
         headers,
         redirect: "manual",
         ...(request.signal ? { signal: request.signal } : {}),
-        ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       }),
     );
     const text = await response.text();
@@ -149,7 +152,9 @@ export class DiscordRest {
         ...(response.headers.has("x-ratelimit-limit")
           ? { capacity: Number(response.headers.get("x-ratelimit-limit")) }
           : {}),
-        resetAfterMs: seconds(response.headers.get("x-ratelimit-reset-after")) * 1000,
+        resetAfterMs: response.headers.has("x-ratelimit-reset-after")
+          ? seconds(response.headers.get("x-ratelimit-reset-after")) * 1000
+          : 0,
         retryAfterMs,
         global: global && !request.interaction,
       },

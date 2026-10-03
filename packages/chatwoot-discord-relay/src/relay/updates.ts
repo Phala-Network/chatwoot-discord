@@ -25,6 +25,7 @@ export async function processMessageUpdate(
   const post = store.conversation(accountId, conversationId);
   const threadId = post?.threadId;
   if (!settings.account(accountId) || !threadId || post?.cursor === undefined || messageId > post.cursor) return;
+  await relay.ensureThread(accountId, conversationId, threadId);
   const message = await chatwoot.getMessage(accountId, conversationId, messageId);
   if (!message) return;
   if (message.content_attributes?.deleted === true) {

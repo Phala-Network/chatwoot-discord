@@ -1,5 +1,6 @@
 import { ComponentType } from "discord-api-types/v10";
 import { beforeEach, describe, expect, it } from "vitest";
+import { JobDeadlineError } from "../../../shared/deadline.ts";
 import type { LinkedAgent, RelayAssignee, RelayMessage } from "../../../shared/types.ts";
 import { ticketCard } from "../src/commands/components.ts";
 import { CONTENT_LIMIT } from "../src/relay/format.ts";
@@ -35,6 +36,55 @@ const AVATARS = {
 const triage = { userId: TRIAGE, name: "Triage bot", perConversationPerHour: 5, perHour: 30 };
 const resolved = { status: "resolved" };
 const tagsFor = (status: string) => ({ archived: false, applied_tags: ["t-acme", `t-${status}`] });
+
+it("suppresses an expired triage grant in an unsent frozen notification part while preserving the body and human mention", async () => {
+  let now = new Date("2026-09-27T20:59:59Z");
+  let grants = 0;
+  const { relay, forum, store } = relayWith({
+    triage,
+    now: () => now,
+    linkedAgent: () => ({ discordUserId: "42" }),
+    reserveTriage: async () => {
+      grants++;
+      return true;
+    },
+  });
+  await relay.relay(message({ id: 100, answered: true }));
+  store.updateConversation(3, 12, { announcedAssignee: "42" });
+  const execute = forum.execute.bind(forum);
+  let delayed = false;
+  forum.execute = async (...args) => {
+    if (!delayed && args[1].content?.includes(`<@${TRIAGE}>`)) {
+      delayed = true;
+      throw new JobDeadlineError(false);
+    }
+    return execute(...args);
+  };
+  const incoming = message({
+    content: `${"x".repeat(2100)}\n-# Keep this customer footer`,
+    conversation: { assignee: { id: 42 } },
+  });
+  await expect(relay.relay(incoming)).rejects.toBeInstanceOf(JobDeadlineError);
+  now = new Date("2026-09-27T21:00:00Z");
+  const resumed = relayWith({
+    forum,
+    store,
+    triage,
+    now: () => now,
+    linkedAgent: () => ({ discordUserId: "42" }),
+    reserveTriage: async () => {
+      grants++;
+      return true;
+    },
+  }).relay;
+  await resumed.relay(incoming);
+  const last = forum.calls.at(-1)?.[1];
+  expect(last?.content).not.toContain(`<@${TRIAGE}>`);
+  expect(last?.content).toContain("-# Keep this customer footer");
+  expect(last?.content).toContain("<@42>");
+  expect(last?.allowed_mentions?.users).toContain("42");
+  expect(grants).toBe(1);
+});
 
 it("keeps an unknown card unaddressable while later body, tags and archive converge", async () => {
   const { relay, forum, store } = relayWith({ card: ticketCard });

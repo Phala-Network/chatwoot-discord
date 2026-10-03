@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Budget } from "../../../shared/budget.ts";
+import { Budget, JobDeadlineError } from "../../../shared/budget.ts";
 import { type CommandExecution, commandPanel, executeCommand } from "../src/commands/actions.ts";
 import type { CommandAction, CommandJob } from "../src/commands/job.ts";
+import { Effects } from "../src/effects.ts";
 import { ALICE, BOB, json, mockFetch, on, type Route, testSettings } from "./helpers.ts";
 
 const settings = testSettings();
@@ -49,6 +50,130 @@ function runWith(given: typeof settings, action: CommandAction, ...routes: Route
 afterEach(() => vi.restoreAllMocks());
 
 describe("executeCommand", () => {
+  it("does not skip an unknown reply assignment target when the fresh assignee is present but its status mismatches", async () => {
+    const rows = new Map<string, string>();
+    const effects = new Effects({ get: (key) => rows.get(key), set: (key, value) => rows.set(key, value) });
+    effects.save("command:1:assign", {
+      state: "UNKNOWN",
+      startedAt: Date.now(),
+      request: {
+        kind: "assignment",
+        id: 42,
+        type: "User",
+        inboxId: 2,
+        status: "open",
+      },
+    });
+    const mock = mockFetch(
+      profile,
+      on("GET", conversation, () =>
+        json({ id: 15, inbox_id: 2, status: "pending", meta: { assignee_type: "User", assignee: { id: 42 } } }),
+      ),
+      ok("POST", `${conversation}/messages`),
+    );
+    const result = await executeCommand(job({ type: "message", private: false, content: "Hello", files: [] }), {
+      settings,
+      fetch,
+      effects,
+    });
+    expect(result.content).toContain("result is unknown");
+    expect(mock.requests.filter((request) => request.method === "POST")).toHaveLength(0);
+  });
+
+  it("recovers a confirmed handoff after result loss without changing paths when the inbox bot disconnects", async () => {
+    const rows = new Map<string, string>();
+    const effects = () => new Effects({ get: (key) => rows.get(key), set: (key, value) => rows.set(key, value) });
+    let connected = true;
+    const mock = mockFetch(
+      profile,
+      on("GET", conversation, () => json({ id: 15, status: "open", inbox_id: 2 })),
+      on("GET", `${cw}/accounts/3/inboxes/2/agent_bot`, () =>
+        json({ agent_bot: connected ? { id: 77, account_id: 3 } : null }),
+      ),
+      ok("POST", `${conversation}/assignments`),
+      ok("POST", `${conversation}/toggle_status`),
+    );
+    const command = job({ type: "status", status: "pending" });
+    expect((await executeCommand(command, { settings, fetch, effects: effects() })).content).toContain("Handed back");
+    connected = false;
+    expect((await executeCommand(command, { settings, fetch, effects: effects() })).content).toContain("Handed back");
+    expect(mock.requests.filter((request) => request.method === "POST").map((request) => request.url.pathname)).toEqual(
+      ["/api/v1/accounts/3/conversations/15/assignments"],
+    );
+  });
+
+  it.each(["add", "remove"] as const)(
+    "recovers the original full label target for %s after losing the command result",
+    async (change) => {
+      const rows = new Map<string, string>();
+      const effects = () => new Effects({ get: (key) => rows.get(key), set: (key, value) => rows.set(key, value) });
+      let labels = ["refund", ...(change === "remove" ? ["vip"] : [])];
+      const mock = mockFetch(
+        profile,
+        on("GET", `${cw}/accounts/3/labels`, () => json({ payload: [{ title: "vip" }, { title: "refund" }] })),
+        on("GET", `${conversation}/labels`, () => json({ payload: labels })),
+        on("POST", `${conversation}/labels`, () => {
+          labels = change === "add" ? ["vip"] : ["refund"];
+          return change === "add" ? json({}, { status: 502 }) : json({});
+        }),
+      );
+      const command = job({ type: "label", change, label: "vip" });
+      const first = await executeCommand(command, { settings, fetch, effects: effects() });
+      const resumed = await executeCommand(command, { settings, fetch, effects: effects() });
+      if (change === "add") expect(resumed.content).toContain("result is unknown");
+      else expect(resumed.content).toBe("✅ Label vip removed.");
+      expect(resumed.content).toBe(first.content);
+      expect(mock.requests.filter((request) => request.method === "POST")).toHaveLength(1);
+    },
+  );
+
+  it("reports an already confirmed reply even if its channel reply window closes before result recovery", async () => {
+    const rows = new Map<string, string>();
+    const effects = () => new Effects({ get: (key) => rows.get(key), set: (key, value) => rows.set(key, value) });
+    let canReply = true;
+    const mock = mockFetch(
+      profile,
+      on("GET", conversation, () =>
+        json({ id: 15, status: "open", can_reply: canReply, meta: { assignee: { id: 42 } } }),
+      ),
+      ok("POST", `${conversation}/messages`),
+    );
+    const command = job({ type: "message", private: false, content: "Reply", files: [] });
+    const first = await executeCommand(command, { settings, fetch, effects: effects() });
+    canReply = false;
+    expect((await executeCommand(command, { settings, fetch, effects: effects() })).content).toBe(first.content);
+    expect(mock.requests.filter((request) => request.method === "POST")).toHaveLength(1);
+  });
+
+  it("resumes a partial block against the original contact without resolving twice", async () => {
+    const rows = new Map<string, string>();
+    const effects = () => new Effects({ get: (key) => rows.get(key), set: (key, value) => rows.set(key, value) });
+    let contact = 77;
+    let attempts = 0;
+    const mock = mockFetch(
+      profile,
+      on("GET", conversation, () => json({ id: 15, status: "open", meta: { sender: { id: contact } } })),
+      ok("POST", `${conversation}/toggle_status`),
+      on("PUT", `${cw}/accounts/3/contacts/77`, () => {
+        if (++attempts === 1) throw new JobDeadlineError(false);
+        return json({});
+      }),
+      ok("PUT", `${cw}/accounts/3/contacts/99`),
+    );
+    const command = job({ type: "block" });
+    await expect(executeCommand(command, { settings, fetch, effects: effects() })).rejects.toBeInstanceOf(
+      JobDeadlineError,
+    );
+    contact = 99;
+    expect((await executeCommand(command, { settings, fetch, effects: effects() })).content).toContain(
+      "Contact blocked",
+    );
+    expect(mock.requests.filter((request) => request.method === "POST")).toHaveLength(1);
+    expect(mock.requests.filter((request) => request.method === "PUT").map((request) => request.url.pathname)).toEqual([
+      "/api/v1/accounts/3/contacts/77",
+      "/api/v1/accounts/3/contacts/77",
+    ]);
+  });
   it("acts with the invoking agent's own token", async () => {
     const { result, requests } = run(
       { type: "status", status: "resolved" },

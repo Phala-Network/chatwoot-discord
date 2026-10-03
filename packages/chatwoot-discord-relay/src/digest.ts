@@ -19,14 +19,21 @@ export class QueueDigest extends DurableObject<Env> {
     this.store.migrate();
   }
   stage(epoch: string, escalations: string): void {
-    escalationsSchema.parse(JSON.parse(escalations));
-    const saved = this.store.get("adoption:epoch");
-    if (saved && saved !== epoch) throw new Error("Digest epoch conflict");
-    if (!saved) {
-      this.store.set("queue:escalations", escalations);
-      this.store.set("adoption:epoch", epoch);
-    }
+    const baseline = escalationsSchema.parse(JSON.parse(escalations));
+    const receipt = JSON.stringify({
+      epoch,
+      baseline: Object.entries(baseline).sort(([a], [b]) => a.localeCompare(b)),
+    });
+    this.store.transaction(() => {
+      const saved = this.store.get("adoption:baseline");
+      if (saved && saved !== receipt) throw new Error("Digest baseline conflict");
+      if (!saved) {
+        this.store.set("queue:escalations", JSON.stringify(baseline));
+        this.store.set("adoption:baseline", receipt);
+      }
+    });
   }
+
   async request(hour: number): Promise<void> {
     this.store.enqueue(`queue:${hour}`, 0, JSON.stringify(hour), hour);
     await scheduleAlarm(this.ctx, this.store.nextWakeup());

@@ -23,7 +23,20 @@ import { FAILED, filesTooLarge, NOT_LINKED, UNKNOWN_RESULT, UserError } from "./
 import { assigneeMenu, panel } from "./components.ts";
 import { PRIORITY_NAMES } from "./definitions.ts";
 import type { CommandJob } from "./job.ts";
-import { assignmentTarget, mutate, UnknownMutation } from "./mutation.ts";
+import { assignmentTarget, type MutationTarget, mutate, UnknownMutation } from "./mutation.ts";
+
+const COMMAND_STEPS = ["labels", "handoff", "status", "priority", "resolve", "block", "assign", "message"] as const;
+
+export function commandStarted(effects: Effects, interactionId: string): boolean {
+  return COMMAND_STEPS.some((step) => effects.read(`command:${interactionId}:${step}`)?.startedAt !== undefined);
+}
+
+function commandMayHaveApplied(effects: Effects, interactionId: string): boolean {
+  return COMMAND_STEPS.some((step) => {
+    const state = effects.read(`command:${interactionId}:${step}`)?.state;
+    return state !== undefined && state !== "READY" && state !== "REJECTED";
+  });
+}
 
 export interface CommandResult {
   /** The confirmation shown to the invoker (only they see it). */
@@ -64,27 +77,34 @@ export async function executeCommand(job: CommandJob, execution: CommandExecutio
   // The link is checked again here: it may have changed since the command was queued.
   const chatwootUserId = settings.chatwootUserFor(job.discordUserId);
   const token = settings.agentToken(job.discordUserId);
-  if (chatwootUserId === undefined || !token) return { content: `❌ ${NOT_LINKED}`, conversationGone: false };
+  if (chatwootUserId === undefined || !token)
+    return {
+      content: commandMayHaveApplied(effects, job.interactionId) ? UNKNOWN_RESULT : `❌ ${NOT_LINKED}`,
+      conversationGone: false,
+    };
   const chatwoot = chatwootClient(settings.config.chatwoot.baseUrl, token, fetch, limits);
   const { accountId, conversationId, action } = job;
-  const write = <Target extends import("./mutation.ts").MutationTarget>(
+  const write = <Target extends MutationTarget>(
     step: string,
     target: Target,
-    send: (frozen: Target) => Promise<unknown>,
+    send?: (frozen: Target) => Promise<unknown>,
   ) => mutate(effects, `command:${job.interactionId}:${step}`, target, chatwoot, job, send);
+  const recorded = (step: string) => effects.read<unknown, MutationTarget>(`command:${job.interactionId}:${step}`);
+  const resume = async (step: string): Promise<boolean> => {
+    const effect = recorded(step);
+    if (!effect) return false;
+    await write(step, effect.request);
+    return true;
+  };
   const assign = async (
     step: string,
     id: number | null,
     type: "User" | "AgentBot" = "User",
     fresh?: ChatwootConversation,
   ) => {
+    if (await resume(step)) return;
     const current = fresh ?? (await existing(chatwoot.getConversation(accountId, conversationId)));
-    const target = assignmentTarget(current, id, type);
-    return write(step, target, (frozen) =>
-      frozen.id === null
-        ? chatwoot.unassign(accountId, conversationId)
-        : chatwoot.assign(accountId, conversationId, frozen.id, frozen.type),
-    );
+    await write(step, assignmentTarget(current, id, type));
   };
 
   try {
@@ -116,6 +136,8 @@ export async function executeCommand(job: CommandJob, execution: CommandExecutio
         };
       }
       case "labels": {
+        message = action.labels.length > 0 ? `Label set to ${action.labels.join(", ")}.` : "Labels removed.";
+        if (await resume("labels")) break;
         const [known, conversation] = await parallel(
           chatwoot.listLabels(accountId),
           existing(chatwoot.getConversation(accountId, conversationId)),
@@ -125,67 +147,63 @@ export async function executeCommand(job: CommandJob, execution: CommandExecutio
         // The panel sets the topic label; the ticket's kinds stay.
         const kinds = kindLabels(settings);
         const kept = (conversation.labels ?? []).filter((label) => kinds.has(label) && !action.labels.includes(label));
-        await write("labels", { kind: "labels", labels: [...action.labels, ...kept] }, (frozen) =>
-          chatwoot.setLabels(accountId, conversationId, frozen.labels),
-        );
-        message = action.labels.length > 0 ? `Label set to ${action.labels.join(", ")}.` : "Labels removed.";
+        await write("labels", { kind: "labels", labels: [...action.labels, ...kept] });
         break;
       }
       case "status": {
         const { status, snoozedUntil } = action;
-        if (status === "pending") {
+        if (status === "pending" && !recorded("status")) {
+          if (await resume("handoff")) {
+            message = "Handed back to the inbox bot.";
+            break;
+          }
           const conversation = await existing(chatwoot.getConversation(accountId, conversationId));
           if (conversation.inbox_id === undefined) throw new UserError("This conversation has no inbox.");
           const bot = await chatwoot.inboxBot(accountId, conversation.inbox_id);
           if (bot) {
-            await write("handoff", assignmentTarget(conversation, bot.id, "AgentBot"), (frozen) =>
-              chatwoot.assign(accountId, conversationId, frozen.id ?? bot.id, frozen.type),
-            );
+            await write("handoff", assignmentTarget(conversation, bot.id, "AgentBot"));
             message = "Handed back to the inbox bot.";
             break;
           }
         }
-        await write("status", { kind: "status", status, snoozedUntil: snoozedUntil ?? null }, (frozen) =>
-          chatwoot.setStatus(
-            accountId,
-            conversationId,
-            frozen.snoozedUntil === null ? { status } : { status, snoozed_until: frozen.snoozedUntil },
-          ),
-        );
+        await write("status", { kind: "status", status, snoozedUntil: snoozedUntil ?? null });
         message = statusMessage(status, snoozedUntil);
         break;
       }
       case "priority":
-        await write("priority", { kind: "priority", priority: action.priority }, (frozen) =>
-          chatwoot.setPriority(accountId, conversationId, frozen.priority),
-        );
+        await write("priority", { kind: "priority", priority: action.priority });
         message = action.priority ? `Priority set to ${PRIORITY_NAMES[action.priority]}.` : "Priority removed.";
         break;
       case "block": {
         // What Chatwoot's "Block contact" does (Conversation#mute!), through the documented API:
         // resolve the conversation and set the contact's `blocked` flag.
-        const contactId = (await existing(chatwoot.getConversation(accountId, conversationId))).meta?.sender?.id;
-        if (contactId === undefined) throw new UserError("This conversation has no contact to block.");
-        await write("resolve", { kind: "status", status: "resolved", snoozedUntil: null }, () =>
-          chatwoot.setStatus(accountId, conversationId, { status: "resolved" }),
-        );
-        await write("block", { kind: "contact", id: contactId, blocked: true }, (frozen) =>
-          chatwoot.setContactBlocked(accountId, frozen.id, frozen.blocked),
-        );
+        if (!recorded("block")) {
+          const contactId = (await existing(chatwoot.getConversation(accountId, conversationId))).meta?.sender?.id;
+          if (contactId === undefined) throw new UserError("This conversation has no contact to block.");
+          effects.save(`command:${job.interactionId}:block`, {
+            state: "READY",
+            request: { kind: "contact", id: contactId, blocked: true },
+          });
+        }
+        await write("resolve", { kind: "status", status: "resolved", snoozedUntil: null });
+        await resume("block");
         message = "Contact blocked and conversation resolved. Their new messages will not be posted here.";
         break;
       }
       case "unblock": {
         // Chatwoot's "Unblock contact": clears the contact's `blocked` flag; the conversation stays as it is.
+        message = "Contact unblocked. Their new messages will be posted here again.";
+        if (await resume("block")) break;
         const contactId = (await existing(chatwoot.getConversation(accountId, conversationId))).meta?.sender?.id;
         if (contactId === undefined) throw new UserError("This conversation has no contact to unblock.");
-        await write("block", { kind: "contact", id: contactId, blocked: false }, (frozen) =>
-          chatwoot.setContactBlocked(accountId, frozen.id, frozen.blocked),
-        );
-        message = "Contact unblocked. Their new messages will be posted here again.";
+        await write("block", { kind: "contact", id: contactId, blocked: false });
         break;
       }
       case "assign": {
+        if (await resume("assign")) {
+          message = "Assigned to the agent.";
+          break;
+        }
         // Chatwoot assigns a user who is not an agent of the account as no one (it unassigns:
         // Conversations::AssignmentService at v4.18.0), so membership is checked first.
         const agents = await chatwoot.listAgents(accountId);
@@ -203,27 +221,24 @@ export async function executeCommand(job: CommandJob, execution: CommandExecutio
       case "label": {
         // Chatwoot sets a conversation's labels as a whole list.
         const { change, label } = action;
+        message = `Label ${label} ${change === "add" ? "added" : "removed"}.`;
+        if (await resume("labels")) break;
         const [current, known] = await parallel(
           chatwoot.conversationLabels(accountId, conversationId),
           change === "add" ? chatwoot.listLabels(accountId) : Promise.resolve([]),
         );
         if (change === "add") {
           if (!known.includes(label)) throw new UserError(`There is no label "${label}" in this Chatwoot account.`);
-          if (!current.includes(label))
-            await write("labels", { kind: "labels", labels: [...current, label] }, (frozen) =>
-              chatwoot.setLabels(accountId, conversationId, frozen.labels),
-            );
-          message = `Label ${label} added.`;
+          if (!current.includes(label)) await write("labels", { kind: "labels", labels: [...current, label] });
         } else {
           if (!current.includes(label)) throw new UserError(`This conversation has no label "${label}".`);
-          await write("labels", { kind: "labels", labels: current.filter((name) => name !== label) }, (frozen) =>
-            chatwoot.setLabels(accountId, conversationId, frozen.labels),
-          );
-          message = `Label ${label} removed.`;
+          await write("labels", { kind: "labels", labels: current.filter((name) => name !== label) });
         }
         break;
       }
       case "message": {
+        message = action.private ? "Note added." : `Sent to the customer as ${profile.available_name || profile.name}.`;
+        if (recorded("message")?.state !== "READY" && (await resume("message"))) break;
         const attachmentLimits = settings.config.attachments;
         const files: Array<Awaited<ReturnType<typeof downloadAttachment>>> = [];
         let total = 0;
@@ -241,7 +256,8 @@ export async function executeCommand(job: CommandJob, execution: CommandExecutio
           // 24-hour window (Conversations::MessageWindowService at v4.18.0).
           if (conversation.can_reply === false) throw new UserError(CANNOT_REPLY);
           // A public reply to an unassigned conversation assigns it to the replying agent.
-          if (!personAssignee(conversation)) await assign("assign", profile.id, "User", conversation);
+          if (!(await resume("assign")) && !personAssignee(conversation))
+            await assign("assign", profile.id, "User", conversation);
         }
         const uploadClient = chatwootClient(
           settings.config.chatwoot.baseUrl,
@@ -261,7 +277,6 @@ export async function executeCommand(job: CommandJob, execution: CommandExecutio
           return { id: receipt.id };
         });
         // Customers see an agent's display name (`available_name`).
-        message = action.private ? "Note added." : `Sent to the customer as ${profile.available_name || profile.name}.`;
         break;
       }
     }
@@ -286,7 +301,7 @@ export async function executeCommand(job: CommandJob, execution: CommandExecutio
       throw error;
     const gone = error instanceof ConversationGoneError || (error instanceof ChatwootError && error.status === 404);
     return {
-      content: failure(error, job),
+      content: commandMayHaveApplied(effects, job.interactionId) ? UNKNOWN_RESULT : failure(error, job),
       conversationGone: gone,
     };
   }

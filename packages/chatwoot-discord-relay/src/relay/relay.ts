@@ -36,6 +36,12 @@ type MessageComponents = NonNullable<WebhookMessage["components"]>;
 interface PlannedPart {
   message: WebhookMessage;
   plainContent: string;
+  notification?: NotificationExpiry;
+}
+
+export interface NotificationExpiry {
+  expiresAt: number;
+  contentWithoutTriage: string;
 }
 
 /** Thrown by a ForumClient when a post no longer exists in Discord (e.g. it was deleted). */
@@ -58,6 +64,7 @@ export interface ForumClient {
     threadId?: string,
     sendKey?: string,
     checkpoint?: (receipt: { channelId: string; messageId: string }) => void,
+    notification?: NotificationExpiry,
   ): Promise<SendOutcome>;
   /**
    * Modifies a post of the forum. Discord rejects changes to an archived post unless the same
@@ -277,10 +284,14 @@ export class Relay {
    * lets a request change an archived post if it also unarchives it, so the changes are applied
    * with `archived: false` and a resolved post is archived by a last request.
    */
+  async ensureThread(accountId: number, conversationId: number, threadId: string): Promise<void> {
+    await this.options.ensureThread?.(accountId, conversationId, threadId);
+  }
+
   async sync(accountId: number, conversation: RelayConversation, threadId: string): Promise<void> {
     const { store, forum } = this.options;
     const state = this.stateOf(conversation);
-    await this.options.ensureThread?.(accountId, conversation.id, threadId);
+    await this.ensureThread(accountId, conversation.id, threadId);
     const recorded = store.conversation(accountId, conversation.id);
     const source = recorded?.answerSourceId;
     const draft = source && answersLatest(source, recorded?.customerMessageId) ? recorded?.answerId : undefined;
@@ -378,11 +389,14 @@ export class Relay {
     const { store, forum } = this.options;
     const threadId = store.conversation(accountId, conversationId)?.threadId;
     const gone = this.notice("This conversation no longer exists in Chatwoot.");
-    if (threadId && (await this.postMessage(accountId, { id: conversationId }, gone, "deleted")) !== undefined) {
-      try {
-        await forum.updateThread(this.forumOf(accountId), threadId, { archived: true });
-      } catch (error) {
-        if (!(error instanceof UnknownThreadError)) throw error;
+    if (threadId) {
+      await this.postMessage(accountId, { id: conversationId }, gone, "deleted");
+      if (store.conversation(accountId, conversationId)?.threadId) {
+        try {
+          await forum.updateThread(this.forumOf(accountId), threadId, { archived: true });
+        } catch (error) {
+          if (!(error instanceof UnknownThreadError)) throw error;
+        }
       }
     }
     store.forgetThread(accountId, conversationId);
@@ -426,6 +440,14 @@ export class Relay {
       ]);
       return {
         plainContent: chunk,
+        ...(last && notification.triageExpiresAt !== undefined
+          ? {
+              notification: {
+                expiresAt: notification.triageExpiresAt,
+                contentWithoutTriage: [chunk, ...(notification.withoutTriage ?? [])].join("\n"),
+              },
+            }
+          : {}),
         message: {
           content,
           username,
@@ -453,9 +475,9 @@ export class Relay {
     const { store, forum } = this.options;
     const accountId = message.account.id;
     const conversationId = message.conversation.id;
-    await this.options.ensureThread?.(accountId, conversationId, threadId);
+    await this.ensureThread(accountId, conversationId, threadId);
     let incomplete = false;
-    for (const [part, { message: frozen, plainContent }] of parts.entries()) {
+    for (const [part, { message: frozen, plainContent, notification }] of parts.entries()) {
       const payload = incomplete
         ? {
             ...frozen,
@@ -465,7 +487,9 @@ export class Relay {
               users: frozen.allowed_mentions?.users?.filter((id) => plainContent.includes(`<@${id}>`)) ?? [],
             },
           }
-        : frozen;
+        : notification && (this.options.now?.() ?? new Date()).getTime() >= notification.expiresAt
+          ? { ...frozen, content: notification.contentWithoutTriage }
+          : frozen;
       this.unarchived(accountId, message.conversation);
       store.updateConversation(accountId, conversationId, { cardCovered: 1 });
       const outcome = await forum.execute(
@@ -474,6 +498,7 @@ export class Relay {
         threadId,
         `message:${accountId}:${conversationId}:${message.id}:${part}:${threadId}`,
         (receipt) => store.savePostedPart(accountId, conversationId, message.id, part, receipt.messageId),
+        incomplete ? undefined : notification,
       );
       if (outcome.state !== "confirmed") {
         incomplete = true;
@@ -542,6 +567,7 @@ export class Relay {
     const { store, forum } = this.options;
     const threadId = store.conversation(accountId, conversation.id)?.threadId;
     if (!threadId) return undefined;
+    await this.ensureThread(accountId, conversation.id, threadId);
     this.unarchived(accountId, conversation);
     store.updateConversation(accountId, conversation.id, { cardCovered: 1 });
     try {

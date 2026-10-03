@@ -1082,6 +1082,7 @@ describe("agent bot lifecycle", () => {
         expect(customer?.includes(`<@${TRIAGE}>`)).toBe(change === "fails");
       });
     },
+    10_000, // This scenario also relays all 301 activity messages through the real SQLite store.
   );
 });
 

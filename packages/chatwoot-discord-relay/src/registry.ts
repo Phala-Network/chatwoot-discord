@@ -41,7 +41,20 @@ export async function discoverForum(rest: DiscordRest, store: Cache, forumId: st
     (hook) => hook.type === WebhookType.Incoming && hook.application_id === application.id && hook.token,
   );
   if (!webhook) {
-    const effect = await new Effects(store).run(`webhook:${forumId}`, { name: "Chatwoot" }, (frozen) =>
+    const effects = new Effects(store);
+    let generation = Number(store.get("creation:generation") ?? 0);
+    const previous = effects.read<RESTPostAPIChannelWebhookResult>(`webhook:${forumId}:${generation}`);
+    // Only this fresh successful list can prove a known resource was deleted. UNKNOWN
+    // creation without a receipt keeps its original guard and cannot authorize another POST.
+    if (
+      previous?.state === "CONFIRMED" &&
+      previous.receipt &&
+      !hooks.some((hook) => hook.id === previous.receipt?.id)
+    ) {
+      generation++;
+      store.set("creation:generation", String(generation));
+    }
+    const effect = await effects.run(`webhook:${forumId}:${generation}`, { name: "Chatwoot" }, (frozen) =>
       rest.post<RESTPostAPIChannelWebhookResult, typeof frozen>(Routes.channelWebhooks(forumId), { body: frozen }),
     );
     if (effect.state !== "CONFIRMED") return null;

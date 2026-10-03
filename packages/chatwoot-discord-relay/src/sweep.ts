@@ -26,7 +26,13 @@ export class AccountSweep extends DurableObject<Env> {
 
   async request(accountId: number, full = false): Promise<void> {
     this.bind(accountId);
-    if (full) this.store.set("full", "1");
+    if (full)
+      this.ctx.storage.transactionSync(() => {
+        this.store.set("generation", String(Number(this.store.get("generation") ?? 0) + 1));
+        this.store.set("full", "1");
+        this.store.delete("scan");
+        this.store.delete("roster:after");
+      });
     this.store.enqueue("sweep", 0, "{}");
     await scheduleAlarm(this.ctx, this.store.nextWakeup());
   }
@@ -40,6 +46,7 @@ export class AccountSweep extends DurableObject<Env> {
   override async alarm(): Promise<void> {
     const job = this.store.nextDueJob();
     if (!job) return;
+    const generation = this.store.get("generation");
     const settings = await loadSettings(this.env);
     const budget = new Budget(settings.config.relay.subrequestBudget);
     budget.startSlice();
@@ -70,28 +77,30 @@ export class AccountSweep extends DurableObject<Env> {
         ) ?? { page: 1, cutoff: this.store.get("full") ? 0 : now / 1000 - window, done: false, startedAt: now };
         const cutoff = scan.cutoff;
         const items = scan.done ? [] : await chatwoot.listConversations(accountId, scan.page);
-        for (const item of items)
-          if (
-            item.id &&
-            (item.messages?.some((message) => message.id !== undefined) ||
-              this.ctx.storage.sql.exec("SELECT 1 FROM roster WHERE id=?", item.id).toArray().length) &&
-            relaysInbox(account, item.inbox_id) &&
-            (item.last_activity_at ?? 0) >= cutoff
-          )
-            this.ctx.storage.sql.exec("INSERT OR IGNORE INTO deliveries VALUES (?)", item.id);
-        const ended = items.length === 0 || items.some((item) => (item.last_activity_at ?? 0) < cutoff);
-        const wasDone = scan.done;
-        scan.done ||= ended;
-        scan.page += 1;
-        this.store.set("scan", JSON.stringify(scan));
-        const after = Number(this.store.get("roster:after") ?? 0);
-        const known = wasDone
-          ? []
-          : this.ctx.storage.sql
-              .exec<{ id: number }>("SELECT id FROM roster WHERE id > ? ORDER BY id LIMIT 12", after)
-              .toArray();
-        for (const item of known) this.ctx.storage.sql.exec("INSERT OR IGNORE INTO deliveries VALUES (?)", item.id);
-        this.store.set("roster:after", String(known.length < 12 ? 0 : (known.at(-1)?.id ?? 0)));
+        if (generation === this.store.get("generation")) {
+          for (const item of items)
+            if (
+              item.id &&
+              (item.messages?.some((message) => message.id !== undefined) ||
+                this.ctx.storage.sql.exec("SELECT 1 FROM roster WHERE id=?", item.id).toArray().length) &&
+              relaysInbox(account, item.inbox_id) &&
+              (item.last_activity_at ?? 0) >= cutoff
+            )
+              this.ctx.storage.sql.exec("INSERT OR IGNORE INTO deliveries VALUES (?)", item.id);
+          const ended = items.length === 0 || items.some((item) => (item.last_activity_at ?? 0) < cutoff);
+          const wasDone = scan.done;
+          scan.done ||= ended;
+          scan.page += 1;
+          this.store.set("scan", JSON.stringify(scan));
+          const after = Number(this.store.get("roster:after") ?? 0);
+          const known = wasDone
+            ? []
+            : this.ctx.storage.sql
+                .exec<{ id: number }>("SELECT id FROM roster WHERE id > ? ORDER BY id LIMIT 12", after)
+                .toArray();
+          for (const item of known) this.ctx.storage.sql.exec("INSERT OR IGNORE INTO deliveries VALUES (?)", item.id);
+          this.store.set("roster:after", String(known.length < 12 ? 0 : (known.at(-1)?.id ?? 0)));
+        }
         deliveries = this.ctx.storage.sql
           .exec<{ id: number }>("SELECT id FROM deliveries ORDER BY id LIMIT 12")
           .toArray();
@@ -105,7 +114,8 @@ export class AccountSweep extends DurableObject<Env> {
               await control(budget, () =>
                 conversation(this.env, accountId, item.id).enqueueConversation(accountId, item.id),
               );
-              this.ctx.storage.sql.exec("DELETE FROM deliveries WHERE id = ?", item.id);
+              if (generation === this.store.get("generation"))
+                this.ctx.storage.sql.exec("DELETE FROM deliveries WHERE id = ?", item.id);
             } catch (error) {
               log.warn("sweep delivery delayed", { accountId, conversationId: item.id, ...errorFields(error) });
             }
@@ -113,7 +123,11 @@ export class AccountSweep extends DurableObject<Env> {
         );
       }
       const scan: { done: boolean; startedAt: number } | null = JSON.parse(this.store.get("scan") ?? "null");
-      if (!scan?.done || this.ctx.storage.sql.exec("SELECT 1 FROM deliveries LIMIT 1").toArray().length)
+      if (
+        generation !== this.store.get("generation") ||
+        !scan?.done ||
+        this.ctx.storage.sql.exec("SELECT 1 FROM deliveries LIMIT 1").toArray().length
+      )
         this.store.deferJob(job);
       else {
         this.store.set("last", String(scan.startedAt));

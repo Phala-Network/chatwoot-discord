@@ -262,7 +262,7 @@ async function answeringReply(
  * account's forum and is not mapped to another conversation.
  */
 async function recoverThread(
-  { settings, store, forum }: ProcessorContext,
+  { settings, store, forum, relay }: ProcessorContext,
   accountId: number,
   forumChannelId: string,
   conversation: RelayConversation,
@@ -272,6 +272,7 @@ async function recoverThread(
   const threadId = threadIdFromUrl(conversation.customAttributes[attribute]);
   if (!threadId || store.ticketForThread(threadId)) return;
   if (!(await forum.threadExists(forumChannelId, threadId))) return;
+  await relay.ensureThread(accountId, conversation.id, threadId);
   store.adoptThread(accountId, conversation.id, threadId);
   log.info("recovered post from conversation link", { accountId, conversationId: conversation.id, threadId });
 }

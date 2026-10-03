@@ -8,6 +8,7 @@ import { type AdoptionCut, cleanLegacyCards, stageAdoption, validateCut, verifyL
 import { ticketCard } from "../src/commands/components.ts";
 import { configSchema } from "../src/config.ts";
 import { Conversation } from "../src/conversation.ts";
+import { QueueDigest } from "../src/digest.ts";
 import { DiscordForum } from "../src/discord/forum.ts";
 import { DiscordRest } from "../src/discord/rest.ts";
 import { legacyInventory } from "../src/legacy.ts";
@@ -64,6 +65,13 @@ it("retries interrupted staging with its complete response baseline instead of a
     expect(() => executor.stage(owner, THREAD, "fault-cut", 101, responses)).toThrow();
     state.storage.sql.exec("DROP TRIGGER interrupted_stage");
     new Conversation(state, env).stage(owner, THREAD, "fault-cut", 101, responses);
+    new Conversation(state, env).stage(
+      { generation: 2, forumId: FORUM, guildId: GUILD, conversationId: 12, accountId: 3 },
+      THREAD,
+      "fault-cut",
+      101,
+      responses.map(({ digest, messageId }) => ({ digest, messageId })),
+    );
     expect(new Store(state.storage.sql).postedResponse(3, 12, 99)).toBe(responses[0]?.digest);
   });
 });
@@ -179,11 +187,60 @@ it("prebuilds a silent thread directory and resumes the same cut after a lost st
   ).rejects.toThrow();
 });
 
+it.each(["missing-webhooks", "empty-webhooks", "wrong-forum", "unknown-account"])(
+  "rejects the entire %s cut before staging any earlier valid mapping",
+  async (defect) => {
+    const manifest = cut();
+    manifest.epoch = crypto.randomUUID();
+    manifest.mappings = [
+      {
+        ...manifest.mappings[0],
+        accountId: 3,
+        conversationId: 98701,
+        threadId: "100000000000098701",
+        guildId: GUILD,
+        forumId: FORUM,
+        generation: 1,
+        cursor: 101,
+        latestEligibleId: 101,
+        responses: [],
+      },
+      {
+        ...manifest.mappings[0],
+        accountId: defect === "unknown-account" ? 99 : 1,
+        conversationId: 98702,
+        threadId: "100000000000098702",
+        guildId: GUILD,
+        forumId: defect === "wrong-forum" ? "100000000000098703" : FORUM,
+        generation: 1,
+        cursor: 101,
+        latestEligibleId: 101,
+        responses: [],
+      },
+    ];
+    const settings = {
+      ...configSchema.parse(env.CONFIG),
+      relay: { ...configSchema.parse(env.CONFIG).relay, startAfterMessageId: 101 },
+      cutover: {
+        phase: "maintenance" as const,
+        epoch: manifest.epoch,
+        interactionFence: manifest.interactionFence,
+        notificationsAfter: Date.now() + 3600000,
+        legacyWebhooks:
+          defect === "missing-webhooks" ? {} : { [FORUM]: defect === "empty-webhooks" ? [] : ["100000000000000001"] },
+      },
+    };
+    await expect(stageAdoption({ ...env, CONFIG: settings }, manifest)).rejects.toThrow();
+    expect(await env.THREAD_DIRECTORY.getByName("thread:v1:100000000000098701").get()).toBeNull();
+  },
+);
+
 it("adopts once after cleanup restart and never recreates a new card whose POST was accepted without a receipt", async () => {
   const settings = configSchema.parse(env.CONFIG);
   const epoch = crypto.randomUUID();
   const owner = { accountId: 3, conversationId: 34567, guildId: GUILD, forumId: FORUM, generation: 1 };
   const thread = "100000000000056789";
+  expect(await env.THREAD_DIRECTORY.getByName(`thread:v1:${thread}`).claim(owner)).toBe(true);
   const activeEnv = {
     ...env,
     CONFIG: {
@@ -357,4 +414,62 @@ it("cleans old standalone cards through multiple pages/restarts, never a body or
   expect(
     requests.filter((request) => request.method === "GET").map((request) => request.url.searchParams.get("before")),
   ).toEqual([null, "297", "100"]);
+});
+
+it("rejects a zero-receipt cut whose conversation cursor is beyond the common watermark", () => {
+  const manifest = cut();
+  const mapping = manifest.mappings[0];
+  if (!mapping) throw new Error("Missing fixture mapping");
+  mapping.cursor = manifest.watermark + 1;
+  expect(() => validateCut(manifest)).toThrow();
+});
+
+it("refuses unfinished durable adoption when its runtime cutover configuration is removed", async () => {
+  const settings = configSchema.parse(env.CONFIG);
+  const owner = { accountId: 3, conversationId: 98765, guildId: GUILD, forumId: FORUM, generation: 1 };
+  const { requests } = mockFetch(
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/98765", () =>
+      json({
+        id: 98765,
+        status: "open",
+        inbox_id: 2,
+        custom_attributes: { discord_thread: `https://discord.com/channels/${GUILD}/${THREAD}` },
+      }),
+    ),
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/98765/messages", () => json({ payload: [] })),
+    on("GET", `discord.com/api/v10/channels/${THREAD}`, () => json({ id: THREAD, guild_id: GUILD, parent_id: FORUM })),
+    on("GET", `discord.com/api/v10/channels/${FORUM}`, () => json({ guild_id: GUILD, available_tags: [] })),
+    on("POST", "discord.com/api/v10/webhooks/1/tok", () => json({ id: "100000000000070000", channel_id: THREAD })),
+    on("PATCH", `discord.com/api/v10/channels/${THREAD}`, () => json({})),
+  );
+  await runInDurableObject(
+    env.CONVERSATION.getByName(`unfinished:${crypto.randomUUID()}`),
+    async (_instance, state) => {
+      vi.spyOn(state.storage, "setAlarm").mockResolvedValue();
+      let executor = new Conversation(state, { ...env, CONFIG: settings });
+      executor.stage(owner, THREAD, "removed-cut", 101, []);
+      await executor.enqueueConversation(3, 98765);
+      executor = new Conversation(state, { ...env, CONFIG: settings });
+      await executor.alarm();
+      expect(new Store(state.storage.sql).conversation(3, 98765)?.threadId).toBeUndefined();
+      expect(state.storage.sql.exec("SELECT 1 FROM jobs").toArray()).not.toHaveLength(0);
+    },
+  );
+  expect(requests).toHaveLength(0);
+});
+
+it("seals the original digest baseline atomically and rejects changed same-epoch staging after live evolution", async () => {
+  await runInDurableObject(env.QUEUE_DIGEST.getByName(`digest-stage:${crypto.randomUUID()}`), (_instance, state) => {
+    const baseline = { b: { since: 20, level: 1 }, a: { since: 10, level: 2 } };
+    let digest = new QueueDigest(state, env);
+    digest.stage("sealed", JSON.stringify(baseline));
+    const store = new Store(state.storage.sql);
+    store.set("queue:escalations", JSON.stringify({ a: { since: 10, level: 3 } }));
+    digest = new QueueDigest(state, env);
+    expect(() =>
+      digest.stage("sealed", JSON.stringify({ a: { level: 2, since: 10 }, b: { level: 1, since: 20 } })),
+    ).not.toThrow();
+    expect(() => digest.stage("sealed", JSON.stringify({ a: { since: 10, level: 3 } }))).toThrow();
+    expect(JSON.parse(store.get("queue:escalations") ?? "null")).toEqual({ a: { since: 10, level: 3 } });
+  });
 });

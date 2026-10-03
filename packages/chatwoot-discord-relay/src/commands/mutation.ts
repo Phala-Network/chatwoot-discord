@@ -1,11 +1,11 @@
-import type { ChatwootClient, ChatwootConversation } from "../../../../shared/chatwoot/api.ts";
+import type { ChatwootClient, ChatwootConversation, StatusChange } from "../../../../shared/chatwoot/api.ts";
 import type { Effects } from "../effects.ts";
 
 export type MutationTarget =
   | { kind: "message" }
   | { kind: "labels"; labels: string[] }
-  | { kind: "status"; status: string; snoozedUntil: number | null }
-  | { kind: "priority"; priority: string | null }
+  | { kind: "status"; status: StatusChange["status"]; snoozedUntil: number | null }
+  | { kind: "priority"; priority: Parameters<ChatwootClient["setPriority"]>[2] }
   | { kind: "assignment"; id: number | null; type: "User" | "AgentBot"; inboxId: number | null; status: string }
   | { kind: "contact"; id: number; blocked: boolean };
 
@@ -18,7 +18,7 @@ export async function mutate<Target extends MutationTarget>(
   target: Target,
   chatwoot: ChatwootClient,
   ticket: { accountId: number; conversationId: number },
-  send: (target: Target) => Promise<unknown>,
+  send: (target: Target) => Promise<unknown> = (frozen) => dispatch(chatwoot, ticket, frozen),
 ): Promise<void> {
   const effect = await effects.run(key, target, send);
   if (effect.state === "CONFIRMED" || effect.state === "CONFIRMED_BY_STATE") return;
@@ -33,6 +33,32 @@ export async function mutate<Target extends MutationTarget>(
     }
   }
   throw new UnknownMutation();
+}
+
+function dispatch(
+  client: ChatwootClient,
+  { accountId, conversationId }: { accountId: number; conversationId: number },
+  target: MutationTarget,
+): Promise<unknown> {
+  switch (target.kind) {
+    case "labels":
+      return client.setLabels(accountId, conversationId, target.labels);
+    case "status":
+      return client.setStatus(accountId, conversationId, {
+        status: target.status,
+        ...(target.snoozedUntil === null ? {} : { snoozed_until: target.snoozedUntil }),
+      });
+    case "priority":
+      return client.setPriority(accountId, conversationId, target.priority);
+    case "contact":
+      return client.setContactBlocked(accountId, target.id, target.blocked);
+    case "assignment":
+      return target.id === null
+        ? client.unassign(accountId, conversationId)
+        : client.assign(accountId, conversationId, target.id, target.type);
+    case "message":
+      throw new Error("Message preparation is required before dispatch");
+  }
 }
 
 async function matches(

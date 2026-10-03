@@ -25,6 +25,7 @@ interface State {
 interface Window {
   remaining: number;
   capacity: number;
+  durationMs: number;
   until: number;
   notBefore: number;
 }
@@ -67,8 +68,9 @@ export class LimitState {
     let window = this.state.get<Window>(key);
     if (!window || (window.until <= now && window.notBefore <= now)) {
       // Unknown routes get one probe; global covers both request and dispatch-permit lifetime.
-      const capacity = window?.capacity ?? (request.global ? 50 : 1);
-      window = { remaining: capacity, capacity, until: now + (request.global ? 1000 + PERMIT_MS : 1000), notBefore: 0 };
+      const durationMs = request.global ? 1000 + PERMIT_MS : (window?.durationMs ?? 0);
+      const capacity = request.global ? 50 : window?.durationMs ? window.capacity : 1;
+      window = { remaining: capacity, capacity, durationMs, until: now + (durationMs || 1000), notBefore: 0 };
     }
     const attempts = request.global
       ? (this.state.get<number[]>("attempts") ?? []).filter((at) => at + 1000 + PERMIT_MS > now)
@@ -117,6 +119,7 @@ export class LimitState {
     const current = this.state.get<Window>(key);
     const window: Window = {
       capacity: report.capacity ?? current?.capacity ?? Math.max(1, report.remaining ?? 1),
+      durationMs: Math.max(current?.durationMs ?? 0, old?.durationMs ?? 0, report.resetAfterMs),
       remaining: Math.min(current?.remaining ?? report.remaining ?? 0, report.remaining ?? current?.remaining ?? 0),
       until: Math.max(current?.until ?? 0, oldKey === key ? (old?.until ?? 0) : 0, now + report.resetAfterMs),
       notBefore: Math.max(
@@ -197,9 +200,6 @@ export class DiscordLimiter {
   }
 
   async reserve(method: string, path: string, token: string, auth: boolean, interaction: boolean) {
-    await this.flush();
-    // Reserve room for both controls, HTTP and cooldown reports before dispatch.
-    this.budget?.require(interaction ? 3 : 5);
     const resource = /^\/(channels|guilds|webhooks)\/([^/]+)/.exec(path);
     const owner = resource ? `${resource[1]}:${resource[2]}` : `route:${path}`;
     const route = `${method}:${path
@@ -207,6 +207,11 @@ export class DiscordLimiter {
       .replace(/^\/webhooks\/[^/]+\/[^/]+/, "/webhooks/:major/:token")
       .replace(/\/messages\/[^/]+/, "/messages/:id")}`;
     const credential = await fingerprint(auth ? token : (path.split("/")[3] ?? "unauth"));
+    const globalOwner = interaction ? undefined : auth ? `global:bot:${credential}` : "global:unauth:installation";
+    if (!(await this.flush(globalOwner ? [owner, globalOwner] : [owner])))
+      return { allowed: false as const, retryAfterMs: 1000 };
+    // Reserve room for both controls, HTTP and cooldown reports before dispatch.
+    this.budget?.require(interaction ? 3 : 5);
     const reservation: Reservation = {
       id: crypto.randomUUID(),
       createdAt: Date.now(),
@@ -217,7 +222,6 @@ export class DiscordLimiter {
     const started = performance.now();
     const permit = await this.owner(owner).reserve(reservation);
     if (!permit.allowed) return { allowed: false as const, retryAfterMs: permit.retryAfterMs };
-    const globalOwner = interaction ? undefined : auth ? `global:bot:${credential}` : "global:unauth:installation";
     let globalPermit: Permit | undefined;
     if (globalOwner) {
       globalPermit = await this.owner(globalOwner).reserve({ ...reservation, global: true });
@@ -237,18 +241,19 @@ export class DiscordLimiter {
     if (globalOwner && report.global)
       reports.push({ ...report, owner: globalOwner, bucket: "", reservation: { ...report.reservation, global: true } });
     this.store.set("discord:reports", JSON.stringify(reports));
-    try {
-      await this.flush();
-    } catch {
-      /* The durable report is delivered before the next attempt. */
+    for (const owner of globalOwner && report.global ? [report.owner, globalOwner] : [report.owner]) {
+      try {
+        await this.flush([owner]);
+      } catch {
+        /* The durable report fences this domain's next attempt, not independent domains. */
+      }
     }
   }
 
-  private async flush(): Promise<void> {
+  private async flush(owners: string[]): Promise<boolean> {
     const reports: LimitReport[] = JSON.parse(this.store.get("discord:reports") ?? "[]");
-    while (reports.length > 0) {
-      const report = reports[0];
-      if (!report) break;
+    // A finite batch yields before a report backlog can occupy an alarm or feedback path.
+    for (const report of reports.filter((item) => owners.includes(item.owner)).slice(0, 3)) {
       await this.owner(report.owner).report(report);
       const current: LimitReport[] = JSON.parse(this.store.get("discord:reports") ?? "[]");
       this.store.set(
@@ -257,7 +262,8 @@ export class DiscordLimiter {
           current.filter((item) => item.owner !== report.owner || item.reservation.id !== report.reservation.id),
         ),
       );
-      reports.splice(0, reports.length, ...JSON.parse(this.store.get("discord:reports") ?? "[]"));
     }
+    const remaining: LimitReport[] = JSON.parse(this.store.get("discord:reports") ?? "[]");
+    return !remaining.some((item) => owners.includes(item.owner));
   }
 }

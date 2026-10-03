@@ -7,7 +7,7 @@ import {
 } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { COORDINATOR_NAME } from "../src/coordinator.ts";
+import { COORDINATOR_NAME, Coordinator } from "../src/coordinator.ts";
 import worker from "../src/index.ts";
 import { conversationName } from "../src/router.ts";
 import { json, mockFetch, on } from "./helpers.ts";
@@ -340,6 +340,56 @@ function sweepWorld(failPage = false, disconnect = false) {
 }
 
 describe("account sweep", () => {
+  it("enqueues healthy children before a stalled child settles and retries only the failed delivery", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let stalled = true;
+    const delivered: number[] = [];
+    mockFetch(on("GET", base, () => json({ data: { payload: [{ id: 991 }, { id: 992 }] } })));
+    const namespace = new Proxy(env.ROUTER, {
+      get(target, key, receiver) {
+        if (key === "getByName")
+          return (name: string) =>
+            new Proxy(target.getByName(name), {
+              get(stub, property, owner) {
+                if (property === "enqueueConversation")
+                  return async (_account: number, id: number) => {
+                    if (id === 991 && stalled) await gate;
+                    delivered.push(id);
+                  };
+                return Reflect.get(stub, property, owner);
+              },
+            });
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    await runInDurableObject(coordinator(), async (_instance, state) => {
+      vi.spyOn(state.storage, "setAlarm").mockResolvedValue();
+      state.storage.sql.exec(
+        "INSERT INTO jobs (key, priority, payload, not_before, created_at) VALUES (?, 0, ?, 0, ?)",
+        "sweep:1:pending",
+        JSON.stringify({ accountId: 1, status: "pending" }),
+        Date.now(),
+      );
+      const executor = new Coordinator(state, { ...env, ROUTER: namespace });
+      const work = executor.alarm();
+      try {
+        await vi.waitFor(() => expect(delivered).toContain(992), { timeout: 1000 });
+        await work;
+      } finally {
+        release();
+        await work;
+      }
+      // The first RPC may commit late; retry is the same idempotent conversation enqueue.
+      stalled = false;
+      state.storage.sql.exec("UPDATE jobs SET not_before = 0");
+      await executor.alarm();
+      expect(delivered.filter((id) => id === 992)).toHaveLength(1);
+      state.storage.sql.exec("DELETE FROM jobs");
+    });
+  });
   it("scans only pending and open, releasing open bot leftovers and preserving closed history and other owners", async () => {
     const conversations = [
       { id: 11, status: "open", meta: { assignee_type: "AgentBot", assignee: { id: 1 } } },

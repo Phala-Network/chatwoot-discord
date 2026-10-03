@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Budget, JobDeadlineError } from "../../../shared/budget.ts";
 import manifest from "../package.json" with { type: "json" };
+import { DiscordLimiter } from "../src/discord/limiter.ts";
 import { DiscordHttpError, DiscordRest } from "../src/discord/rest.ts";
 import { avatarUrl } from "../src/discord/users.ts";
 import { UnknownThreadError } from "../src/relay/relay.ts";
@@ -41,6 +42,46 @@ const forumChannel = on("GET", `${api}/channels/55`, () =>
 );
 
 const application = on("GET", `${api}/applications/@me`, () => json({ id: "100000000000000001" }));
+
+it("expires triage only at actual dispatch after a refused permit, without replaying an attempted send", async () => {
+  let now = Date.parse("2026-09-27T20:59:59.950Z");
+  const expiresAt = Date.parse("2026-09-27T21:00:00Z");
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  const cache = new MemoryCache();
+  cache.set("forum:55:webhook", "1:abc");
+  let allowed = false;
+  const limiter = new DiscordLimiter(cache, {
+    DISCORD_RATE_LIMIT: {
+      getByName() {
+        return {
+          async reserve() {
+            if (!allowed) return { allowed: false, retryAfterMs: 50 };
+            now = expiresAt;
+            return { allowed: true, validForMs: 100 };
+          },
+          async report() {},
+        };
+      },
+    },
+  });
+  const { requests } = mockFetch(
+    on("POST", `${api}/webhooks/1/abc`, () => json({ id: "101", channel_id: "100000000000000009" })),
+  );
+  const client = () => new DiscordForum(new DiscordRest("fixture", fetch, limiter), cache);
+  const body = { content: "Customer body\n-# <@triage> <@42>", allowed_mentions: { parse: [] as [], users: ["42"] } };
+  const expiry = { expiresAt, contentWithoutTriage: "Customer body\n-# <@42>" };
+  await expect(
+    client().execute("55", body, "100000000000000009", "expired-grant", undefined, expiry),
+  ).rejects.toMatchObject({ status: 429 });
+  allowed = true;
+  await client().execute("55", body, "100000000000000009", "expired-grant", undefined, expiry);
+  await client().execute("55", body, "100000000000000009", "expired-grant", undefined, expiry);
+  expect(requests).toHaveLength(1);
+  expect(JSON.parse(requests[0]?.body ?? "{}")).toMatchObject({
+    content: expiry.contentWithoutTriage,
+    allowed_mentions: { users: ["42"] },
+  });
+});
 
 it("identifies the relay with Discord's documented bot user agent", async () => {
   const { requests } = mockFetch(application);

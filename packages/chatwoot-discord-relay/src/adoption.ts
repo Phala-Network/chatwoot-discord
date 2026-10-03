@@ -4,11 +4,11 @@ import { z } from "zod";
 import type { Budget } from "../../../shared/budget.ts";
 import type { ChatwootClient } from "../../../shared/chatwoot/api.ts";
 import type { ThreadOwner } from "./control.ts";
-import { control, conversation } from "./control.ts";
 import type { DiscordRest } from "./discord/rest.ts";
 import { DiscordHttpError } from "./discord/rest.ts";
 import type { Env } from "./env.ts";
 import { escalationsSchema } from "./queue.ts";
+import { control, conversation } from "./rpc.ts";
 import { loadSettings } from "./settings.ts";
 import type { Store } from "./store.ts";
 
@@ -103,6 +103,7 @@ export function validateCut(cut: AdoptionCut): void {
       owners.has(`${mapping.accountId}:${mapping.conversationId}`) ||
       threads.has(mapping.threadId) ||
       mapping.cursor < mapping.latestEligibleId ||
+      mapping.cursor > cut.watermark ||
       mapping.latestEligibleId > cut.watermark
     )
       throw new Error("No common processed watermark or unique thread owner");
@@ -150,6 +151,13 @@ export async function stageAdoption(env: Env, cut: AdoptionCut): Promise<void> {
     settings.config.cutover.interactionFence !== cut.interactionFence
   )
     throw new Error("Cutover configuration does not match the sealed cut");
+  for (const mapping of cut.mappings) {
+    if (
+      settings.account(mapping.accountId)?.forumChannelId !== mapping.forumId ||
+      !settings.config.cutover.legacyWebhooks[mapping.forumId]?.length
+    )
+      throw new Error("Cutover account, forum or historical webhook configuration is incomplete");
+  }
   if (settings.config.queue)
     await control(undefined, () =>
       env.QUEUE_DIGEST.getByName(`digest:v1:${settings.config.queue?.channelId}`).stage(

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { scheduleAlarm } from "../../../shared/alarm.ts";
 import { Budget } from "../../../shared/budget.ts";
 import { chatwootClient } from "../../../shared/chatwoot/api.ts";
+import { within } from "../../../shared/deadline.ts";
 import { parseJson } from "../../../shared/json.ts";
 import { errorFields, log } from "../../../shared/log.ts";
 import { QueueStore, retryDelay } from "../../../shared/store.ts";
@@ -12,6 +13,11 @@ import { loadSettings } from "./settings.ts";
 
 export const COORDINATOR_NAME = "global";
 const sweepSchema = z.object({ accountId: z.number().int().positive(), status: z.enum(["pending", "open"]) });
+const pageSchema = z.object({
+  page: z.number().int().positive(),
+  pending: z.array(z.number().int().positive()),
+  empty: z.boolean(),
+});
 
 /** Lists one page per alarm. Conversation state belongs exclusively to the conversation's Router. */
 export class Coordinator extends DurableObject<Env> {
@@ -43,38 +49,59 @@ export class Coordinator extends DurableObject<Env> {
         const settings = await loadSettings(this.env);
         const { accountId, status } = parsed.data;
         const budget = new Budget(settings.config.subrequestBudget);
+        budget.startSlice();
         const chatwoot = chatwootClient(
           settings.config.chatwoot.baseUrl,
           settings.secrets.CHATWOOT_TOKEN,
           budget.fetch,
         );
-        const saved = z
-          .number()
-          .int()
-          .positive()
-          .safeParse(parseJson(this.store.get(job.key)));
-        const page = saved.success ? saved.data : 1;
-        const conversations = await chatwoot.listConversations(accountId, page, status);
+        const saved = pageSchema.safeParse(parseJson(this.store.get(job.key)));
+        const checkpoint = saved.success ? saved.data : { page: 1, pending: [], empty: false };
         const botId = settings.config.routing.botIds[String(accountId)];
-        for (const conversation of conversations) {
-          if (
-            conversation.id === undefined ||
-            (status !== "pending" &&
-              !(conversation.meta?.assignee_type === "AgentBot" && conversation.meta.assignee?.id === botId))
-          )
-            continue;
-          // Each RPC counts toward the invocation too; a page contains at most 25 conversations.
-          budget.consume();
-          await this.env.ROUTER.getByName(conversationName(accountId, conversation.id)).enqueueConversation(
-            accountId,
-            conversation.id,
+        if (!checkpoint.pending.length) {
+          const conversations = await chatwoot.listConversations(accountId, checkpoint.page, status);
+          checkpoint.empty = conversations.length === 0;
+          checkpoint.pending = conversations.flatMap((conversation) =>
+            conversation.id !== undefined &&
+            (status === "pending" ||
+              (conversation.meta?.assignee_type === "AgentBot" && conversation.meta.assignee?.id === botId))
+              ? [conversation.id]
+              : [],
           );
+          this.store.set(job.key, JSON.stringify(checkpoint));
         }
-        this.store.completeJob(job);
-        if (conversations.length === 0) this.store.delete(job.key);
+        const pending = [...checkpoint.pending];
+        for (let offset = 0; offset < pending.length; offset += 3) {
+          const batch = pending.slice(offset, offset + 3);
+          const results = await Promise.allSettled(
+            batch.map(async (id) => {
+              budget.consume();
+              await within(
+                this.env.ROUTER.getByName(conversationName(accountId, id)).enqueueConversation(accountId, id),
+                budget.controlSignal(200),
+              );
+            }),
+          );
+          results.forEach((result, index) => {
+            if (result.status === "fulfilled")
+              checkpoint.pending = checkpoint.pending.filter((id) => id !== batch[index]);
+            else
+              log.warn("sweep child delivery delayed", {
+                accountId,
+                conversationId: batch[index],
+                ...errorFields(result.reason),
+              });
+          });
+          this.store.set(job.key, JSON.stringify(checkpoint));
+        }
+        if (checkpoint.pending.length) this.store.retryJob(job, retryDelay(job.attempts));
         else {
-          this.store.set(job.key, String(page + 1));
-          this.store.enqueue(job.key, 0, job.payload);
+          this.store.completeJob(job);
+          if (checkpoint.empty) this.store.delete(job.key);
+          else {
+            this.store.set(job.key, JSON.stringify({ page: checkpoint.page + 1, pending: [], empty: false }));
+            this.store.enqueue(job.key, 0, job.payload);
+          }
         }
       } catch (error) {
         this.store.retryJob(job, retryDelay(job.attempts));

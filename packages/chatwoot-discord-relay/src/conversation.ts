@@ -25,7 +25,7 @@ import { parseJson } from "../../../shared/json.ts";
 import { errorFields, log } from "../../../shared/log.ts";
 import { retryDelay } from "../../../shared/store.ts";
 import { cleanLegacyCards } from "./adoption.ts";
-import { type CommandExecution, commandPanel, executeCommand } from "./commands/actions.ts";
+import { type CommandExecution, commandPanel, commandStarted, executeCommand } from "./commands/actions.ts";
 import { downloadAttachment } from "./commands/attachments.ts";
 import { text } from "./commands/components.ts";
 import { type HandlerResult, handleInteraction } from "./commands/handler.ts";
@@ -111,7 +111,21 @@ export class Conversation extends DurableObject<Env> {
   ): void {
     this.bind(owner.accountId, owner.conversationId);
     const existing = this.store.get("adoption:stage");
-    const stage = JSON.stringify({ owner, threadId, epoch, watermark, responses });
+    const stage = JSON.stringify({
+      owner: {
+        accountId: owner.accountId,
+        conversationId: owner.conversationId,
+        guildId: owner.guildId,
+        forumId: owner.forumId,
+        generation: owner.generation,
+      },
+      threadId,
+      epoch,
+      watermark,
+      responses: responses
+        .map(({ messageId, digest }) => ({ messageId, digest }))
+        .sort((a, b) => a.messageId - b.messageId),
+    });
     if (existing && existing !== stage) throw new Error("Adoption stage conflict");
     if (existing === stage) return;
     if (this.store.conversation(owner.accountId, owner.conversationId)?.threadId)
@@ -286,19 +300,19 @@ export class Conversation extends DurableObject<Env> {
         );
         this.store.set("registered", "1");
       }
+      const cutover = services.settings.config.cutover;
+      const staged = this.store.get("adoption:stage");
       if (
-        services.settings.config.cutover &&
+        (cutover || staged) &&
         payload.type !== "command" &&
         payload.type !== "feedback" &&
         !this.store.get("adoption:complete")
       ) {
-        const saved = this.store.get("adoption:stage");
-        if (saved) {
-          const stage: { owner: ThreadOwner; threadId: string; epoch: string; watermark: number } = JSON.parse(saved);
-          if (
-            stage.epoch !== services.settings.config.cutover.epoch ||
-            stage.watermark !== services.settings.config.relay.startAfterMessageId
-          )
+        if (staged) {
+          if (!cutover || cutover.phase !== "active")
+            throw new Error("Unfinished adoption requires matching active cutover");
+          const stage: { owner: ThreadOwner; threadId: string; epoch: string; watermark: number } = JSON.parse(staged);
+          if (stage.epoch !== cutover.epoch || stage.watermark !== services.settings.config.relay.startAfterMessageId)
             throw new Error("Cutover epoch or watermark mismatch");
           const raw = await services.chatwoot.getConversation(stage.owner.accountId, stage.owner.conversationId);
           const link = `https://discord.com/channels/${stage.owner.guildId}/${stage.threadId}`;
@@ -312,7 +326,7 @@ export class Conversation extends DurableObject<Env> {
             services.budget,
             services.settings,
           );
-          const webhookIds = services.settings.config.cutover.legacyWebhooks[stage.owner.forumId];
+          const webhookIds = cutover.legacyWebhooks[stage.owner.forumId];
           if (!webhookIds?.length) throw new Error("Old webhook ownership not verified");
           if (!(await cleanLegacyCards(this.store, services.rest, services.budget, stage.threadId, webhookIds)))
             return "yield";
@@ -341,7 +355,8 @@ export class Conversation extends DurableObject<Env> {
           );
           const result = saved.success
             ? saved.data
-            : Date.now() - job.createdAt > COMMAND_START_DEADLINE_MS
+            : Date.now() - job.createdAt > COMMAND_START_DEADLINE_MS &&
+                !commandStarted(new Effects(this.store), payload.job.interactionId)
               ? { content: EXPIRED, conversationGone: false }
               : await this.runCommand(payload.job, services);
           this.store.set(`command:${payload.job.interactionId}:result`, JSON.stringify(result), 60 * 60 * 1000);

@@ -19,7 +19,13 @@ import {
 import { log } from "../../../../shared/log.ts";
 import { Effects } from "../effects.ts";
 import type { ForumAccess, ForumSnapshot } from "../registry.ts";
-import { type ForumClient, type SendOutcome, UnknownThreadError, type WebhookMessage } from "../relay/relay.ts";
+import {
+  type ForumClient,
+  type NotificationExpiry,
+  type SendOutcome,
+  UnknownThreadError,
+  type WebhookMessage,
+} from "../relay/relay.ts";
 import { DiscordHttpError, type DiscordRest } from "./rest.ts";
 
 /** Discord answers a request to a deleted post with this code, with HTTP 404 or, for a webhook, 400. */
@@ -49,6 +55,7 @@ export class DiscordForum implements ForumClient {
     threadId?: string,
     sendKey?: string,
     checkpoint?: (receipt: { channelId: string; messageId: string }) => void,
+    notification?: NotificationExpiry,
   ): Promise<SendOutcome> {
     const webhook = await this.webhook(forumChannelId);
     const effects = new Effects(this.cache);
@@ -69,6 +76,10 @@ export class DiscordForum implements ForumClient {
                 RESTPostAPIWebhookWithTokenQuery
               >(Routes.webhook(webhook.id, webhook.token), {
                 body: frozen,
+                prepareBody: () =>
+                  notification && Date.now() >= notification.expiresAt
+                    ? { ...frozen, content: notification.contentWithoutTriage }
+                    : frozen,
                 query: { wait: true, with_components: true, ...(threadId ? { thread_id: threadId } : {}) },
                 auth: false,
               });

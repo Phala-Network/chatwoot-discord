@@ -4,7 +4,6 @@ export {
   DiscordRateLimit,
   default,
   ForumRegistry,
-  Hub,
   QueueDigest,
   ThreadDirectory,
   TriageBudget,

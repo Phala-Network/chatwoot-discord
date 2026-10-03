@@ -12,12 +12,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { Budget, JobDeadlineError } from "../../../shared/budget.ts";
 import { chatwootClient } from "../../../shared/chatwoot/api.ts";
+import { executeCommand } from "../src/commands/actions.ts";
 import type { CommandJob } from "../src/commands/job.ts";
 import { configSchema } from "../src/config.ts";
 import { conversation } from "../src/control.ts";
+import { Conversation } from "../src/conversation.ts";
 import { QueueDigest } from "../src/digest.ts";
 import { DiscordLimiter } from "../src/discord/limiter.ts";
 import { DiscordRest } from "../src/discord/rest.ts";
+import { Effects } from "../src/effects.ts";
 import worker from "../src/index.ts";
 import { ForumRegistry } from "../src/registry.ts";
 import { processConversation, relayFor } from "../src/relay/processor.ts";
@@ -687,7 +690,9 @@ describe("worker", () => {
     await chatwootWebhook(created(40));
     await drain();
     for (let round = 1; round < 12; round += 1) {
-      expect(await jobDelay("conversation:3:40")).toBeGreaterThan(60_000);
+      await vi.waitFor(async () => expect(await jobDelay("conversation:3:40")).toBeGreaterThan(60_000), {
+        timeout: 5000,
+      });
       await makeJobsDue();
       await drain();
     }
@@ -865,9 +870,13 @@ describe("worker", () => {
       },
     ]);
     // Posting unarchived the resolved post; it is archived again.
-    expect(JSON.parse(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).at(-1)?.body ?? "")).toEqual({
-      archived: true,
-    });
+    await vi.waitFor(
+      () =>
+        expect(JSON.parse(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).at(-1)?.body ?? "{}")).toEqual({
+          archived: true,
+        }),
+      { timeout: 5000 },
+    );
 
     // A changed response is posted again.
     Object.assign(question, { content_attributes: rated(4) });
@@ -916,6 +925,16 @@ describe("worker", () => {
       world.conversation(id, [{ id: 5000, content: "Help", message_type: 0 }, question]);
       await chatwootWebhook(created(id));
       await drain();
+      await vi.waitFor(
+        async () =>
+          expect(
+            await runInDurableObject(
+              hub(id),
+              (_instance, state) => new Store(state.storage.sql).conversation(3, id)?.cursor,
+            ),
+          ).toBe(5001),
+        { timeout: 5000 },
+      );
       const posts = world.webhookPosts().length;
       Object.assign(question, { content_attributes: response.attributes });
       await chatwootWebhook({
@@ -926,12 +945,16 @@ describe("worker", () => {
         content_attributes: response.attributes,
       });
       await drain();
-      expect(
-        world
-          .webhookPosts()
-          .slice(posts)
-          .map((post) => post.body.content),
-      ).toEqual([`Question\n\n${response.text}`]);
+      await vi.waitFor(
+        () =>
+          expect(
+            world
+              .webhookPosts()
+              .slice(posts)
+              .map((post) => post.body.content),
+          ).toEqual([`Question\n\n${response.text}`]),
+        { timeout: 5000 },
+      );
     }
   });
 
@@ -939,6 +962,16 @@ describe("worker", () => {
     world.conversation(90, [{ id: 3201, content: "Help", message_type: 0 }]);
     await chatwootWebhook(created(90));
     await drain();
+    await vi.waitFor(
+      async () =>
+        expect(
+          await runInDurableObject(
+            hub(90),
+            (_instance, state) => new Store(state.storage.sql).conversation(3, 90)?.customerMessageId,
+          ),
+        ).toBe("100000000000001001"),
+      { timeout: 5000 },
+    );
     const thread = world.webhookPosts().at(-1)?.thread ?? "";
     const answerId = "100000000000019100";
     await hub().triageAnswered(thread, answerId, "100000000000001001", "Hi, the refund is on its way.");
@@ -976,10 +1009,18 @@ describe("worker", () => {
     world.conversation(22, [{ id: 1301, content: "hello", message_type: 0 }]);
     await chatwootWebhook(created(22));
     await drain();
+    await vi.waitFor(
+      () => expect(world.webhookPosts().some((post) => String(post.body.content).startsWith("hello"))).toBe(true),
+      { timeout: 5000 },
+    );
     const thread = world.webhookPosts()[1]?.thread ?? "";
     world.conversations.delete(22);
     await chatwootWebhook(created(22));
     await drain();
+    await vi.waitFor(
+      () => expect(world.webhookPosts().at(-1)?.body.content).toBe("This conversation no longer exists in Chatwoot."),
+      { timeout: 5000 },
+    );
     expect(world.webhookPosts().at(-1)).toEqual({
       thread,
       body: {
@@ -1187,10 +1228,15 @@ describe("worker", () => {
 
     await makeJobsDue();
     await drain();
-    expect(world.webhookPosts().at(-1)?.body.content).toBe("_Resolved by Sam_");
-    expect(JSON.parse(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).at(-1)?.body ?? "{}")).toMatchObject({
-      archived: true,
-    });
+    await vi.waitFor(
+      () => {
+        expect(world.webhookPosts().at(-1)?.body.content).toBe("_Resolved by Sam_");
+        expect(JSON.parse(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).at(-1)?.body ?? "{}")).toMatchObject({
+          archived: true,
+        });
+      },
+      { timeout: 5000 },
+    );
 
     if (conversation) conversation.status = "open";
     await chatwootWebhook({ event: "conversation_updated", id: 30, account: { id: 3 } });
@@ -1235,7 +1281,7 @@ describe("worker", () => {
     expect(world.webhookPosts()).toEqual(posts);
   });
 
-  it("the sweep queues only conversations whose post is behind or out of date", async () => {
+  it("reconciles missed state through the conversation owner without replaying an unknown card", async () => {
     world.conversation(32, [{ id: 3201, content: "hello", message_type: 0 }]);
     await chatwootWebhook(created(32));
     await drain();
@@ -1243,7 +1289,7 @@ describe("worker", () => {
     const before = reads();
 
     await sweep();
-    expect(reads()).toBeGreaterThan(before); // Sweep delegates fresh reconciliation to its owner.
+    await vi.waitFor(() => expect(reads()).toBeGreaterThan(before), { timeout: 5000 }); // Wait for the owner, including short permit deferrals.
 
     // A cleared card row does not replay a send whose durable guard already has a receipt.
     await runInDurableObject(hub(), (_instance, state) => {
@@ -2174,9 +2220,13 @@ it("retries failed feedback while the card converges, without re-executing the a
   await drain();
   expect(actions).toBe(1);
   expect(reports).toBe(1);
-  expect(JSON.parse(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).at(-1)?.body ?? "{}")).toMatchObject({
-    archived: true,
-  });
+  await vi.waitFor(
+    () =>
+      expect(JSON.parse(world.sent("PATCH", /^\/api\/v10\/channels\/\d+$/).at(-1)?.body ?? "{}")).toMatchObject({
+        archived: true,
+      }),
+    { timeout: 5000 },
+  );
   await makeJobsDue();
   await drain();
   expect(reports).toBe(2);
@@ -2213,7 +2263,7 @@ it("releases the alarm on a 429 so another person's command receives feedback", 
   // First create the post with the ordinary mock, then apply the rate limit only to replies.
   const started = Date.now();
   await hub(883).enqueueConversation(3, 883);
-  await vi.waitFor(() => expect(limited).toBe(true));
+  await vi.waitFor(() => expect(limited).toBe(true), { timeout: 5000 });
   await enqueueCommand({
     interactionId: "rate-command",
     applicationId: "100000000000000001",
@@ -2548,18 +2598,18 @@ it("delivers confirmed feedback before an optional panel read", async () => {
   expect(feedback).toBe(1);
 });
 
-it("does not replay a derived response whose Discord receipt was lost", async () => {
+it("does not replay a lost CSAT receipt or suppress later five to one to five revisions", async () => {
   world.mock.spy.mockRestore();
-  let sends = 0;
+  const sends: string[] = [];
   world = new World([
     (request) => {
       if (
         request.method !== "POST" ||
         request.url.pathname !== "/api/v10/webhooks/1/tok" ||
-        !request.body.includes("Rating: 5")
+        !request.body.includes("Rating:")
       )
         return undefined;
-      sends += 1;
+      sends.push(/Rating: ([15])/.exec(request.body)?.[1] ?? "missing");
       throw new TypeError("Connection lost after Discord accepted the response");
     },
   ]);
@@ -2567,10 +2617,134 @@ it("does not replay a derived response whose Discord receipt was lost", async ()
   world.conversation(887, [{ id: 88701, content: "Thank you", message_type: 0 }, question]);
   await hub(887).enqueueConversation(3, 887);
   await drain();
-  Object.assign(question, { content_attributes: { submitted_values: { csat_survey_response: { rating: 5 } } } });
-  await hub(887).enqueueMessageUpdate(3, 887, question.id);
+  for (const rating of [5, 5, 1, 1, 5, 5]) {
+    Object.assign(question, { content_attributes: { submitted_values: { csat_survey_response: { rating } } } });
+    await hub(887).enqueueMessageUpdate(3, 887, question.id);
+    await drain();
+    await makeJobsDue();
+    await drain();
+  }
+  expect(sends).toEqual(["5", "1", "5"]);
+});
+
+it("recovers a completed command after its start deadline without claiming nothing was done", async () => {
+  world.mock.spy.mockRestore();
+  let mutations = 0;
+  let currentLabels = ["vip"];
+  world = new World([
+    on("GET", "chatwoot.example.com/api/v1/profile", () => json({ id: 42, accounts: [{ id: 3 }] })),
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/989/labels", () =>
+      json({ payload: currentLabels }),
+    ),
+    on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/989/labels", () => {
+      mutations++;
+      currentLabels = [];
+      return json({});
+    }),
+  ]);
+  const command: CommandJob = {
+    interactionId: "result-recovery",
+    applicationId: "100000000000000001",
+    token: "result-recovery-feedback",
+    discordUserId: ALICE,
+    accountId: 3,
+    conversationId: 989,
+    action: { type: "label", change: "remove", label: "vip" },
+  };
+  await runInDurableObject(hub(989), async (_instance, state) => {
+    vi.spyOn(state.storage, "setAlarm").mockResolvedValue();
+    const store = new Store(state.storage.sql);
+    const settings = await loadSettings(env);
+    expect((await executeCommand(command, { settings, fetch, effects: new Effects(store) })).content).toContain(
+      "removed",
+    );
+    // Reconstruct at the real boundary between the persisted effect receipt and command result.
+    const executor = new Conversation(state, env);
+    await executor.enqueueCommand(command);
+    state.storage.sql.exec(
+      "UPDATE jobs SET created_at = ? WHERE key = ?",
+      Date.now() - 13 * 60000,
+      `command:${command.interactionId}`,
+    );
+    await executor.alarm();
+    const result = JSON.parse(store.get(`command:${command.interactionId}:result`) ?? "{}");
+    expect(result.content).toBe("✅ Label vip removed.");
+    expect(result.content).not.toContain("nothing was done");
+    await executor.alarm();
+  });
+  expect(mutations).toBe(1);
+  const feedback = world.requests.find(
+    (request) => request.method === "PATCH" && request.url.pathname.includes("result-recovery-feedback"),
+  );
+  expect(JSON.parse(feedback?.body ?? "{}").content).toContain("removed");
+});
+
+it.each([false, true])(
+  "fences a duplicate-link loser before recovery and derived/delete side effects (stale row %s)",
+  async (stale) => {
+    const thread = nextThreadId();
+    const winner = { accountId: 3, conversationId: 99011, guildId: GUILD, forumId: FORUM, generation: 1 };
+    expect(await env.THREAD_DIRECTORY.getByName(`thread:v1:${thread}`).claim(winner)).toBe(true);
+    world.threads.set(thread, FORUM);
+    world.conversation(99012, [{ id: 10, content: "old reply", message_type: 1, status: "failed" }], {
+      discord_thread: `https://discord.com/channels/${GUILD}/${thread}`,
+    });
+    await runInDurableObject(hub(99012), async (_instance, state) => {
+      vi.spyOn(state.storage, "setAlarm").mockResolvedValue();
+      const store = new Store(state.storage.sql);
+      const executor = new Conversation(state, env);
+      if (stale) {
+        store.adoptThread(3, 99012, thread);
+        store.setCursor(3, 99012, 10);
+      } else {
+        await executor.enqueueConversation(3, 99012);
+        await executor.alarm();
+        expect(store.conversation(3, 99012)?.threadId).toBeUndefined();
+      }
+      await executor.enqueueMessageUpdate(3, 99012, 10);
+      await executor.alarm();
+      world.conversations.delete(99012);
+      state.storage.sql.exec("UPDATE jobs SET not_before=0");
+      await executor.enqueueConversation(3, 99012);
+      await executor.alarm();
+      expect(world.webhookPosts()).toHaveLength(0);
+      expect(world.sent("PATCH", new RegExp(`/channels/${thread}$`))).toHaveLength(0);
+      expect(await env.THREAD_DIRECTORY.getByName(`thread:v1:${thread}`).get()).toEqual(winner);
+    });
+  },
+);
+
+it("archives a deleted conversation even when its one deletion notice has an unknown outcome", async () => {
+  world.mock.spy.mockRestore();
+  world = new World([
+    (request) =>
+      request.method === "POST" &&
+      request.url.pathname === "/api/v10/webhooks/1/tok" &&
+      JSON.parse(request.body).content === "This conversation no longer exists in Chatwoot."
+        ? json({}, { status: 500 })
+        : undefined,
+  ]);
+  world.conversation(99031, [{ id: 9903101, content: "Close this", message_type: 0 }]);
+  await hub(99031).enqueueConversation(3, 99031);
+  await vi.waitFor(
+    () => expect(world.webhookPosts().some((post) => String(post.body.content).startsWith("Close this"))).toBe(true),
+    { timeout: 5000 },
+  );
+  const thread = world.webhookPosts().at(-1)?.thread;
+  world.conversations.delete(99031);
+  await hub(99031).enqueueConversation(3, 99031);
+  await vi.waitFor(async () => expect(await ticketForThread(thread ?? "")).toBeNull(), { timeout: 5000 });
+  expect(
+    world.webhookPosts().filter((post) => post.body.content === "This conversation no longer exists in Chatwoot."),
+  ).toHaveLength(1);
+  expect(
+    world
+      .sent("PATCH", new RegExp(`/channels/${thread}$`))
+      .some((request) => JSON.parse(request.body).archived === true),
+  ).toBe(true);
+  await hub(99031).enqueueConversation(3, 99031);
   await drain();
-  await makeJobsDue();
-  await drain();
-  expect(sends).toBe(1);
+  expect(
+    world.webhookPosts().filter((post) => post.body.content === "This conversation no longer exists in Chatwoot."),
+  ).toHaveLength(1);
 });

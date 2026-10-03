@@ -31,6 +31,8 @@ interface Notification {
   lines: string[];
   /** Users the lines may ping. */
   users: string[];
+  triageExpiresAt?: number;
+  withoutTriage?: string[];
 }
 
 /** Who a post announces as its assignee: their Chatwoot user id, which a rename does not change; "" for none. */
@@ -67,7 +69,13 @@ export class Notifier {
       (line) => line !== undefined,
     );
     // The triage mention stays a literal token: only the assignee may be pinged.
-    return { lines, users: assignee ? [assignee] : [] };
+    return {
+      lines,
+      users: assignee ? [assignee] : [],
+      ...(triage.expiresAt === undefined
+        ? {}
+        : { triageExpiresAt: triage.expiresAt, withoutTriage: assignee ? [`-# <@${assignee}>`] : [] }),
+    };
   }
 
   /**
@@ -98,7 +106,7 @@ export class Notifier {
    * The triage bot mention for a customer message, or a note when a routing kind handled
    * it or the bot's hourly budget is used up.
    */
-  private async triage(message: RelayMessage): Promise<{ mention?: string; note?: string }> {
+  private async triage(message: RelayMessage): Promise<{ mention?: string; note?: string; expiresAt?: number }> {
     const { triage, store } = this.options;
     if (!fromCustomer(message)) return {};
     if (!triage) return {};
@@ -118,7 +126,7 @@ export class Notifier {
           const granted = this.options.reserveTriage
             ? await this.options.reserveTriage(hour, event, triage.perHour)
             : store.increment(`triage:${hour}`) <= triage.perHour;
-          decision = granted ? "mention" : "hour";
+          decision = granted ? `mention:${hour}` : "hour";
         } catch {
           decision = "hour";
         }
@@ -128,7 +136,8 @@ export class Notifier {
     if (decision === "answered") return { note: handledNote(triage) };
     if (decision === "conversation") return { note: conversationBudgetNote(triage) };
     if (decision === "hour") return { note: hourlyBudgetNote(triage) };
-    return { mention: triage.userId };
+    if (!decision.startsWith("mention:")) return {};
+    return { mention: triage.userId, expiresAt: Date.parse(`${decision.slice(8)}:00:00Z`) + 3600000 };
   }
 
   /** The linked Discord user of the conversation's assignee, if any. */
