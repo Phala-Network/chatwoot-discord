@@ -32,7 +32,7 @@ may point to another deployment of that API, for example a proxy or gateway.
   The latest `conversation_status_changed` activity begins the turn; without one or evidence it is missing, use
   the conversation's start. Take the first three usable customer texts after the boundary, oldest first. Include
   email subjects and reply text without quoted history; omit automatic email, deleted messages and private notes.
-  Redact identifiers and contact names, then cap the input at 1,600 characters. Memoize Jev's decision by input ids.
+  Redact identifiers and contact names, then cap the input at 1,600 characters. Memoize Jev's decision by account, conversation, input ids, actual redacted input and routing configuration/model.
 - Status activity is asynchronous. The queue's boundary guard remembers an observed/expected transition and the
   last boundary needed to reject stale handoff work. An activity read before its first status webhook can match
   that webhook's status and time only if no existing expectation requires a newer activity. Merging a webhook

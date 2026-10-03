@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reuse message pages only within one fresh phase, combine independent read-only preparation, and scope decisions to actual input/configuration without weakening side-effect checks.
 - Partition routing by account and conversation, with a separate paged sweep coordinator. No state migration is needed: 0.2.x was never deployed. Preserve each conversation namespace and its reply/turn guards for future upgrades.
 
 All notable changes to this project are documented in this file.

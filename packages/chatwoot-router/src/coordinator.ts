@@ -87,6 +87,6 @@ export class Coordinator extends DurableObject<Env> {
     const next = this.store.nextWakeup();
     if (next === undefined) return;
     const current = await this.ctx.storage.getAlarm();
-    if (current === null || current > next) await this.ctx.storage.setAlarm(next);
+    if (current === null || current > next) await this.ctx.storage.setAlarm(Math.max(Date.now(), next));
   }
 }
