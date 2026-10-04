@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Require complete historical receipt/title handover before partition adoption: bounded private schema9/10
+  exports, count/digest seals, crash-safe idempotent import and Directory generation gates preserve pre-watermark
+  original/derived deletion, response baselines and recorded titles. Historical deletions use bot permissions to
+  survive webhook rotation. Missing or ambiguous authoritative records block the cut.
+- Provide a source-only 0.27 Hub bridge template that preserves the old executor while adding private read RPCs;
+  source deployment, source drain, retirement and target activation remain separate reviewed operations.
+
 ## [0.31.0] - 2026-10-03
 
 ### Changed
@@ -54,9 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Drafts and hourly counters are not imported; notifications resume at the next UTC hour after old cooldowns
   expire. Minimal CSAT/delivery response and escalation baselines are retained: unchanged responses do not repost,
   while genuinely changed responses can still publish.
-- Pre-watermark deletion/title associations are not imported. Losing them requires explicit owner acceptance
-  recorded before cutover; acceptance and live rollout evidence remain outstanding. Without acceptance, stop
-  for a separately reviewed minimal receipt handover.
+- This published version does not import pre-watermark deletion/title associations. A preservation cut must
+  use the reviewed historical handover described under Unreleased and in the current runbook before activation.
 - Before any new business effect or old-card deletion, abort requires proof of no dispatched/accepted effect and
   a disposition for every accepted event. Once new effects, unknown outcomes or card deletions exist, use forward
   repair; restoring the old snapshot is not clean rollback. After a separately authorized observation and evidence

@@ -49,7 +49,8 @@
     "docs/assets",
     "docs/adoption.md",
     "docs/operator.ts",
-    "docs/operator.config.ts"
+    "docs/operator.config.ts",
+    "docs/legacy-source-bridge.ts"
   ],
   "packageManager": "npm@12.1.0",
   "engines": {

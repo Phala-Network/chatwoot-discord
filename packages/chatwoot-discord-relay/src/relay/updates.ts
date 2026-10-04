@@ -100,13 +100,19 @@ async function deleteRelayedMessage(
   if (!account) return;
   const parts = store.postedParts(accountId, conversationId, messageId);
   for (const discordId of parts) {
-    await forum.deleteMessage(account.forumChannelId, threadId, discordId);
+    const legacyKey = `adoption:legacy-discord:${discordId}`;
+    if (store.get(legacyKey)) await forum.deleteHistoricalMessage(threadId, discordId);
+    else await forum.deleteMessage(account.forumChannelId, threadId, discordId);
     store.deletePostedPart(accountId, conversationId, messageId, discordId);
+    store.delete(legacyKey);
   }
   const derived = store.derivedMessages(accountId, conversationId, messageId);
   for (const discordId of derived) {
-    await forum.deleteMessage(account.forumChannelId, threadId, discordId);
+    const legacyKey = `adoption:legacy-discord:${discordId}`;
+    if (store.get(legacyKey)) await forum.deleteHistoricalMessage(threadId, discordId);
+    else await forum.deleteMessage(account.forumChannelId, threadId, discordId);
     store.deleteDerivedMessage(accountId, conversationId, messageId, discordId);
+    store.delete(legacyKey);
   }
   if (parts.length + derived.length > 0) {
     log.info("deleted message removed from post", { accountId, conversationId, messageId, parts: parts.length });

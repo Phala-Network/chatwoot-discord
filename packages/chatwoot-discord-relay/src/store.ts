@@ -4,6 +4,7 @@
 
 import { QueueStore } from "../../../shared/store.ts";
 import type { Cache } from "./discord/forum.ts";
+import type { ReceiptCounts, ReceiptHeader, ReceiptPage } from "./history.ts";
 import type { PostFields, RelayStore } from "./relay/relay.ts";
 
 const MIGRATIONS: string[] = [
@@ -299,6 +300,105 @@ export class Store extends QueueStore implements RelayStore, Cache {
       accountId,
       conversationId,
       threadId,
+    );
+  }
+
+  /** Strict inserts during maintenance: duplicates are conflicts, never replacements. */
+  importLegacyReceipt(accountId: number, conversationId: number, receipt: ReceiptPage["records"][number]): void {
+    if (
+      receipt.kind < 2 &&
+      "discordId" in receipt &&
+      this.sql
+        .exec(
+          "SELECT 1 FROM posted_messages WHERE discord_message_id=? UNION ALL SELECT 1 FROM derived_messages WHERE discord_message_id=? LIMIT 1",
+          receipt.discordId,
+          receipt.discordId,
+        )
+        .toArray().length
+    )
+      throw new Error("Conflicting legacy Discord receipt");
+    if (receipt.kind === 0)
+      this.sql.exec(
+        "INSERT INTO posted_messages VALUES (?, ?, ?, ?, ?)",
+        accountId,
+        conversationId,
+        receipt.messageId,
+        receipt.part,
+        receipt.discordId,
+      );
+    else if (receipt.kind === 1)
+      this.sql.exec(
+        "INSERT INTO derived_messages VALUES (?, ?, ?, ?)",
+        accountId,
+        conversationId,
+        receipt.messageId,
+        receipt.discordId,
+      );
+    else
+      this.sql.exec(
+        "INSERT INTO submitted_responses VALUES (?, ?, ?, ?)",
+        accountId,
+        conversationId,
+        receipt.messageId,
+        receipt.digest,
+      );
+    if ("discordId" in receipt) this.set(`adoption:legacy-discord:${receipt.discordId}`, "1");
+  }
+
+  legacyReceiptCounts(accountId: number, conversationId: number): ReceiptCounts {
+    const count = (table: string) =>
+      this.sql
+        .exec<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM ${table} WHERE account_id=? AND conversation_id=?`,
+          accountId,
+          conversationId,
+        )
+        .one().n;
+    return {
+      posted: count("posted_messages"),
+      derived: count("derived_messages"),
+      responses: count("submitted_responses"),
+    };
+  }
+
+  hasUnpairedLegacyResponses(accountId: number, conversationId: number): boolean {
+    return (
+      this.sql
+        .exec(
+          `SELECT 1 FROM submitted_responses r WHERE account_id=? AND conversation_id=? AND NOT EXISTS
+      (SELECT 1 FROM derived_messages d WHERE d.account_id=r.account_id AND d.conversation_id=r.conversation_id AND d.message_id=r.message_id)
+      UNION ALL SELECT 1 FROM derived_messages d WHERE account_id=? AND conversation_id=? AND NOT EXISTS
+      (SELECT 1 FROM submitted_responses r WHERE r.account_id=d.account_id AND r.conversation_id=d.conversation_id AND r.message_id=d.message_id) LIMIT 1`,
+          accountId,
+          conversationId,
+          accountId,
+          conversationId,
+        )
+        .toArray().length > 0
+    );
+  }
+
+  hasLegacyTitleReceipt(header: ReceiptHeader): boolean {
+    return (
+      this.sql
+        .exec(
+          "SELECT 1 FROM posted_messages WHERE account_id=? AND conversation_id=? AND message_id=? LIMIT 1",
+          header.accountId,
+          header.conversationId,
+          header.titleMessageId,
+        )
+        .toArray().length > 0
+    );
+  }
+
+  restoreLegacyTitle(header: ReceiptHeader): void {
+    this.sql.exec(
+      "UPDATE conversations SET title_subject=?,title=?,title_message_id=? WHERE account_id=? AND conversation_id=?",
+      header.titleSubject,
+      header.title,
+      header.titleMessageId,
+      header.accountId,
+      header.conversationId,
     );
   }
 

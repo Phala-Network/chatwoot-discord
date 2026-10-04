@@ -1,16 +1,19 @@
-// Retained only during the evidence/rollback window. It cannot start business work.
-import { DurableObject } from "cloudflare:workers";
-import type { Env } from "./env.ts";
-import type { ReceiptPosition } from "./history.ts";
+// SOURCE-ONLY maintenance bridge: install legacy-relay as the exact deployed 0.27.0 package
+// (npm alias), and this reviewed package artifact separately. Keep the original Worker name,
+// Hub namespace, HUB binding, secrets, ingress and cron configuration. Review deployment first.
+// This preserves the old executor; it does not migrate SQLite or add partition owners.
+
 import {
   legacyAuditPage,
   legacyEscalationBaseline,
   legacyInventory,
   legacyKeyPage,
   legacyReceiptPage,
-} from "./legacy.ts";
+  type ReceiptPosition,
+} from "chatwoot-discord-relay/operator";
+import legacyWorker, { Hub as LegacyHub } from "legacy-relay";
 
-export class Hub extends DurableObject<Env> {
+export class Hub extends LegacyHub {
   inventory(after = 0) {
     return { ...legacyInventory(this.ctx.storage.sql, after), sourceIdentity: this.ctx.id.toString() };
   }
@@ -20,13 +23,11 @@ export class Hub extends DurableObject<Env> {
   auditPage(after?: { kind: number; rowid: number }) {
     return legacyAuditPage(this.ctx.storage.sql, after);
   }
-  keyPage(after = "") {
-    return legacyKeyPage(this.ctx.storage.sql, after);
-  }
   escalationBaseline() {
     return legacyEscalationBaseline(this.ctx.storage.sql);
   }
-  override async alarm(): Promise<void> {
-    await this.ctx.storage.deleteAlarm();
+  keyPage(after = "") {
+    return legacyKeyPage(this.ctx.storage.sql, after);
   }
 }
+export default legacyWorker;

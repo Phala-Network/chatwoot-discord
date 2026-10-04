@@ -3,8 +3,17 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   type AdoptionCut,
+  auditPage,
+  escalationBaseline,
+  importAdoptionPage,
   inventory,
+  keyPage,
   type OperatorEnv,
+  prepareAdoption,
+  type ReceiptPage,
+  type ReceiptPosition,
+  receiptPage,
+  sealAdoptionHistory,
   stageAdoption,
   verifyAdoptionLinks,
 } from "chatwoot-discord-relay/operator";
@@ -12,6 +21,27 @@ import {
 export class RelayAdoptionOperator extends DurableObject<OperatorEnv> {
   inventory(after = 0) {
     return inventory(this.env, after);
+  }
+  receiptPage(accountId: number, conversationId: number, position?: ReceiptPosition) {
+    return receiptPage(this.env, accountId, conversationId, position);
+  }
+  auditPage(after?: { kind: number; rowid: number }) {
+    return auditPage(this.env, after);
+  }
+  keyPage(after = "") {
+    return keyPage(this.env, after);
+  }
+  escalationBaseline() {
+    return escalationBaseline(this.env);
+  }
+  prepare(cut: AdoptionCut) {
+    return prepareAdoption(this.env, cut);
+  }
+  importPage(page: ReceiptPage) {
+    return importAdoptionPage(this.env, page);
+  }
+  seal(accountId: number, conversationId: number) {
+    return sealAdoptionHistory(this.env, accountId, conversationId);
   }
   verify(cut: AdoptionCut) {
     const sql = this.ctx.storage.sql;

@@ -403,15 +403,16 @@ async function dueJobs(): Promise<number> {
 }
 
 /**
- * Waits until no job is due. Jobs run from the Durable Object's own alarm, which fires on its
- * own; running alarm() by hand as well would overlap it, which Cloudflare never does.
+ * Waits until no job is due; a deferred job may still be unfinished. Tests that need completed
+ * work also await that observable boundary. Jobs run from the DO's own alarm; manually
+ * overlapping alarm() would violate its contract.
  */
 async function drain(): Promise<void> {
   await vi.waitFor(
     async () => {
       if ((await dueJobs()) > 0) throw new Error("jobs still due");
     },
-    { timeout: 5000, interval: 20 },
+    { timeout: 5000, interval: 50 },
   );
 }
 
@@ -460,7 +461,7 @@ afterEach(async () => {
       return match
         ? [`${match[1]}:${match[2]}`]
         : request.url.pathname.startsWith("/api/v10/")
-          ? [`route:${request.url.pathname.slice(7)}`]
+          ? [`route:${request.url.pathname.slice("/api/v10".length)}`]
           : [];
     }),
   );
@@ -537,6 +538,7 @@ describe("worker", () => {
     );
     await chatwootWebhook(created(12));
     await drain();
+    await vi.waitFor(() => expect(world.cards()).toHaveLength(1), { timeout: 5000 });
 
     const posts = world.webhookPosts();
     expect(posts).toHaveLength(2);
@@ -581,6 +583,7 @@ describe("worker", () => {
       ?.messages.push({ id: 502, content: "Try again", message_type: 1, sender: { name: "Sam", type: "user" } });
     await chatwootWebhook(created(12));
     await drain();
+    await vi.waitFor(() => expect(world.cards()).toHaveLength(2), { timeout: 5000 });
     const later = world.webhookPosts().slice(2);
     expect(later).toMatchObject([
       {
@@ -602,6 +605,7 @@ describe("worker", () => {
     world.conversation(24, [{ id: 701, content: "help", message_type: 0 }]);
     await chatwootWebhook(created(24));
     await drain();
+    await vi.waitFor(() => expect(world.cards()).toHaveLength(1), { timeout: 5000 });
     const thread = world.webhookPosts().at(-1)?.thread ?? "";
     const before = world.cards().length;
     const answerId = "100000000000009100";
@@ -666,6 +670,9 @@ describe("worker", () => {
     world.rateLimitReplies = 1;
     await chatwootWebhook(created(13));
     await drain();
+    await vi.waitFor(async () => expect(await jobDelay("conversation:3:13")).toBeGreaterThan(60_000), {
+      timeout: 5000,
+    });
 
     // Advance the upstream cooldown without sleeping.
     await elapseDiscordWindows(65_000);
@@ -678,6 +685,9 @@ describe("worker", () => {
     });
     await setAlarmNow();
     await drain();
+    await vi.waitFor(() => expect(world.webhookPosts().filter((post) => post.thread)).toHaveLength(2), {
+      timeout: 5000,
+    });
     const replies = world.webhookPosts().filter((post) => post.thread);
     expect(replies.map((post) => post.body.content)).toEqual([
       "hello\n-# <@100000000000000777>", // attempt deferred by Discord's 429
@@ -743,6 +753,7 @@ describe("worker", () => {
     });
     await chatwootWebhook(created(15));
     await drain();
+    await vi.waitFor(() => expect(world.cards()).toHaveLength(1), { timeout: 5000 });
     expect(world.webhookPosts()[0]?.thread).toBeNull();
   });
 
@@ -786,6 +797,7 @@ describe("worker", () => {
     world.failPatches = 1;
     await chatwootWebhook(created(19));
     await drain();
+    await vi.waitFor(() => expect(world.failPatches).toBe(0), { timeout: 5000 });
     await runInDurableObject(hub(), (_instance, state) => {
       state.storage.sql.exec("UPDATE jobs SET not_before = 0");
       // Move persisted cooldowns forward with the job clock, rather than waiting in real time.
@@ -795,6 +807,7 @@ describe("worker", () => {
     });
     await setAlarmNow();
     await drain();
+    await vi.waitFor(() => expect(world.cards()).toHaveLength(1), { timeout: 5000 });
     expect(world.webhookPosts().map((post) => post.body.content)).toEqual([
       expect.stringContaining("Open in Chatwoot"),
       "thanks, solved\n-# Triage bot not called: handled automatically. Ask it here, if needed.",
@@ -1795,7 +1808,9 @@ it("measures command feedback behind a slow conversation", async () => {
 
 it.for(["baseline", "headers", "body", "discord"] as const)(
   "measures thirty warm independent conversations while A blocks %s",
-  { timeout: 90000 },
+  // Includes route warm-up and both owners' cleanup for all 30 pairs. The measured
+  // action/feedback/first-post limits below remain one second per admission.
+  { timeout: 180000 },
   async (mode, context) => {
     const samples: Array<{ ack: number; queue: number; action: number; feedback: number; firstPost: number }> = [];
     for (let sample = 0; sample < 30; sample++) {
@@ -1935,15 +1950,23 @@ it.for(["baseline", "headers", "body", "discord"] as const)(
         const store = new Store(state.storage.sql);
         store.adoptThread(accountId, b, bThread);
         store.setCursor(accountId, b, 0);
-        // Learn the real fake webhook capacity before measuring a concurrent in-flight POST.
-        const budget = new Budget(45);
-        const rest = new DiscordRest("test-bot-token", budget.fetch, new DiscordLimiter(store, env, budget));
-        await vi.waitFor(
-          async () => {
-            await rest.post("/webhooks/1/tok", { body: { thread_name: "Warm", content: "Warm" }, auth: false });
-          },
-          { timeout: 3000, interval: 50 },
+        // Warm webhook and thread-patch capacities through the real limiter/report path
+        // before measuring independent warm owners. Cold probes have separate tests.
+        const warm = (request: (rest: DiscordRest) => Promise<unknown>) =>
+          vi.waitFor(
+            async () => {
+              // Each attempt is a new bounded slice; persisted permits/cooldowns stay intact.
+              const budget = new Budget(45);
+              const rest = new DiscordRest("test-bot-token", budget.fetch, new DiscordLimiter(store, env, budget));
+              await request(rest);
+            },
+            { timeout: 3000, interval: 50 },
+          );
+        await warm((rest) =>
+          rest.post("/webhooks/1/tok", { body: { thread_name: "Warm", content: "Warm" }, auth: false }),
         );
+        for (const thread of [aThread, bThread])
+          await warm((rest) => rest.patch(`/channels/${thread}`, { body: { archived: false } }));
       });
       const signed = await signedInteraction(
         {
@@ -2012,13 +2035,17 @@ it.for(["baseline", "headers", "body", "discord"] as const)(
       // Every sampled owner settles before replacing the fake upstream for the next pair.
       await vi.waitFor(
         async () => {
-          const jobs = await runInDurableObject(
-            hub(b, accountId),
-            (_instance, state) => state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM jobs").one().n,
-          );
+          let jobs = 0;
+          for (const stub of [hub(a), hub(b, accountId)])
+            jobs += await runInDurableObject(
+              stub,
+              (_instance, state) => state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM jobs").one().n,
+            );
           expect(jobs).toBe(0);
         },
-        { interval: 5, timeout: 5000 },
+        // Polling a DO every 5ms competes with the dispatch permits being measured.
+        // A settled fake must cover a five-second failure backoff plus its resumed slice.
+        { interval: 50, timeout: 10000 },
       );
     }
     const percentile = (field: keyof (typeof samples)[number], p: number) => {
@@ -2319,9 +2346,9 @@ it("releases the alarm on a 429 so another person's command receives feedback", 
   ]);
   world.conversation(883, [{ id: 88301, content: "Rate limited", message_type: 0 }]);
   // First create the post with the ordinary mock, then apply the rate limit only to replies.
-  const started = Date.now();
   await hub(883).enqueueConversation(3, 883);
   await vi.waitFor(() => expect(limited).toBe(true), { timeout: 5000 });
+  const started = Date.now();
   await enqueueCommand({
     interactionId: "rate-command",
     applicationId: "100000000000000001",
@@ -2675,12 +2702,17 @@ it("does not replay a lost CSAT receipt or suppress later five to one to five re
   world.conversation(887, [{ id: 88701, content: "Thank you", message_type: 0 }, question]);
   await hub(887).enqueueConversation(3, 887);
   await drain();
+  await vi.waitFor(() => expect(world.cards()).toHaveLength(1), { timeout: 5000 });
+  const expected: string[] = [];
   for (const rating of [5, 5, 1, 1, 5, 5]) {
+    if (expected.at(-1) !== String(rating)) expected.push(String(rating));
     Object.assign(question, { content_attributes: { submitted_values: { csat_survey_response: { rating } } } });
     await hub(887).enqueueMessageUpdate(3, 887, question.id);
     await drain();
     await makeJobsDue();
     await drain();
+    // Do not change the fake API's rating while its previous update is still deferred.
+    await vi.waitFor(() => expect(sends).toEqual(expected), { timeout: 5000 });
   }
   expect(sends).toEqual(["5", "1", "5"]);
 });

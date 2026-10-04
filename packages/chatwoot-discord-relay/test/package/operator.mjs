@@ -1,14 +1,40 @@
 // Load the emitted runtime export from the installed tarball, not a source/declaration path.
 import assert from "node:assert/strict";
 import {
+  auditPage,
+  escalationBaseline,
+  importAdoptionPage,
   inventory,
+  keyPage,
+  nextReceiptPosition,
+  prepareAdoption,
+  receiptPage,
+  receiptSeal,
+  sealAdoptionHistory,
   stageAdoption,
   validateCut,
+  validateReceiptPage,
   verifyAdoptionLinks,
   verifyLinks,
 } from "chatwoot-discord-relay/operator";
 
-for (const method of [inventory, stageAdoption, validateCut, verifyAdoptionLinks, verifyLinks])
+for (const method of [
+  inventory,
+  escalationBaseline,
+  receiptPage,
+  auditPage,
+  keyPage,
+  prepareAdoption,
+  importAdoptionPage,
+  sealAdoptionHistory,
+  nextReceiptPosition,
+  receiptSeal,
+  validateReceiptPage,
+  stageAdoption,
+  validateCut,
+  verifyAdoptionLinks,
+  verifyLinks,
+])
   assert.equal(typeof method, "function");
 assert.throws(() => validateCut({}), /./);
 

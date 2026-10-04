@@ -3,10 +3,18 @@ import { MessageFlags, type RESTGetAPIChannelMessagesResult, Routes } from "disc
 import { z } from "zod";
 import type { Budget } from "../../../shared/budget.ts";
 import type { ChatwootClient } from "../../../shared/chatwoot/api.ts";
+import { relaysInbox, type Settings } from "./config.ts";
 import type { ThreadOwner } from "./control.ts";
 import type { DiscordRest } from "./discord/rest.ts";
 import { DiscordHttpError } from "./discord/rest.ts";
 import type { Env } from "./env.ts";
+import {
+  type ReceiptPage,
+  type ReceiptSeal,
+  receiptCountsSchema,
+  receiptSealSchema,
+  validateTitleMetadata,
+} from "./history.ts";
 import { escalationsSchema } from "./queue.ts";
 import { control, conversation } from "./rpc.ts";
 import { loadSettings } from "./settings.ts";
@@ -16,7 +24,7 @@ export interface AdoptionMapping extends ThreadOwner {
   threadId: string;
   cursor: number;
   latestEligibleId: number;
-  responses: Array<{ messageId: number; digest: string }>;
+  history: ReceiptSeal;
 }
 export interface AdoptionCut {
   epoch: string;
@@ -38,6 +46,9 @@ export interface AdoptionCut {
   inventoryComplete: boolean;
   drainEvidence: string;
   escalationBaseline: string;
+  sourceCounts: { conversations: number; threads: number; posted: number; derived: number; responses: number };
+  auditedUnthreaded: number;
+  receiptAudit: { orphaned: number; conflicting: number; invalid: number; unsupported: number };
 }
 
 const positive = z.number().int().positive();
@@ -61,6 +72,17 @@ export const cutSchema = z.strictObject({
   cooldownEndsAt: z.number().nonnegative(),
   historyPermissionVerified: z.boolean(),
   escalationBaseline: z.string(),
+  sourceCounts: receiptCountsSchema.extend({
+    conversations: z.number().int().nonnegative(),
+    threads: z.number().int().nonnegative(),
+  }),
+  auditedUnthreaded: z.number().int().nonnegative(),
+  receiptAudit: z.strictObject({
+    orphaned: z.literal(0),
+    conflicting: z.literal(0),
+    invalid: z.literal(0),
+    unsupported: z.literal(0),
+  }),
   mappings: z.array(
     z.strictObject({
       accountId: positive,
@@ -71,13 +93,13 @@ export const cutSchema = z.strictObject({
       generation: positive,
       cursor: z.number().int().nonnegative(),
       latestEligibleId: z.number().int().nonnegative(),
-      responses: z.array(z.strictObject({ messageId: positive, digest: z.string().regex(/^[a-f0-9]{64}$/) })),
+      history: receiptSealSchema,
     }),
   ),
 });
 
 export function validateCut(cut: AdoptionCut): void {
-  cutSchema.parse(cut);
+  if (!cutSchema.safeParse(cut).success) throw new Error("Invalid or unresolved cut manifest");
   escalationsSchema.parse(JSON.parse(cut.escalationBaseline));
   if (
     !cut.inventoryComplete ||
@@ -96,20 +118,37 @@ export function validateCut(cut: AdoptionCut): void {
     !/^\d+$/.test(cut.interactionFence)
   )
     throw new Error("Cutover preconditions are unresolved");
+  if (
+    cut.mappings.length !== cut.sourceCounts.threads ||
+    cut.mappings.length + cut.auditedUnthreaded !== cut.sourceCounts.conversations
+  )
+    throw new Error("Incomplete authoritative conversation inventory");
+  const totals = { posted: 0, derived: 0, responses: 0 };
   const threads = new Set<string>();
   const owners = new Set<string>();
   for (const mapping of cut.mappings) {
+    validateTitleMetadata(mapping.history.header);
     if (
       owners.has(`${mapping.accountId}:${mapping.conversationId}`) ||
       threads.has(mapping.threadId) ||
       mapping.cursor < mapping.latestEligibleId ||
       mapping.cursor > cut.watermark ||
-      mapping.latestEligibleId > cut.watermark
+      mapping.latestEligibleId > cut.watermark ||
+      mapping.history.header.accountId !== mapping.accountId ||
+      mapping.history.header.conversationId !== mapping.conversationId ||
+      mapping.history.header.threadId !== mapping.threadId ||
+      mapping.history.header.cursor !== mapping.cursor ||
+      mapping.history.header.schemaVersion !== cut.schemaVersion ||
+      mapping.history.header.sourceIdentity !== cut.sourceIdentity ||
+      (mapping.history.header.titleMessageId !== null && mapping.history.header.titleMessageId > mapping.cursor)
     )
       throw new Error("No common processed watermark or unique thread owner");
     threads.add(mapping.threadId);
     owners.add(`${mapping.accountId}:${mapping.conversationId}`);
+    for (const kind of ["posted", "derived", "responses"] as const) totals[kind] += mapping.history.header.counts[kind];
   }
+  for (const kind of ["posted", "derived", "responses"] as const)
+    if (totals[kind] !== cut.sourceCounts[kind]) throw new Error("Incomplete authoritative receipt inventory");
 }
 
 /** Audit every source mapping, repair only its link, then fresh-read it; 403 never means absent. */
@@ -118,6 +157,7 @@ export async function verifyLinks(
   client: ChatwootClient,
   rest: DiscordRest,
   attribute: string,
+  settings: Settings,
 ): Promise<void> {
   if (!attribute) throw new Error("Adoption requires a link attribute");
   for (const mapping of cut.mappings) {
@@ -130,6 +170,9 @@ export async function verifyLinks(
     const old = raw.custom_attributes?.[attribute];
     if (old && old !== link) throw new Error("Conflicting legacy link");
     if (old !== link) {
+      const account = settings.account(mapping.accountId);
+      if (!account || !relaysInbox(account, raw.inbox_id))
+        throw new Error("Link repair is outside configured inbox scope");
       await client.setCustomAttributes(mapping.accountId, mapping.conversationId, { [attribute]: link });
       if (
         (await client.getConversation(mapping.accountId, mapping.conversationId))?.custom_attributes?.[attribute] !==
@@ -141,7 +184,7 @@ export async function verifyLinks(
 }
 
 /** Invoke from a trusted operator/bridge binding, never a public HTTP import endpoint. */
-export async function stageAdoption(env: Env, cut: AdoptionCut): Promise<void> {
+export async function prepareAdoption(env: Env, cut: AdoptionCut): Promise<void> {
   validateCut(cut);
   const settings = await loadSettings(env);
   if (
@@ -158,14 +201,7 @@ export async function stageAdoption(env: Env, cut: AdoptionCut): Promise<void> {
     )
       throw new Error("Cutover account, forum or historical webhook configuration is incomplete");
   }
-  if (settings.config.queue)
-    await control(undefined, () =>
-      env.QUEUE_DIGEST.getByName(`digest:v1:${settings.config.queue?.channelId}`).stage(
-        cut.epoch,
-        cut.escalationBaseline,
-      ),
-    );
-  for (const { threadId, cursor: _cursor, latestEligibleId: _latest, responses, ...owner } of cut.mappings) {
+  for (const { threadId, cursor: _cursor, latestEligibleId: _latest, history, ...owner } of cut.mappings) {
     if (!(await control(undefined, () => env.THREAD_DIRECTORY.getByName(`thread:v1:${threadId}`).claim(owner))))
       throw new Error("Directory conflict");
     await control(undefined, () =>
@@ -174,10 +210,42 @@ export async function stageAdoption(env: Env, cut: AdoptionCut): Promise<void> {
         threadId,
         cut.epoch,
         cut.watermark,
-        responses,
+        history,
       ),
     );
   }
+}
+
+/** Import one private artifact page. No public route and no online source lookup. */
+export async function importAdoptionPage(env: Env, page: ReceiptPage): Promise<void> {
+  await control(undefined, () =>
+    conversation(env, page.header.accountId, page.header.conversationId).importHistory(page),
+  );
+}
+export async function sealAdoptionHistory(env: Env, accountId: number, conversationId: number): Promise<void> {
+  await control(undefined, () => conversation(env, accountId, conversationId).sealHistory());
+}
+
+/** All histories must be sealed before any mapping becomes ready for cleanup/activation. */
+export async function stageAdoption(env: Env, cut: AdoptionCut): Promise<void> {
+  await prepareAdoption(env, cut);
+  for (const mapping of cut.mappings)
+    if (
+      !(await control(undefined, () =>
+        conversation(env, mapping.accountId, mapping.conversationId).historyReady(mapping.history.digest),
+      ))
+    )
+      throw new Error("Cut contains an incomplete legacy history");
+  const settings = await loadSettings(env);
+  if (settings.config.queue)
+    await control(undefined, () =>
+      env.QUEUE_DIGEST.getByName(`digest:v1:${settings.config.queue?.channelId}`).stage(
+        cut.epoch,
+        cut.escalationBaseline,
+      ),
+    );
+  for (const mapping of cut.mappings)
+    await control(undefined, () => conversation(env, mapping.accountId, mapping.conversationId).readyHistory());
 }
 
 /** One page/checkpoint at a time; only the old webhooks' standalone V2 cards are deleted. */

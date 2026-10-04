@@ -4,6 +4,7 @@
   "description": "CI fixture: a project that depends on the packed package, type-checked as the README shows it.",
   "type": "module",
   "devDependencies": {
+    "legacy-relay": "npm:chatwoot-discord-relay@0.27.0",
     "cf": "1.0.0-beta.9",
     "vite": "^8.3.2",
     "@cloudflare/vite-plugin": "2.0.0-beta.sha-805ec1ff3"
