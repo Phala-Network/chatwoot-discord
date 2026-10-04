@@ -311,6 +311,24 @@ export class LegacyArchive {
       throw new Error("Invalid authoritative receipt");
     return parsed.data;
   }
+  /** Read-only pre-audit evidence worksheet: exact baseline digests, never title/payload. */
+  baselinePage(after = 0) {
+    if (!this.state().collected || !safeCount.safeParse(after).success)
+      throw new Error("Complete frozen collection is required for baseline review");
+    const rows = this.rows(3, after);
+    return {
+      rows: rows.map((row) => ({
+        rowid: row.rowid,
+        accountId: row.account_id,
+        conversationId: row.conversation_id,
+        messageId: row.message_id,
+        digest: row.digest,
+        linkage: this.linkage(row),
+      })),
+      next: rows.at(-1)?.rowid ?? after,
+      complete: rows.length < 100,
+    };
+  }
   /** Incremental audit: one local indexed page per invocation, never rescans the source. */
   auditNext() {
     this.transaction(() => {

@@ -508,6 +508,9 @@ it("preserves baselines from actual legacy write/delete and pre-association upgr
     expect(store.derivedMessages(3, 16, 20)).toEqual([]);
     await withArchive(state, async (archive) => {
       expect(archive.inventory().receiptAudit.unresolved).toBe(1);
+      expect(archive.baselinePage().rows).toMatchObject([
+        { accountId: 3, conversationId: 16, messageId: 20, digest: "a".repeat(64), linkage: { state: "unresolved" } },
+      ]);
       await expect(archive.receiptPage(3, 16)).rejects.toThrow(/unresolved audit/);
     });
     const settings = testSettings();
@@ -643,6 +646,7 @@ it("seals authoritative deleted-source dispositions and legitimately null title 
           };
         },
         (archive, source) => {
+          expect(archive.baselinePage().rows).toMatchObject([{ messageId: 21, digest: "b".repeat(64) }]);
           archive.disposition(source, 3, 17, 21, "b".repeat(64), "fixture:authoritative-deletion-21");
           archive.disposition(source, 3, 17, 21, "b".repeat(64), "fixture:authoritative-deletion-21");
           expect(() => archive.disposition(source, 3, 17, 21, "b".repeat(64), "different:evidence")).toThrow(

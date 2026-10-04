@@ -8,7 +8,7 @@ Use an operator artifact built from the **reviewed preservation change**, not th
 
 The package includes [operator.ts](operator.ts) and [operator.config.ts](operator.config.ts), a private Durable Object RPC service and binding template. Copy them into a separately reviewed operator project, rename the configuration to `cloudflare.config.ts`, and use its standard Cloudflare Vite setup. Replace every placeholder identity and CONFIG from the sealed installation configuration. `LEGACY_HUB` references the original source namespace and object `global`; the partition bindings reference the target relay namespaces. After settled old-executor retirement, that source must run the separately reviewed frozen shell below. Neither a fresh Hub nor a namespace copy is a source.
 
-Bind a trusted private client with `bindings.durableObject({worker:"relay-adoption-operator",exportName:"RelayAdoptionOperator"})`. Disable routes, workers.dev and preview URLs; the template's HTTP handler always returns 404. Never bind it to online ingress. The private service exposes `sourceIdentity`, `open`, `collect`, `disposition`, `auditNext`, `inventory`, `receiptPage`, `auditPage`, `escalationBaseline`, `verify`, `prepare`, `importPage`, `seal` and `stage`. Source reads have a ten-second caller deadline which does **not cancel** a DO/SQLite invocation; online control deadlines are unchanged. Discord checks use the normal scoped limiter and durable cooldown reports.
+Bind a trusted private client with `bindings.durableObject({worker:"relay-adoption-operator",exportName:"RelayAdoptionOperator"})`. Disable routes, workers.dev and preview URLs; the template's HTTP handler always returns 404. Never bind it to online ingress. The private service exposes `sourceIdentity`, `open`, `collect`, `baselinePage`, `disposition`, `auditNext`, `inventory`, `receiptPage`, `auditPage`, `escalationBaseline`, `verify`, `prepare`, `importPage`, `seal` and `stage`. Source reads have a ten-second caller deadline which does **not cancel** a DO/SQLite invocation; online control deadlines are unchanged. Discord checks use the normal scoped limiter and durable cooldown reports.
 
 Keep backups, titles, receipt pages and manifests in access-controlled **private artifacts**, never application logs, shell tracing, tickets or public build output. Titles can contain customer text even though receipt pages contain no message bodies, cached credentials or webhook tokens. Operator errors deliberately omit page/header values. Preserve an identical artifact when retrying a lost RPC receipt. Remove the private operator after separately authorized close-out.
 
@@ -49,7 +49,10 @@ let checkpoint = await operator.open(source); // immutable deployed boundary
 while (!checkpoint.complete) {
   checkpoint = await operator.collect(source, checkpoint.next); // persists before reply
 }
-// Supply reviewed deleted-source dispositions here, before the first auditNext call.
+// Read every baselinePage(after) into a private worksheet BEFORE auditing.
+// It returns exact source owner/message/digest plus recorded/unresolved linkage, at most 100 rows.
+// Review authoritative evidence and supply deleted-source dispositions here.
+// Unexplained/pre-migration existing posts remain unresolved; never infer Discord IDs.
 while (!(await operator.auditNext()).complete) {}
 ```
 

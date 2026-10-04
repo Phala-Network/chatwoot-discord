@@ -42,6 +42,9 @@ export class RelayAdoptionOperator extends DurableObject<OperatorEnv> {
     // Persist before returning. Repeating an identical checkpoint after a timeout is safe.
     return this.archive().collect(await scanPage(this.env, source, after));
   }
+  baselinePage(after = 0) {
+    return this.archive().baselinePage(after);
+  }
   disposition(
     source: FrozenSource,
     accountId: number,
