@@ -334,7 +334,7 @@ export class Store extends QueueStore implements RelayStore, Cache {
         receipt.messageId,
         receipt.discordId,
       );
-    else
+    else {
       this.sql.exec(
         "INSERT INTO submitted_responses VALUES (?, ?, ?, ?)",
         accountId,
@@ -342,6 +342,11 @@ export class Store extends QueueStore implements RelayStore, Cache {
         receipt.messageId,
         receipt.digest,
       );
+      this.set(
+        `adoption:baseline:${accountId}:${conversationId}:${receipt.messageId}`,
+        JSON.stringify({ digest: receipt.digest, ...receipt.linkage }),
+      );
+    }
     if ("discordId" in receipt) this.set(`adoption:legacy-discord:${receipt.discordId}`, "1");
   }
 
@@ -365,10 +370,17 @@ export class Store extends QueueStore implements RelayStore, Cache {
     return (
       this.sql
         .exec(
-          `SELECT 1 FROM submitted_responses r WHERE account_id=? AND conversation_id=? AND NOT EXISTS
-      (SELECT 1 FROM derived_messages d WHERE d.account_id=r.account_id AND d.conversation_id=r.conversation_id AND d.message_id=r.message_id)
-      UNION ALL SELECT 1 FROM derived_messages d WHERE account_id=? AND conversation_id=? AND NOT EXISTS
-      (SELECT 1 FROM submitted_responses r WHERE r.account_id=d.account_id AND r.conversation_id=d.conversation_id AND r.message_id=d.message_id) LIMIT 1`,
+          `SELECT 1 FROM submitted_responses r LEFT JOIN cache c
+        ON c.key='adoption:baseline:'||r.account_id||':'||r.conversation_id||':'||r.message_id
+        WHERE r.account_id=? AND r.conversation_id=? AND (
+          c.value IS NULL OR COALESCE(json_extract(c.value,'$.digest'),'')!=r.digest OR
+          COALESCE(json_extract(c.value,'$.state'),'') NOT IN ('recorded','deleted-source') OR
+          (json_extract(c.value,'$.state')='recorded' AND NOT EXISTS
+            (SELECT 1 FROM derived_messages d WHERE d.account_id=r.account_id AND d.conversation_id=r.conversation_id AND d.message_id=r.message_id)) OR
+          (json_extract(c.value,'$.state')='deleted-source' AND (json_extract(c.value,'$.evidenceRef') IS NULL OR EXISTS
+            (SELECT 1 FROM derived_messages d WHERE d.account_id=r.account_id AND d.conversation_id=r.conversation_id AND d.message_id=r.message_id))))
+        UNION ALL SELECT 1 FROM derived_messages d WHERE account_id=? AND conversation_id=? AND NOT EXISTS
+          (SELECT 1 FROM submitted_responses r WHERE r.account_id=d.account_id AND r.conversation_id=d.conversation_id AND r.message_id=d.message_id) LIMIT 1`,
           accountId,
           conversationId,
           accountId,
@@ -392,6 +404,7 @@ export class Store extends QueueStore implements RelayStore, Cache {
   }
 
   restoreLegacyTitle(header: ReceiptHeader): void {
+    this.set("adoption:title-association", header.titleAssociation);
     this.sql.exec(
       "UPDATE conversations SET title_subject=?,title=?,title_message_id=? WHERE account_id=? AND conversation_id=?",
       header.titleSubject,

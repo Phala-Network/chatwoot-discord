@@ -2,6 +2,8 @@
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { Budget } from "../../../shared/budget.ts";
+import { chatwootClient } from "../../../shared/chatwoot/api.ts";
 import {
   type AdoptionCut,
   importAdoptionPage,
@@ -12,18 +14,17 @@ import {
 } from "../src/adoption.ts";
 import { configSchema } from "../src/config.ts";
 import { Conversation } from "../src/conversation.ts";
+import { DiscordRest } from "../src/discord/rest.ts";
 import type { Env } from "../src/env.ts";
 import { nextReceiptPosition, type ReceiptPage, receiptHash, receiptPageBody, receiptSeal } from "../src/history.ts";
-import {
-  legacyAuditPage,
-  legacyEscalationBaseline,
-  legacyInventory,
-  legacyKeyPage,
-  legacyReceiptPage,
-} from "../src/legacy.ts";
+import { legacyEscalationBaseline, legacyScanPage } from "../src/legacy.ts";
+import { relayFor } from "../src/relay/processor.ts";
 import { Store } from "../src/store.ts";
-import legacySchema from "./fixtures/legacy-027.ts";
-import { FORUM, json, mockFetch, on } from "./helpers.ts";
+import { verifiedFixture, withArchive } from "./fixtures/archive.ts";
+import legacySchema, { associationUpgrade, beforeAssociations } from "./fixtures/legacy-027.ts";
+import { Legacy027Store } from "./fixtures/legacy-027-store.ts";
+import { relayDerived as legacyDerived, processMessageUpdate as legacyUpdate } from "./fixtures/legacy-027-updates.ts";
+import { FakeForum, FORUM, json, mockFetch, on, testSettings } from "./helpers.ts";
 
 const THREAD = "100000000000040012";
 const GUILD = "100000000000000044";
@@ -74,21 +75,17 @@ async function source(large = false, title = true, conversationId = 12) {
       conversationId,
       baseline,
     );
-    const inventory = legacyInventory(state.storage.sql);
-    const pages: ReceiptPage[] = [];
-    let page = await legacyReceiptPage(state.storage.sql, state.id.toString(), 3, conversationId);
-    pages.push(page);
-    while (!page.complete) {
-      page = await legacyReceiptPage(
-        state.storage.sql,
-        state.id.toString(),
-        3,
-        conversationId,
-        nextReceiptPosition(page),
-      );
+    return withArchive(state, async (archive) => {
+      const inventory = archive.inventory();
+      const pages: ReceiptPage[] = [];
+      let page = await archive.receiptPage(3, conversationId);
       pages.push(page);
-    }
-    return { pages, inventory, baseline, conversationId, thread };
+      while (!page.complete) {
+        page = await archive.receiptPage(3, conversationId, nextReceiptPosition(page));
+        pages.push(page);
+      }
+      return { pages, inventory, baseline, conversationId, thread };
+    });
   });
 }
 function manifest(fixture: Awaited<ReturnType<typeof source>>): AdoptionCut {
@@ -183,7 +180,7 @@ it("imports bounded schema9 history, survives restart/fault, gates cleanup, then
   const maintenance = targetEnv(cut, "maintenance");
   // Exercise the supported private operator functions and real namespace routing.
   await prepareAdoption(maintenance, cut);
-  await expect(stageAdoption(maintenance, cut)).rejects.toThrow(/incomplete/);
+  await expect(stageAdoption(maintenance, cut, await verifiedFixture(cut))).rejects.toThrow(/incomplete/);
   await expect(sealAdoptionHistory(maintenance, 3, 12)).rejects.toThrow(/completely/);
   let contact = "Jane Doe";
   let deleted = false;
@@ -269,7 +266,7 @@ it("imports bounded schema9 history, survives restart/fault, gates cleanup, then
       revision: 0,
     });
     expect(store.get("adoption:ready")).toBeUndefined();
-    await stageAdoption(maintenance, cut);
+    await stageAdoption(maintenance, cut, await verifiedFixture(cut));
     // An idempotent stage cannot change the initial private title baseline.
     const altered = structuredClone(cut);
     const alteredMapping = altered.mappings[0];
@@ -380,7 +377,7 @@ it("fails closed on missing receipt pages, changed checkpoints, duplicate author
   expect(() => validateCut(omitted)).toThrow(/conversation inventory/);
 });
 
-it("audits orphan, conflicting, unsupported records without returning cache values or silently dropping them", async () => {
+it("audits orphan, conflicting, unsupported and invalid records away from the frozen source", async () => {
   await runInDurableObject(env.LEGACY_HUB.getByName(`audit:${crypto.randomUUID()}`), async (_instance, state) => {
     state.storage.sql.exec(legacySchema);
     state.storage.sql.exec(
@@ -395,29 +392,33 @@ it("audits orphan, conflicting, unsupported records without returning cache valu
     state.storage.sql.exec("INSERT INTO derived_messages VALUES (3,12,22,?)", discordId(20));
     state.storage.sql.exec("INSERT INTO submitted_responses VALUES (3,12,23,'invalid')");
     state.storage.sql.exec("INSERT INTO cache VALUES ('unexpected:authoritative','DO-NOT-EXPOSE',NULL)");
-    expect(legacyInventory(state.storage.sql).receiptAudit).toEqual({
-      orphaned: 1,
-      conflicting: 2,
-      invalid: 1,
-      unsupported: 1,
+    const boundary = {
+      sourceIdentity: state.id.toString(),
+      epoch: "fixture-frozen-cut",
+      drainEvidence: "fixture:settled",
+      frozen: true as const,
+    };
+    expect(legacyEscalationBaseline(state.storage.sql, boundary)).toBe("{}");
+    await withArchive(state, async (archive) => {
+      expect(archive.inventory().receiptAudit).toEqual({
+        orphaned: 1,
+        conflicting: 2,
+        invalid: 3,
+        unsupported: 1,
+        unresolved: 0,
+      });
+      expect(archive.auditPage().rows).toHaveLength(5);
+      expect(JSON.stringify(archive.auditPage())).not.toContain("DO-NOT-EXPOSE");
+      await expect(archive.receiptPage(3, 12)).rejects.toThrow(/unresolved audit/);
     });
-    const audit = legacyAuditPage(state.storage.sql);
-    expect(audit.rows).toHaveLength(4);
-    expect(audit.complete).toBe(true);
-    expect(JSON.stringify(legacyKeyPage(state.storage.sql))).not.toContain("DO-NOT-EXPOSE");
-    expect(legacyEscalationBaseline(state.storage.sql)).toBe("{}");
     state.storage.sql.exec("INSERT INTO cache VALUES ('queue:escalations',?,NULL)", '{"3:12":{"since":100,"level":2}}');
-    expect(JSON.parse(legacyEscalationBaseline(state.storage.sql))).toEqual({ "3:12": { since: 100, level: 2 } });
+    expect(JSON.parse(legacyEscalationBaseline(state.storage.sql, boundary))).toEqual({
+      "3:12": { since: 100, level: 2 },
+    });
     state.storage.sql.exec("UPDATE cache SET value='invalid' WHERE key='queue:escalations'");
-    expect(() => legacyEscalationBaseline(state.storage.sql)).toThrow(/Invalid/);
-    await expect(legacyReceiptPage(state.storage.sql, state.id.toString(), 3, 999)).rejects.toThrow(
-      /Missing authoritative/,
-    );
-    await expect(legacyReceiptPage(state.storage.sql, state.id.toString(), 3, 12)).rejects.toThrow(
-      /Invalid authoritative/,
-    );
+    expect(() => legacyEscalationBaseline(state.storage.sql, boundary)).toThrow(/Invalid/);
     state.storage.sql.exec("ALTER TABLE posted_messages ADD COLUMN unknown_field TEXT");
-    expect(() => legacyInventory(state.storage.sql)).toThrow(/schema/);
+    await expect(legacyScanPage(state.storage.sql, boundary)).rejects.toThrow(/schema/);
   });
 });
 
@@ -428,7 +429,7 @@ it("preserves genuinely unrecorded title metadata without renaming the historica
   await prepareAdoption(maintenance, cut);
   for (const page of fixture.pages) await importAdoptionPage(maintenance, page);
   await sealAdoptionHistory(maintenance, 3, 14);
-  await stageAdoption(maintenance, cut);
+  await stageAdoption(maintenance, cut, await verifiedFixture(cut));
   const thread = fixture.thread;
   const { requests } = mockFetch(
     on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/14", () =>
@@ -475,33 +476,7 @@ it("preserves genuinely unrecorded title metadata without renaming the historica
   });
 });
 
-it("blocks ambiguous nonempty titles and response baselines without authoritative derived receipts", async () => {
-  await runInDurableObject(
-    env.LEGACY_HUB.getByName(`missing-title:${crypto.randomUUID()}`),
-    async (_instance, state) => {
-      state.storage.sql.exec(legacySchema);
-      state.storage.sql.exec(
-        "INSERT INTO conversations (account_id,conversation_id,thread_id,cursor,title_subject,title) VALUES (3,12,?,150,'Fictional subject','Fictional title')",
-        THREAD,
-      );
-      expect(legacyInventory(state.storage.sql).receiptAudit.invalid).toBe(1);
-      expect(legacyAuditPage(state.storage.sql).rows).toMatchObject([{ kind: 3, issue: "invalid" }]);
-      await expect(legacyReceiptPage(state.storage.sql, state.id.toString(), 3, 12)).rejects.toThrow(/association/);
-      state.storage.sql.exec("UPDATE conversations SET title_message_id=20");
-      await expect(legacyReceiptPage(state.storage.sql, state.id.toString(), 3, 12)).rejects.toThrow(/title receipt/);
-      state.storage.sql.exec("UPDATE conversations SET title_subject=NULL,title=NULL,title_message_id=NULL");
-      state.storage.sql.exec("INSERT INTO submitted_responses VALUES (3,12,23,?)", "a".repeat(64));
-      expect(legacyInventory(state.storage.sql).receiptAudit.invalid).toBe(1);
-      expect(legacyAuditPage(state.storage.sql).rows).toMatchObject([{ kind: 2, messageId: 23, issue: "invalid" }]);
-      state.storage.sql.exec("INSERT INTO derived_messages VALUES (3,12,24,?)", discordId(24));
-      expect(legacyInventory(state.storage.sql).receiptAudit.invalid).toBe(2);
-      expect(legacyAuditPage(state.storage.sql).rows).toMatchObject([
-        { kind: 1, messageId: 24, issue: "invalid" },
-        { kind: 2, messageId: 23, issue: "invalid" },
-      ]);
-    },
-  );
-  // Even a falsely clean operator audit cannot seal an unpaired target baseline.
+it("still blocks a derived receipt whose response baseline was lost", async () => {
   const fixture = await source(false, false, 15);
   const page = fixture.pages[0];
   if (!page) throw new Error("Missing fixture page");
@@ -514,6 +489,244 @@ it("blocks ambiguous nonempty titles and response baselines without authoritativ
   const maintenance = targetEnv(cut, "maintenance");
   await prepareAdoption(maintenance, cut);
   await importAdoptionPage(maintenance, page);
-  await expect(sealAdoptionHistory(maintenance, 3, 15)).rejects.toThrow(/not paired/);
-  await expect(stageAdoption(maintenance, cut)).rejects.toThrow(/incomplete/);
+  await expect(sealAdoptionHistory(maintenance, 3, 15)).rejects.toThrow(/unresolved or inconsistent/);
+  await expect(stageAdoption(maintenance, cut, await verifiedFixture(cut))).rejects.toThrow(/incomplete/);
+});
+
+it("preserves baselines from actual legacy write/delete and pre-association upgrade sequences without inventing linkage", async () => {
+  await runInDurableObject(env.LEGACY_HUB.getByName(`upgrade:${crypto.randomUUID()}`), async (_instance, state) => {
+    // Apply the real pre-migration-8 schema, create real historical state, then upgrade.
+    state.storage.sql.exec(beforeAssociations);
+    state.storage.sql.exec(
+      "INSERT INTO conversations (account_id,conversation_id,thread_id,cursor,title_subject,title) VALUES (3,16,?,150,'Fictional subject','Fictional original title')",
+      discordId(4016),
+    );
+    const store = new Legacy027Store(state.storage.sql);
+    store.savePostedResponse(3, 16, 20, "a".repeat(64)); // before derived_messages existed
+    state.storage.sql.exec(associationUpgrade); // NO title or derived backfill
+    expect(store.conversation(3, 16)?.titleMessageId).toBeUndefined();
+    expect(store.derivedMessages(3, 16, 20)).toEqual([]);
+    await withArchive(state, async (archive) => {
+      expect(archive.inventory().receiptAudit.unresolved).toBe(1);
+      await expect(archive.receiptPage(3, 16)).rejects.toThrow(/unresolved audit/);
+    });
+    const settings = testSettings();
+    const budget = new Budget(100);
+    const rest = new DiscordRest("test", budget.fetch);
+    const forum = new FakeForum();
+    const relay = relayFor(settings, forum, store);
+    const chatwoot = chatwootClient("https://chatwoot.example.com", "test", budget.fetch);
+    const context = {
+      store,
+      settings,
+      rest,
+      budget,
+      forum,
+      chatwoot,
+      relay: {
+        postResponse: (
+          accountId: number,
+          conversation: import("../../../shared/types.ts").RelayConversation,
+          text: string,
+        ) => relay.postResponse(accountId, conversation, text, "fixture:legacy-derived"),
+        notify: (accountId: number, conversation: import("../../../shared/types.ts").RelayConversation, text: string) =>
+          relay.notify(accountId, conversation, text, "fixture:legacy-derived"),
+        sync: relay.sync.bind(relay),
+        dropTitleSubject: relay.dropTitleSubject.bind(relay),
+      },
+    };
+    let deleted = false;
+    const { requests } = mockFetch(
+      on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/16/messages", () =>
+        json({ payload: [{ id: 21, content: "", message_type: 1, content_attributes: { deleted } }] }),
+      ),
+      on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/16", () =>
+        json({
+          id: 16,
+          inbox_id: 2,
+          status: "resolved",
+          custom_attributes: {},
+          meta: { sender: { name: "Renamed Customer" } },
+        }),
+      ),
+      on("GET", `discord.com/api/v10/channels/${FORUM}`, () => json({ guild_id: GUILD })),
+      on("GET", `discord.com/api/v10/channels/${FORUM}/webhooks`, () =>
+        json([{ id: "1", token: "tok", type: 1, name: "Chatwoot", application_id: "app" }]),
+      ),
+      on("GET", "discord.com/api/v10/applications/@me", () => json({ id: "app" })),
+      on("POST", "discord.com/api/v10/webhooks/1/tok", () =>
+        json({ id: discordId(8021), channel_id: discordId(4016) }),
+      ),
+      on("PATCH", `discord.com/api/v10/channels/${discordId(4016)}`, () => json({})),
+      on(
+        "DELETE",
+        `discord.com/api/v10/webhooks/1/tok/messages/${discordId(8021)}`,
+        () => new Response(null, { status: 204 }),
+      ),
+    );
+    // Execute the exact 0.27 write order and normal deletion implementation.
+    const conversation = {
+      id: 16,
+      status: "resolved" as const,
+      inboxId: 2,
+      contact: { name: "Customer", blocked: false },
+      labels: [],
+      customAttributes: {},
+    };
+    await legacyDerived(context, 3, conversation, {
+      id: 21,
+      content: "",
+      message_type: 1,
+      status: "failed",
+      content_attributes: {},
+    });
+    const baseline = store.postedResponse(3, 16, 21);
+    expect(baseline).toMatch(/^[a-f0-9]{64}$/);
+    expect(store.derivedMessages(3, 16, 21)).toEqual([forum.ids[0]]);
+    deleted = true;
+    await legacyUpdate(context, 3, 16, 21);
+    expect(store.derivedMessages(3, 16, 21)).toEqual([]);
+    expect(store.postedResponse(3, 16, 21)).toBe(baseline); // intentional old baseline retention
+    // Simulate the real crash between savePostedResponse and saveDerivedMessage.
+    store.savePostedResponse(3, 16, 22, "c".repeat(64));
+    await withArchive(state, (archive) => {
+      expect(archive.inventory().receiptAudit.unresolved).toBe(3);
+    });
+    // No deleted-source evidence exists for the old existing post (20) or crash (22).
+    // Keep them unresolved. For the known deleted source (21), demonstrate executable
+    // disposition in a separate exact source fixture; never erase these other baselines.
+    expect(store.postedResponse(3, 16, 20)).toBe("a".repeat(64));
+    expect(store.postedResponse(3, 16, 22)).toBe("c".repeat(64));
+    expect(forum.deleted).toEqual([forum.ids[0]]);
+    expect(requests.filter((request) => request.method === "DELETE")).toHaveLength(0);
+  });
+});
+
+it("seals authoritative deleted-source dispositions and legitimately null title associations through restart/import", async () => {
+  const fixture = await runInDurableObject(
+    env.LEGACY_HUB.getByName(`deleted-baseline:${crypto.randomUUID()}`),
+    async (_instance, state) => {
+      state.storage.sql.exec(beforeAssociations);
+      state.storage.sql.exec(
+        "INSERT INTO conversations (account_id,conversation_id,thread_id,cursor,title_subject,title) VALUES (3,17,?,150,'Fictional subject','Fictional title')",
+        discordId(4017),
+      );
+      const store = new Store(state.storage.sql);
+      state.storage.sql.exec(associationUpgrade);
+      store.savePostedResponse(3, 17, 21, "b".repeat(64));
+      store.saveDerivedMessage(3, 17, 21, discordId(8021));
+      store.deleteDerivedMessage(3, 17, 21, discordId(8021)); // same old confirmed-delete persistence
+      return withArchive(
+        state,
+        async (archive) => {
+          const page = await archive.receiptPage(3, 17);
+          expect(page.header).toMatchObject({
+            titleSubject: "Fictional subject",
+            title: "Fictional title",
+            titleMessageId: null,
+            titleAssociation: "never-recorded-or-unresolved",
+          });
+          expect(page.records).toMatchObject([
+            {
+              kind: 2,
+              messageId: 21,
+              digest: "b".repeat(64),
+              linkage: { state: "deleted-source", evidenceRef: "fixture:authoritative-deletion-21" },
+            },
+          ]);
+          return {
+            pages: [page],
+            inventory: archive.inventory(),
+            baseline: "b".repeat(64),
+            conversationId: 17,
+            thread: discordId(4017),
+          };
+        },
+        (archive, source) => {
+          archive.disposition(source, 3, 17, 21, "b".repeat(64), "fixture:authoritative-deletion-21");
+          archive.disposition(source, 3, 17, 21, "b".repeat(64), "fixture:authoritative-deletion-21");
+          expect(() => archive.disposition(source, 3, 17, 21, "b".repeat(64), "different:evidence")).toThrow(
+            /Conflicting/,
+          );
+          expect(() => archive.disposition(source, 3, 17, 21, "a".repeat(64), "wrong:digest")).toThrow(/conflicts/);
+          expect(() =>
+            archive.disposition({ ...source, epoch: "wrong" }, 3, 17, 21, "b".repeat(64), "wrong:epoch"),
+          ).toThrow();
+        },
+      );
+    },
+  );
+  const cut = manifest(fixture);
+  const maintenance = targetEnv(cut, "maintenance");
+  await prepareAdoption(maintenance, cut);
+  const page = fixture.pages[0];
+  if (!page) throw new Error("Missing page");
+  await importAdoptionPage(maintenance, page);
+  await importAdoptionPage(maintenance, page); // lost receipt/restart replay
+  await sealAdoptionHistory(maintenance, 3, 17);
+  await stageAdoption(maintenance, cut, await verifiedFixture(cut));
+  const { requests } = mockFetch(
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/17", () =>
+      json({
+        id: 17,
+        inbox_id: 2,
+        status: "resolved",
+        custom_attributes: { discord_thread: `https://discord.com/channels/${GUILD}/${fixture.thread}` },
+        meta: { sender: { name: "Renamed Customer" } },
+        messages: [],
+      }),
+    ),
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/17/messages", (request) =>
+      json({
+        payload: request.url.searchParams.has("before")
+          ? [{ id: 21, message_type: 1, content: "", content_attributes: { deleted: true } }]
+          : [],
+      }),
+    ),
+    on("GET", `discord.com/api/v10/channels/${fixture.thread}`, () =>
+      json({ id: fixture.thread, guild_id: GUILD, parent_id: FORUM }),
+    ),
+    on("GET", `discord.com/api/v10/channels/${fixture.thread}/messages`, () => json([])),
+    on("PATCH", `discord.com/api/v10/channels/${fixture.thread}`, () => json({})),
+    on("POST", "discord.com/api/v10/webhooks/1/tok", () => json({ id: discordId(9017), channel_id: fixture.thread })),
+    on("PATCH", `discord.com/api/v10/webhooks/1/tok/messages/${discordId(9017)}`, () => json({})),
+  );
+  await runInDurableObject(env.FORUM_REGISTRY.getByName(`forum:v1:${FORUM}`), (_instance, state) => {
+    state.storage.sql.exec(
+      "INSERT OR REPLACE INTO cache VALUES ('ready',?,NULL)",
+      JSON.stringify({ id: "1", token: "tok", guildId: GUILD, version: 1 }),
+    );
+  });
+  await runInDurableObject(env.CONVERSATION.getByName("conversation:v1:3:17"), async (_instance, state) => {
+    vi.spyOn(state.storage, "setAlarm").mockResolvedValue();
+    const store = new Store(state.storage.sql);
+    expect(store.postedResponse(3, 17, 21)).toBe("b".repeat(64));
+    expect(store.derivedMessages(3, 17, 21)).toEqual([]);
+    expect(JSON.parse(store.get("adoption:baseline:3:17:21") ?? "null")).toMatchObject({
+      state: "deleted-source",
+      evidenceRef: "fixture:authoritative-deletion-21",
+    });
+    const active = targetEnv(cut, "active");
+    let executor = new Conversation(state, active);
+    await executor.enqueueConversation(3, 17);
+    const run = async () => {
+      for (let attempt = 0; attempt < 12; attempt++) {
+        testClock += 6000;
+        executor = new Conversation(state, active);
+        await executor.alarm();
+        if (store.nextWakeup() === undefined) return;
+      }
+      throw new Error("Fixture work did not complete");
+    };
+    await run();
+    expect(store.conversation(3, 17)?.title).toContain("Renamed Customer");
+    expect(store.conversation(3, 17)?.title).toContain("Fictional subject");
+    expect(store.conversation(3, 17)?.titleMessageId).toBeUndefined();
+    expect(store.get("adoption:title-association")).toBe("never-recorded-or-unresolved");
+    await executor.enqueueMessageUpdate(3, 17, 21);
+    await run();
+    expect(store.conversation(3, 17)?.titleSubject).toBe("Fictional subject");
+    expect(store.postedResponse(3, 17, 21)).toBe("b".repeat(64));
+    expect(requests.filter((request) => request.method === "DELETE")).toHaveLength(0);
+  });
 });

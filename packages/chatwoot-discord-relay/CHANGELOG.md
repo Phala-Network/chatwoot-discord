@@ -13,8 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exports, count/digest seals, crash-safe idempotent import and Directory generation gates preserve pre-watermark
   original/derived deletion, response baselines and recorded titles. Historical deletions use bot permissions to
   survive webhook rotation. Missing or ambiguous authoritative records block the cut.
-- Provide a source-only 0.27 Hub bridge template that preserves the old executor while adding private read RPCs;
-  source deployment, source drain, retirement and target activation remain separate reviewed operations.
+- Retain legitimate legacy baseline-only deletions using sealed authoritative evidence dispositions; leave
+  pre-migration/unexplained outcomes unresolved. Preserve upgraded titles with historically nullable associations.
+- Extract only from a settled frozen Hub shell using bounded indexed scans and a private incremental audit;
+  source drain/retirement evidence remains mandatory. Require durable whole-cut verification batches before staging.
 
 ## [0.31.0] - 2026-10-03
 

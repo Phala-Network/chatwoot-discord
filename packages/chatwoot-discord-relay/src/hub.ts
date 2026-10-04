@@ -1,30 +1,31 @@
-// Retained only during the evidence/rollback window. It cannot start business work.
+// Retained read-only source shell. It never migrates SQLite or starts business work.
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env.ts";
-import type { ReceiptPosition } from "./history.ts";
 import {
-  legacyAuditPage,
+  type FrozenSource,
+  type LegacyPosition,
   legacyEscalationBaseline,
-  legacyInventory,
-  legacyKeyPage,
-  legacyReceiptPage,
+  legacyScanPage,
+  validateFrozenSource,
 } from "./legacy.ts";
 
 export class Hub extends DurableObject<Env> {
-  inventory(after = 0) {
-    return { ...legacyInventory(this.ctx.storage.sql, after), sourceIdentity: this.ctx.id.toString() };
+  private boundary(source: FrozenSource) {
+    const deployed = this.env.LEGACY_EXPORT_BOUNDARY;
+    if (!deployed) throw new Error("Frozen export boundary is not deployed");
+    const expected = validateFrozenSource(deployed);
+    if (
+      expected.sourceIdentity !== this.ctx.id.toString() ||
+      JSON.stringify(expected) !== JSON.stringify(validateFrozenSource(source))
+    )
+      throw new Error("Frozen source boundary mismatch");
+    return expected;
   }
-  receiptPage(accountId: number, conversationId: number, position?: ReceiptPosition) {
-    return legacyReceiptPage(this.ctx.storage.sql, this.ctx.id.toString(), accountId, conversationId, position);
+  async scanPage(source: FrozenSource, after?: LegacyPosition) {
+    return legacyScanPage(this.ctx.storage.sql, this.boundary(source), after);
   }
-  auditPage(after?: { kind: number; rowid: number }) {
-    return legacyAuditPage(this.ctx.storage.sql, after);
-  }
-  keyPage(after = "") {
-    return legacyKeyPage(this.ctx.storage.sql, after);
-  }
-  escalationBaseline() {
-    return legacyEscalationBaseline(this.ctx.storage.sql);
+  async escalationBaseline(source: FrozenSource) {
+    return legacyEscalationBaseline(this.ctx.storage.sql, this.boundary(source));
   }
   override async alarm(): Promise<void> {
     await this.ctx.storage.deleteAlarm();

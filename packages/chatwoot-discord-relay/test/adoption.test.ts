@@ -28,9 +28,11 @@ import {
   receiptPageBody,
   receiptSeal,
 } from "../src/history.ts";
-import { legacyInventory } from "../src/legacy.ts";
-import { inventory } from "../src/operator.ts";
+import type { FrozenSource } from "../src/legacy.ts";
+import { scanPage } from "../src/operator.ts";
 import { Store } from "../src/store.ts";
+import { assertVerifiedCut, verifyLinkBatch } from "../src/verification.ts";
+import { verifiedFixture, withArchive } from "./fixtures/archive.ts";
 import legacySchema from "./fixtures/legacy-027.ts";
 import { FORUM, json, mockFetch, on, testSettings } from "./helpers.ts";
 
@@ -48,6 +50,7 @@ function sampleHistory(accountId = 3, conversationId = 12, threadId = THREAD): R
       titleSubject: null,
       title: null,
       titleMessageId: null,
+      titleAssociation: "absent",
       counts: { posted: 0, derived: 0, responses: 0 },
     },
     pages: 1,
@@ -132,7 +135,7 @@ const cut = (): AdoptionCut => ({
   escalationBaseline: "{}",
   sourceCounts: { conversations: 1, threads: 1, posted: 0, derived: 0, responses: 0 },
   auditedUnthreaded: 0,
-  receiptAudit: { orphaned: 0, conflicting: 0, invalid: 0, unsupported: 0 },
+  receiptAudit: { orphaned: 0, conflicting: 0, invalid: 0, unsupported: 0, unresolved: 0 },
   mappings: [
     {
       accountId: 3,
@@ -186,7 +189,7 @@ it("never recreates an accepted thread when its local receipt and mapping transa
 });
 
 it("inventories the actual 0.27 schema, silent posts, orphan partial work and numeric interaction fence", async () => {
-  await runInDurableObject(env.LEGACY_HUB.getByName(`inventory:${crypto.randomUUID()}`), (_instance, state) => {
+  await runInDurableObject(env.LEGACY_HUB.getByName(`inventory:${crypto.randomUUID()}`), async (_instance, state) => {
     state.storage.sql.exec(legacySchema);
     for (let id = 1; id <= 101; id++)
       state.storage.sql.exec(
@@ -196,14 +199,16 @@ it("inventories the actual 0.27 schema, silent posts, orphan partial work and nu
       );
     state.storage.sql.exec("INSERT INTO interactions VALUES ('99',0), ('100',0)");
     state.storage.sql.exec("INSERT INTO posted_messages VALUES (3,999,101,0,'100000000000000101')");
-    const page = legacyInventory(state.storage.sql);
-    expect(page.mappings).toHaveLength(100);
-    expect(page.complete).toBe(false);
-    expect(page.interactionFence).toBe("100");
-    expect(page.partial).toBe(1);
-    const end = legacyInventory(state.storage.sql, page.next);
-    expect(end.mappings.map((mapping) => mapping.conversationId)).toEqual([101]);
-    expect(end.complete).toBe(true);
+    await withArchive(state, (archive) => {
+      const page = archive.inventory();
+      expect(page.mappings).toHaveLength(100);
+      expect(page.complete).toBe(false);
+      expect(page.interactionFence).toBe("100");
+      expect(page.partial).toBe(1);
+      const end = archive.inventory(page.next);
+      expect(end.mappings.map((mapping) => mapping.conversationId)).toEqual([101]);
+      expect(end.complete).toBe(true);
+    });
   });
 });
 
@@ -257,7 +262,11 @@ it("prebuilds a silent thread directory and resumes the same cut after a lost st
   expect(owner?.conversationId).toBe(123456);
   expect(owner?.generation).toBe(1);
   await expect(
-    stageAdoption({ ...env, CONFIG: { ...settings, cutover: { ...settings.cutover, phase: "active" } } }, manifest),
+    stageAdoption(
+      { ...env, CONFIG: { ...settings, cutover: { ...settings.cutover, phase: "active" } } },
+      manifest,
+      await verifiedFixture(manifest),
+    ),
   ).rejects.toThrow();
 });
 
@@ -304,7 +313,9 @@ it.each(["missing-webhooks", "empty-webhooks", "wrong-forum", "unknown-account"]
           defect === "missing-webhooks" ? {} : { [FORUM]: defect === "empty-webhooks" ? [] : ["100000000000000001"] },
       },
     };
-    await expect(stageAdoption({ ...env, CONFIG: settings }, manifest)).rejects.toThrow();
+    await expect(
+      stageAdoption({ ...env, CONFIG: settings }, manifest, { get: () => undefined, set: () => {} }),
+    ).rejects.toThrow();
     expect(await env.THREAD_DIRECTORY.getByName("thread:v1:100000000000098701").get()).toBeNull();
   },
 );
@@ -547,19 +558,27 @@ it("seals the original digest baseline atomically and rejects changed same-epoch
   });
 });
 
-it("reads the retained Hub inventory through the private operator binding", async () => {
-  await runInDurableObject(env.LEGACY_HUB.getByName("global"), (_instance, state) => {
+it("requires the deployed frozen boundary on private source RPCs", async () => {
+  const stub = env.LEGACY_HUB.getByName("global");
+  let boundary: FrozenSource | undefined;
+  await runInDurableObject(stub, (_instance, state) => {
     state.storage.sql.exec(legacySchema);
-    state.storage.sql.exec(
-      "INSERT INTO conversations (account_id,conversation_id,thread_id,cursor) VALUES (3,123,?,101)",
-      THREAD,
-    );
+    boundary = { sourceIdentity: state.id.toString(), epoch: "cut", drainEvidence: "settled", frozen: true };
   });
-  const page = await inventory(env);
-  expect(page.schemaVersion).toBe(9);
-  expect(page.mappings).toMatchObject([{ accountId: 3, conversationId: 123, threadId: THREAD, cursor: 101 }]);
-  expect(page.complete).toBe(true);
-  expect(page.jobs).toBe(0);
+  if (!boundary) throw new Error("Missing fixture boundary");
+  await expect(scanPage(env, boundary)).rejects.toThrow(/not deployed/);
+  await runInDurableObject(stub, async (_instance, state) => {
+    const { Hub } = await import("../src/hub.ts");
+    const deployed = {
+      sourceIdentity: state.id.toString(),
+      epoch: "cut",
+      drainEvidence: "settled",
+      frozen: true as const,
+    };
+    const shell = new Hub(state, { ...env, LEGACY_EXPORT_BOUNDARY: deployed });
+    expect((await shell.scanPage(deployed)).schemaVersion).toBe(9);
+    await expect(shell.scanPage({ ...deployed, epoch: "other" })).rejects.toThrow(/mismatch/);
+  });
 });
 
 it("refuses link repair for an excluded archive inbox without creating a link or thread", async () => {
@@ -574,4 +593,80 @@ it("refuses link repair for an excluded archive inbox without creating a link or
   const settings = testSettings({ accounts: [{ id: 3, name: "Acme", forumChannelId: FORUM, inboxIds: [2] }] });
   await expect(verifyLinks(cut(), client, rest, "discord_thread", settings)).rejects.toThrow(/inbox scope/);
   expect(requests.every((request) => request.method === "GET")).toBe(true);
+});
+
+it("verifies all 53 mappings in durable bounded batches and rejects missing coverage, changed cuts and failed reads", async () => {
+  const manifest = cut();
+  manifest.mappings = Array.from({ length: 53 }, (_, index) => {
+    const conversationId = index + 1;
+    const threadId = String(100000000000060000n + BigInt(index));
+    return {
+      accountId: 3,
+      conversationId,
+      guildId: GUILD,
+      forumId: FORUM,
+      threadId,
+      generation: 1,
+      cursor: 101,
+      latestEligibleId: 101,
+      history: sampleHistory(3, conversationId, threadId),
+    };
+  });
+  manifest.sourceCounts = { conversations: 53, threads: 53, posted: 0, derived: 0, responses: 0 };
+  const seen: number[] = [];
+  const { requests } = mockFetch(
+    on("GET", /^chatwoot\.example\.com\/api\/v1\/accounts\/3\/conversations\/\d+$/, (request) => {
+      const id = Number(request.url.pathname.split("/").at(-1));
+      seen.push(id);
+      const mapping = manifest.mappings[id - 1];
+      if (!mapping) throw new Error("Missing expected mapping");
+      return json({
+        id,
+        inbox_id: 2,
+        custom_attributes: { discord_thread: `https://discord.com/channels/${GUILD}/${mapping.threadId}` },
+      });
+    }),
+    on("GET", /^discord\.com\/api\/v10\/channels\/\d+$/, () => json({ guild_id: GUILD, parent_id: FORUM })),
+  );
+  const stub = env.LEGACY_HUB.getByName(`verification:${crypto.randomUUID()}`);
+  const verify = (part: AdoptionCut) =>
+    verifyLinks(
+      part,
+      chatwootClient("https://chatwoot.example.com", "test", (request) => fetch(request)),
+      new DiscordRest("test", (request) => fetch(request)),
+      "discord_thread",
+      testSettings(),
+    );
+  for (let batch = 0; batch < 26; batch++) {
+    await runInDurableObject(stub, async (_instance, state) => {
+      // Reconstruct the operator store after every batch, as after a restart.
+      const store = new Store(state.storage.sql);
+      store.migrate();
+      await verifyLinkBatch(manifest, batch, store, async (part) => {
+        expect(part.mappings.length).toBeLessThanOrEqual(2);
+        await verify(part);
+      });
+    });
+  }
+  await runInDurableObject(stub, async (_instance, state) => {
+    const store = new Store(state.storage.sql);
+    await expect(assertVerifiedCut(manifest, store)).rejects.toThrow(/Complete post-drain/);
+    await expect(stageAdoption(env, manifest, store)).rejects.toThrow(/Complete post-drain/);
+    await expect(
+      verifyLinkBatch(manifest, 26, store, async () => {
+        throw new Error("read denied");
+      }),
+    ).rejects.toThrow(/denied/);
+    await expect(assertVerifiedCut(manifest, store)).rejects.toThrow();
+    await verifyLinkBatch(manifest, 26, store, verify);
+    expect(await assertVerifiedCut(manifest, new Store(state.storage.sql))).toMatchObject({
+      mappings: 53,
+      batches: 27,
+    });
+    await expect(assertVerifiedCut({ ...manifest, epoch: "changed" }, store)).rejects.toThrow();
+    await expect(assertVerifiedCut({ ...manifest, drainEvidence: "changed" }, store)).rejects.toThrow();
+    await expect(verifyLinkBatch(manifest, 27, store, verify)).rejects.toThrow(/Invalid/);
+  });
+  expect(seen).toEqual(Array.from({ length: 53 }, (_, index) => index + 1));
+  expect(requests.filter((request) => request.method !== "GET")).toEqual([]);
 });

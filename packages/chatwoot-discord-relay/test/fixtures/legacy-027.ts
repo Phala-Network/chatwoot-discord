@@ -1,5 +1,5 @@
 // SQLite schema from relay 0.27.0 (b8aaf0b), retained for cutover compatibility tests.
-export default `-- Schema from chatwoot-discord-relay 0.27.0 (b8aaf0b). No customer data.
+const schema = `-- Schema from chatwoot-discord-relay 0.27.0 (b8aaf0b). No customer data.
 CREATE TABLE schema_version (version INTEGER NOT NULL);
 INSERT INTO schema_version VALUES (9);
 CREATE TABLE conversations (
@@ -66,3 +66,9 @@ ALTER TABLE conversations ADD COLUMN card_id TEXT;
    ALTER TABLE conversations ADD COLUMN answer_source_id TEXT;
    ALTER TABLE conversations ADD COLUMN customer_message_id TEXT;
 `;
+
+export default schema;
+// Migration 8 introduced associations without backfilling existing state.
+const boundary = schema.indexOf("CREATE TABLE derived_messages");
+export const beforeAssociations = schema.slice(0, boundary).replace("VALUES (9)", "VALUES (7)");
+export const associationUpgrade = `${schema.slice(boundary)}\nUPDATE schema_version SET version=9;`;

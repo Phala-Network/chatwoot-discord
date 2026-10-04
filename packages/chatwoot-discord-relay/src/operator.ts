@@ -26,19 +26,17 @@ export interface OperatorEnv extends Env {
   LEGACY_HUB: DurableObjectNamespace<Hub>;
 }
 
-// Cold source reads and count audits have a private ten-second deadline. Online control
-// calls retain their shorter deadline; no source read participates in online execution.
+// This deadline bounds caller waiting only. It DOES NOT cancel a source RPC/SQLite read.
+// The source must already be frozen; retries use the identical durable checkpoint.
 function sourceRead<T>(call: () => Promise<T>): Promise<T> {
   return within(call(), AbortSignal.timeout(10_000));
 }
-
-export function inventory(env: OperatorEnv, after = 0) {
-  return sourceRead(() => env.LEGACY_HUB.getByName("global").inventory(after));
+export function scanPage(env: OperatorEnv, source: FrozenSource, after?: LegacyPosition) {
+  return sourceRead(() => env.LEGACY_HUB.getByName("global").scanPage(source, after));
 }
 
-/** Verify a finite mapping page; retain the complete manifest separately for staging. */
-export async function verifyAdoptionLinks(env: Env, cut: AdoptionCut, store: RateLimitStore): Promise<void> {
-  if (cut.mappings.length > 2) throw new Error("Verify at most two mappings per call");
+/** Pass the complete immutable cut plus a zero-based batch index, never a subset cut. */
+export async function verifyAdoptionLinks(env: Env, cut: AdoptionCut, store: RateLimitStore, batch: number) {
   const settings = await loadSettings(env);
   const budget = new Budget(settings.config.relay.subrequestBudget);
   budget.startSlice();
@@ -53,9 +51,12 @@ export async function verifyAdoptionLinks(env: Env, cut: AdoptionCut, store: Rat
     budget.fetch,
     store,
   );
-  await verifyLinks(cut, chatwoot, rest, settings.config.relay.linkAttribute, settings);
+  return verifyLinkBatch(cut, batch, store, (part) =>
+    verifyLinks(part, chatwoot, rest, settings.config.relay.linkAttribute, settings),
+  );
 }
 
+export { LegacyArchive } from "./archive.ts";
 export {
   nextReceiptPosition,
   type ReceiptPage,
@@ -65,24 +66,17 @@ export {
   validateReceiptPage,
 } from "./history.ts";
 export {
-  legacyAuditPage,
+  type FrozenSource,
+  type LegacyPosition,
+  type LegacyScanPage,
   legacyEscalationBaseline,
-  legacyInventory,
-  legacyKeyPage,
-  legacyReceiptPage,
+  legacyScanPage,
+  validateFrozenSource,
 } from "./legacy.ts";
+export { assertVerifiedCut, cutDigest, verifyLinkBatch } from "./verification.ts";
 
-import type { ReceiptPosition } from "./history.ts";
-export function receiptPage(env: OperatorEnv, accountId: number, conversationId: number, position?: ReceiptPosition) {
-  return sourceRead(() => env.LEGACY_HUB.getByName("global").receiptPage(accountId, conversationId, position));
-}
-export function auditPage(env: OperatorEnv, after?: { kind: number; rowid: number }) {
-  return sourceRead(() => env.LEGACY_HUB.getByName("global").auditPage(after));
-}
-export function keyPage(env: OperatorEnv, after = "") {
-  return sourceRead(() => env.LEGACY_HUB.getByName("global").keyPage(after));
-}
-
-export function escalationBaseline(env: OperatorEnv) {
-  return sourceRead(() => env.LEGACY_HUB.getByName("global").escalationBaseline());
+import type { FrozenSource, LegacyPosition } from "./legacy.ts";
+import { verifyLinkBatch } from "./verification.ts";
+export function escalationBaseline(env: OperatorEnv, source: FrozenSource) {
+  return sourceRead(() => env.LEGACY_HUB.getByName("global").escalationBaseline(source));
 }

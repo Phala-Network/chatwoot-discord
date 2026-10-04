@@ -5,7 +5,23 @@ import type { Store } from "./store.ts";
 const id = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const snowflake = z.string().regex(/^\d{17,20}$/);
+const privateTitle = z
+  .string()
+  .max(4096)
+  .refine((value) => new TextEncoder().encode(value).byteLength <= 4096);
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
+export const baselineLinkageSchema = z.discriminatedUnion("state", [
+  z.strictObject({ state: z.literal("recorded") }),
+  z.strictObject({
+    state: z.literal("deleted-source"),
+    evidenceRef: z
+      .string()
+      .min(1)
+      .max(256)
+      .regex(/^[A-Za-z0-9:._/-]+$/),
+  }),
+  z.strictObject({ state: z.literal("unresolved") }),
+]);
 export const receiptCountsSchema = z.strictObject({ posted: count, derived: count, responses: count });
 export const receiptHeaderSchema = z.strictObject({
   sourceIdentity: z.string().min(1).max(256),
@@ -14,26 +30,38 @@ export const receiptHeaderSchema = z.strictObject({
   conversationId: id,
   threadId: snowflake,
   cursor: count,
-  titleSubject: z.string().max(4096).nullable(),
-  title: z.string().max(4096).nullable(),
+  titleSubject: privateTitle.nullable(),
+  title: privateTitle.nullable(),
   titleMessageId: id.nullable(),
+  titleAssociation: z.enum(["absent", "recorded", "never-recorded-or-unresolved"]),
   counts: receiptCountsSchema,
 });
 export function validateTitleMetadata(header: ReceiptHeader): void {
   if (
     (header.titleSubject === null) !== (header.title === null) ||
-    (header.titleSubject && header.titleMessageId === null) ||
     (header.titleMessageId !== null && header.titleSubject === null) ||
-    (header.titleMessageId !== null && header.titleMessageId > header.cursor)
+    (header.titleMessageId !== null && header.titleMessageId > header.cursor) ||
+    header.titleAssociation !== titleAssociation(header)
   )
     throw new Error("Missing or inconsistent authoritative title association");
 }
+export function titleAssociation(header: {
+  titleSubject: string | null;
+  title: string | null;
+  titleMessageId: number | null;
+}): ReceiptHeader["titleAssociation"] {
+  return header.titleMessageId !== null
+    ? "recorded"
+    : header.titleSubject !== null || header.title !== null
+      ? "never-recorded-or-unresolved"
+      : "absent";
+}
 export const receiptSealSchema = z.strictObject({ header: receiptHeaderSchema, pages: id, digest });
 const positionSchema = z.strictObject({ kind: z.number().int().min(0).max(2), rowid: count });
-const recordSchema = z.discriminatedUnion("kind", [
+export const recordSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal(0), rowid: id, messageId: id, part: count, discordId: snowflake }),
   z.strictObject({ kind: z.literal(1), rowid: id, messageId: id, discordId: snowflake }),
-  z.strictObject({ kind: z.literal(2), rowid: id, messageId: id, digest }),
+  z.strictObject({ kind: z.literal(2), rowid: id, messageId: id, digest, linkage: baselineLinkageSchema }),
 ]);
 export const receiptPageSchema = z.strictObject({
   header: receiptHeaderSchema,
@@ -64,6 +92,7 @@ export function canonicalHeader(header: ReceiptHeader): ReceiptHeader {
     titleSubject: header.titleSubject,
     title: header.title,
     titleMessageId: header.titleMessageId,
+    titleAssociation: header.titleAssociation,
     counts: { posted: header.counts.posted, derived: header.counts.derived, responses: header.counts.responses },
   };
 }
@@ -85,7 +114,14 @@ export function receiptPageBody(page: Omit<ReceiptPage, "digest">) {
       const base = { kind: record.kind, rowid: record.rowid, messageId: record.messageId };
       if (record.kind === 0) return { ...base, part: record.part, discordId: record.discordId };
       if (record.kind === 1) return { ...base, discordId: record.discordId };
-      return { ...base, digest: record.digest };
+      return {
+        ...base,
+        digest: record.digest,
+        linkage:
+          record.linkage.state === "deleted-source"
+            ? { state: record.linkage.state, evidenceRef: record.linkage.evidenceRef }
+            : { state: record.linkage.state },
+      };
     }),
     complete: page.complete,
   };
@@ -205,8 +241,12 @@ export class ReceiptImport {
       )
         throw new Error("Legacy history has not been completely imported");
       if (this.store.hasUnpairedLegacyResponses(seal.header.accountId, seal.header.conversationId))
-        throw new Error("Legacy derived receipts and response baselines are not paired");
-      if (seal.header.titleSubject && !this.store.hasLegacyTitleReceipt(seal.header))
+        throw new Error("Legacy response linkage is unresolved or inconsistent");
+      if (
+        seal.header.titleSubject &&
+        seal.header.titleMessageId !== null &&
+        !this.store.hasLegacyTitleReceipt(seal.header)
+      )
         throw new Error("Missing authoritative title receipt");
       this.store.set("adoption:history-sealed", seal.digest);
     });

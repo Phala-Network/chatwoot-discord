@@ -8,6 +8,7 @@ import type { ForumRegistry } from "./registry.ts";
 import type { AccountSweep } from "./sweep.ts";
 
 export interface Env {
+  LEGACY_EXPORT_BOUNDARY?: import("./legacy.ts").FrozenSource;
   CONVERSATION: DurableObjectNamespace<Conversation>;
   THREAD_DIRECTORY: DurableObjectNamespace<ThreadDirectory>;
   TRIAGE_BUDGET: DurableObjectNamespace<TriageBudget>;

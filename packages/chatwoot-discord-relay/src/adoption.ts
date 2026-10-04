@@ -3,6 +3,7 @@ import { MessageFlags, type RESTGetAPIChannelMessagesResult, Routes } from "disc
 import { z } from "zod";
 import type { Budget } from "../../../shared/budget.ts";
 import type { ChatwootClient } from "../../../shared/chatwoot/api.ts";
+import type { RateLimitStore } from "../../../shared/rate-limit.ts";
 import { relaysInbox, type Settings } from "./config.ts";
 import type { ThreadOwner } from "./control.ts";
 import type { DiscordRest } from "./discord/rest.ts";
@@ -19,6 +20,7 @@ import { escalationsSchema } from "./queue.ts";
 import { control, conversation } from "./rpc.ts";
 import { loadSettings } from "./settings.ts";
 import type { Store } from "./store.ts";
+import { assertVerifiedCut } from "./verification.ts";
 
 export interface AdoptionMapping extends ThreadOwner {
   threadId: string;
@@ -48,10 +50,10 @@ export interface AdoptionCut {
   escalationBaseline: string;
   sourceCounts: { conversations: number; threads: number; posted: number; derived: number; responses: number };
   auditedUnthreaded: number;
-  receiptAudit: { orphaned: number; conflicting: number; invalid: number; unsupported: number };
+  receiptAudit: { orphaned: number; conflicting: number; invalid: number; unsupported: number; unresolved: number };
 }
 
-const positive = z.number().int().positive();
+const positive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const snowflake = z.string().regex(/^\d{17,20}$/);
 export const cutSchema = z.strictObject({
   epoch: z.string().min(1),
@@ -82,6 +84,7 @@ export const cutSchema = z.strictObject({
     conflicting: z.literal(0),
     invalid: z.literal(0),
     unsupported: z.literal(0),
+    unresolved: z.literal(0),
   }),
   mappings: z.array(
     z.strictObject({
@@ -227,7 +230,8 @@ export async function sealAdoptionHistory(env: Env, accountId: number, conversat
 }
 
 /** All histories must be sealed before any mapping becomes ready for cleanup/activation. */
-export async function stageAdoption(env: Env, cut: AdoptionCut): Promise<void> {
+export async function stageAdoption(env: Env, cut: AdoptionCut, verificationStore: RateLimitStore): Promise<void> {
+  await assertVerifiedCut(cut, verificationStore);
   await prepareAdoption(env, cut);
   for (const mapping of cut.mappings)
     if (
