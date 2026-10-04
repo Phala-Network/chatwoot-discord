@@ -55,6 +55,11 @@ it("reports the same safe-integer, thread and UTF-8 failures that export rejects
     sql.exec(
       "INSERT INTO posted_messages VALUES (9007199254740992,12,20,0,'100000000000000020'),(3,9007199254740992,21,0,'100000000000000021'),(3,12,22,9007199254740992,'100000000000000022')",
     );
+    // SQLite can store non-finite REAL in an INTEGER-affinity nullable column. It must
+    // not turn into JSON null and falsely acquire unrecorded title provenance.
+    sql.exec(
+      "INSERT INTO conversations (account_id,conversation_id,thread_id,cursor,title_subject,title,title_message_id) VALUES (3,14,'100000000000000014',150,'Subject','Title',9e999)",
+    );
     sql.exec("INSERT INTO submitted_responses VALUES (3,12,23,'invalid')");
     sql.exec(
       "UPDATE conversations SET title_subject=?,title=? WHERE conversation_id=12",
@@ -62,9 +67,9 @@ it("reports the same safe-integer, thread and UTF-8 failures that export rejects
       "界".repeat(2000),
     );
     await withArchive(state, async (archive) => {
-      expect(archive.inventory().receiptAudit.invalid).toBe(6);
+      expect(archive.inventory().receiptAudit.invalid).toBe(7);
       const rows = archive.auditPage().rows;
-      expect(rows).toHaveLength(6);
+      expect(rows).toHaveLength(7);
       expect(rows).toContainEqual(
         expect.objectContaining({ kind: 1, accountId: 3, conversationId: 12, messageId: 22, issues: ["invalid"] }),
       );

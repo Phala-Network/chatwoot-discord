@@ -90,15 +90,15 @@ const text = (column: string, bytes: number) =>
   `CASE WHEN typeof(${column})='text' AND length(CAST(${column} AS BLOB))<=${bytes} THEN ${column} END AS ${column}`;
 const invalidText = (column: string, bytes: number) =>
   `(${column} IS NOT NULL AND (typeof(${column})!='text' OR length(CAST(${column} AS BLOB))>${bytes}))`;
-const numeric = (column: string) => `CASE WHEN typeof(${column}) IN ('integer','real') THEN ${column} END AS ${column}`;
+const numeric = (column: string) => `CASE WHEN typeof(${column})='integer' THEN ${column} END AS ${column}`;
 const owner = `${numeric("account_id")},${numeric("conversation_id")}`;
 const selections = [
-  `${owner},${numeric("cursor")},${numeric("title_message_id")},${text("thread_id", 20)},${text("title_subject", 4096)},${text("title", 4096)},(${invalidText("thread_id", 20)} OR ${invalidText("title_subject", 4096)} OR ${invalidText("title", 4096)}) AS invalid_text,(cursor IS NOT NULL AND typeof(cursor) NOT IN ('integer','real')) OR (title_message_id IS NOT NULL AND typeof(title_message_id) NOT IN ('integer','real')) AS invalid_numeric,CASE WHEN substr(card_id,1,1)='?' THEN 1 ELSE 0 END AS unknown_card`,
+  `${owner},${numeric("cursor")},${numeric("title_message_id")},${text("thread_id", 20)},${text("title_subject", 4096)},${text("title", 4096)},(${invalidText("thread_id", 20)} OR ${invalidText("title_subject", 4096)} OR ${invalidText("title", 4096)}) AS invalid_text,(cursor IS NOT NULL AND typeof(cursor)!='integer') OR (title_message_id IS NOT NULL AND typeof(title_message_id)!='integer') AS invalid_numeric,CASE WHEN substr(card_id,1,1)='?' THEN 1 ELSE 0 END AS unknown_card`,
   `${owner},${numeric("message_id")},${numeric("part")},${text("discord_message_id", 20)},${invalidText("discord_message_id", 20)} AS invalid_text`,
   `${owner},${numeric("message_id")},${text("discord_message_id", 20)},${invalidText("discord_message_id", 20)} AS invalid_text`,
   `${owner},${numeric("message_id")},${text("digest", 64)},${invalidText("digest", 64)} AS invalid_text`,
   `${text("key", 4096)},${invalidText("key", 4096)} AS invalid_text,CASE WHEN length(CAST(value AS BLOB))>16384 AND (key GLOB 'send:*' OR key GLOB 'effect:*') THEN 1 ELSE 0 END AS oversized_guard,
-   CASE WHEN length(CAST(value AS BLOB))<=16384 AND ((key GLOB 'send:*' AND value='unknown') OR (key GLOB 'effect:*' AND (value LIKE '%"UNKNOWN"%' OR value LIKE '%"DISPATCHING"%'))) THEN 1 ELSE 0 END AS unknown_guard`,
+   CASE WHEN length(CAST(value AS BLOB))>16384 THEN 0 ELSE CASE WHEN ((key GLOB 'send:*' AND value='unknown') OR (key GLOB 'effect:*' AND (value LIKE '%"UNKNOWN"%' OR value LIKE '%"DISPATCHING"%'))) THEN 1 ELSE 0 END END AS unknown_guard`,
   "1 AS job",
   `${text("id", 20)},${invalidText("id", 20)} AS invalid_text`,
 ];
