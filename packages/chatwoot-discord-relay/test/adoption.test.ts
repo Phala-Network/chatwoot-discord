@@ -4,21 +4,116 @@ import { ComponentType, MessageFlags } from "discord-api-types/v10";
 import { afterEach, expect, it, vi } from "vitest";
 import { Budget } from "../../../shared/budget.ts";
 import { chatwootClient } from "../../../shared/chatwoot/api.ts";
-import { type AdoptionCut, cleanLegacyCards, stageAdoption, validateCut, verifyLinks } from "../src/adoption.ts";
+import {
+  type AdoptionCut,
+  cleanLegacyCards,
+  prepareAdoption,
+  stageAdoption,
+  validateCut,
+  verifyLinks,
+} from "../src/adoption.ts";
 import { ticketCard } from "../src/commands/components.ts";
 import { configSchema } from "../src/config.ts";
+import type { ThreadOwner } from "../src/control.ts";
 import { Conversation } from "../src/conversation.ts";
 import { QueueDigest } from "../src/digest.ts";
 import { DiscordForum } from "../src/discord/forum.ts";
 import { DiscordRest } from "../src/discord/rest.ts";
-import { legacyInventory } from "../src/legacy.ts";
-import { inventory } from "../src/operator.ts";
+import type { Env } from "../src/env.ts";
+import {
+  canonicalHeader,
+  type ReceiptPage,
+  type ReceiptSeal,
+  receiptHash,
+  receiptPageBody,
+  receiptSeal,
+} from "../src/history.ts";
+import type { FrozenSource } from "../src/legacy.ts";
+import { scanPage } from "../src/operator.ts";
 import { Store } from "../src/store.ts";
+import { assertVerifiedCut, verifyLinkBatch } from "../src/verification.ts";
+import { verifiedFixture, withArchive } from "./fixtures/archive.ts";
 import legacySchema from "./fixtures/legacy-027.ts";
-import { FORUM, json, mockFetch, on } from "./helpers.ts";
+import { FORUM, json, mockFetch, on, testSettings } from "./helpers.ts";
 
 const GUILD = "100000000000000044";
 const THREAD = "100000000000040001";
+function sampleHistory(accountId = 3, conversationId = 12, threadId = THREAD): ReceiptSeal {
+  return {
+    header: {
+      sourceIdentity: "legacy-test-namespace",
+      schemaVersion: 9,
+      accountId,
+      conversationId,
+      threadId,
+      cursor: 101,
+      titleSubject: null,
+      title: null,
+      titleMessageId: null,
+      titleAssociation: "absent",
+      counts: { posted: 0, derived: 0, responses: 0 },
+    },
+    pages: 1,
+    digest: "0".repeat(64),
+  };
+}
+async function fixturePage(
+  owner: ThreadOwner,
+  threadId: string,
+  records: ReceiptPage["records"] = [],
+): Promise<ReceiptPage> {
+  const header = canonicalHeader({
+    ...sampleHistory(owner.accountId, owner.conversationId, threadId).header,
+    counts: {
+      posted: records.filter((r) => r.kind === 0).length,
+      derived: records.filter((r) => r.kind === 1).length,
+      responses: records.filter((r) => r.kind === 2).length,
+    },
+  });
+  const last = records.at(-1);
+  const body = {
+    header,
+    index: 0,
+    after: { kind: 0, rowid: 0 },
+    next: last ? { kind: last.kind, rowid: last.rowid } : { kind: 0, rowid: 0 },
+    previous: await receiptHash(header),
+    records,
+    complete: true,
+  };
+  return { ...body, digest: await receiptHash(receiptPageBody(body)) };
+}
+async function stageFixture(
+  state: DurableObjectState,
+  targetEnv: Env,
+  owner: ThreadOwner,
+  threadId: string,
+  epoch: string,
+  watermark: number,
+) {
+  const config = configSchema.parse(targetEnv.CONFIG);
+  const maintenanceEnv = {
+    ...targetEnv,
+    CONFIG: {
+      ...config,
+      relay: { ...config.relay, startAfterMessageId: watermark },
+      cutover: {
+        phase: "maintenance" as const,
+        epoch,
+        interactionFence: "100",
+        notificationsAfter: Date.now() + 3600000,
+        legacyWebhooks: { [FORUM]: ["100000000000000001"] },
+      },
+    },
+  };
+  expect(await env.THREAD_DIRECTORY.getByName(`thread:v1:${threadId}`).claim(owner)).toBe(true);
+  const executor = new Conversation(state, maintenanceEnv);
+  const page = await fixturePage(owner, threadId);
+  executor.stage(owner, threadId, epoch, watermark, receiptSeal(page));
+  await executor.importHistory(page);
+  await executor.sealHistory();
+  await executor.readyHistory();
+  return new Conversation(state, targetEnv);
+}
 const cut = (): AdoptionCut => ({
   epoch: "test-cut",
   sourceIdentity: "legacy-test-namespace",
@@ -38,6 +133,9 @@ const cut = (): AdoptionCut => ({
   cooldownEndsAt: 0,
   historyPermissionVerified: true,
   escalationBaseline: "{}",
+  sourceCounts: { conversations: 1, threads: 1, posted: 0, derived: 0, responses: 0 },
+  auditedUnthreaded: 0,
+  receiptAudit: { orphaned: 0, conflicting: 0, invalid: 0, unsupported: 0, unresolved: 0 },
   mappings: [
     {
       accountId: 3,
@@ -48,34 +146,11 @@ const cut = (): AdoptionCut => ({
       generation: 1,
       cursor: 101,
       latestEligibleId: 101,
-      responses: [],
+      history: sampleHistory(),
     },
   ],
 });
 afterEach(() => vi.restoreAllMocks());
-
-it("retries interrupted staging with its complete response baseline instead of an empty idempotent receipt", async () => {
-  await runInDurableObject(env.CONVERSATION.getByName(`stage-fault:${crypto.randomUUID()}`), (_instance, state) => {
-    const owner = { accountId: 3, conversationId: 12, guildId: GUILD, forumId: FORUM, generation: 2 };
-    const responses = [{ messageId: 99, digest: "a".repeat(64) }];
-    const executor = new Conversation(state, env);
-    // Fail after the stage marker's write, at the next meaningful durable baseline write.
-    state.storage.sql.exec(
-      "CREATE TRIGGER interrupted_stage BEFORE INSERT ON submitted_responses BEGIN SELECT RAISE(ABORT, 'interrupted baseline'); END",
-    );
-    expect(() => executor.stage(owner, THREAD, "fault-cut", 101, responses)).toThrow();
-    state.storage.sql.exec("DROP TRIGGER interrupted_stage");
-    new Conversation(state, env).stage(owner, THREAD, "fault-cut", 101, responses);
-    new Conversation(state, env).stage(
-      { generation: 2, forumId: FORUM, guildId: GUILD, conversationId: 12, accountId: 3 },
-      THREAD,
-      "fault-cut",
-      101,
-      responses.map(({ digest, messageId }) => ({ digest, messageId })),
-    );
-    expect(new Store(state.storage.sql).postedResponse(3, 12, 99)).toBe(responses[0]?.digest);
-  });
-});
 
 it("never recreates an accepted thread when its local receipt and mapping transaction fails", async () => {
   let posts = 0;
@@ -114,7 +189,7 @@ it("never recreates an accepted thread when its local receipt and mapping transa
 });
 
 it("inventories the actual 0.27 schema, silent posts, orphan partial work and numeric interaction fence", async () => {
-  await runInDurableObject(env.THREAD_DIRECTORY.getByName(`inventory:${crypto.randomUUID()}`), (_instance, state) => {
+  await runInDurableObject(env.LEGACY_HUB.getByName(`inventory:${crypto.randomUUID()}`), async (_instance, state) => {
     state.storage.sql.exec(legacySchema);
     for (let id = 1; id <= 101; id++)
       state.storage.sql.exec(
@@ -124,14 +199,16 @@ it("inventories the actual 0.27 schema, silent posts, orphan partial work and nu
       );
     state.storage.sql.exec("INSERT INTO interactions VALUES ('99',0), ('100',0)");
     state.storage.sql.exec("INSERT INTO posted_messages VALUES (3,999,101,0,'100000000000000101')");
-    const page = legacyInventory(state.storage.sql);
-    expect(page.mappings).toHaveLength(100);
-    expect(page.complete).toBe(false);
-    expect(page.interactionFence).toBe("100");
-    expect(page.partial).toBe(1);
-    const end = legacyInventory(state.storage.sql, page.next);
-    expect(end.mappings.map((mapping) => mapping.conversationId)).toEqual([101]);
-    expect(end.complete).toBe(true);
+    await withArchive(state, (archive) => {
+      const page = archive.inventory();
+      expect(page.mappings).toHaveLength(100);
+      expect(page.complete).toBe(false);
+      expect(page.interactionFence).toBe("100");
+      expect(page.partial).toBe(1);
+      const end = archive.inventory(page.next);
+      expect(end.mappings.map((mapping) => mapping.conversationId)).toEqual([101]);
+      expect(end.complete).toBe(true);
+    });
   });
 });
 
@@ -148,7 +225,7 @@ it("prebuilds a silent thread directory and resumes the same cut after a lost st
     generation: 1,
     cursor: 101,
     latestEligibleId: 101,
-    responses: [],
+    history: sampleHistory(),
   };
   const settings = {
     ...configSchema.parse(env.CONFIG),
@@ -178,13 +255,18 @@ it("prebuilds a silent thread directory and resumes the same cut after a lost st
       return Reflect.get(target, property, receiver);
     },
   });
-  await expect(stageAdoption({ ...env, CONFIG: settings, CONVERSATION: namespace }, manifest)).rejects.toThrow();
-  await stageAdoption({ ...env, CONFIG: settings }, manifest);
+  manifest.mappings[0].history = sampleHistory(3, 123456, "100000000000045678");
+  await expect(prepareAdoption({ ...env, CONFIG: settings, CONVERSATION: namespace }, manifest)).rejects.toThrow();
+  await prepareAdoption({ ...env, CONFIG: settings }, manifest);
   const owner = await env.THREAD_DIRECTORY.getByName(`thread:v1:${manifest.mappings[0]?.threadId}`).get();
   expect(owner?.conversationId).toBe(123456);
   expect(owner?.generation).toBe(1);
   await expect(
-    stageAdoption({ ...env, CONFIG: { ...settings, cutover: { ...settings.cutover, phase: "active" } } }, manifest),
+    stageAdoption(
+      { ...env, CONFIG: { ...settings, cutover: { ...settings.cutover, phase: "active" } } },
+      manifest,
+      await verifiedFixture(manifest),
+    ),
   ).rejects.toThrow();
 });
 
@@ -204,7 +286,7 @@ it.each(["missing-webhooks", "empty-webhooks", "wrong-forum", "unknown-account"]
         generation: 1,
         cursor: 101,
         latestEligibleId: 101,
-        responses: [],
+        history: sampleHistory(),
       },
       {
         ...manifest.mappings[0],
@@ -216,7 +298,7 @@ it.each(["missing-webhooks", "empty-webhooks", "wrong-forum", "unknown-account"]
         generation: 1,
         cursor: 101,
         latestEligibleId: 101,
-        responses: [],
+        history: sampleHistory(),
       },
     ];
     const settings = {
@@ -231,7 +313,9 @@ it.each(["missing-webhooks", "empty-webhooks", "wrong-forum", "unknown-account"]
           defect === "missing-webhooks" ? {} : { [FORUM]: defect === "empty-webhooks" ? [] : ["100000000000000001"] },
       },
     };
-    await expect(stageAdoption({ ...env, CONFIG: settings }, manifest)).rejects.toThrow();
+    await expect(
+      stageAdoption({ ...env, CONFIG: settings }, manifest, { get: () => undefined, set: () => {} }),
+    ).rejects.toThrow();
     expect(await env.THREAD_DIRECTORY.getByName("thread:v1:100000000000098701").get()).toBeNull();
   },
 );
@@ -292,8 +376,7 @@ it("adopts once after cleanup restart and never recreates a new card whose POST 
     let now = Date.now();
     vi.spyOn(Date, "now").mockImplementation(() => now);
     const ctx = state;
-    let executor = new Conversation(ctx, activeEnv);
-    executor.stage(owner, thread, epoch, 101, []);
+    let executor = await stageFixture(ctx, activeEnv, owner, thread, epoch, 101);
     await executor.enqueueConversation(3, 34567);
     for (let i = 0; i < 5; i++) {
       await executor.alarm();
@@ -324,7 +407,7 @@ it("rejects A100 unfinished/B101 sent, held/partial work, unresolved sends and m
     generation: 1,
     cursor: 99,
     latestEligibleId: 100,
-    responses: [],
+    history: sampleHistory(),
   };
   expect(() => validateCut(incomplete)).toThrow();
   expect(() => validateCut({ ...cut(), inventoryComplete: false })).toThrow();
@@ -338,7 +421,7 @@ it("repairs a missing link from the complete old mapping, fresh-confirms it, and
   let blocked = false;
   const { requests } = mockFetch(
     on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/12", () =>
-      blocked ? json({}, { status: 403 }) : json({ id: 12, custom_attributes: { discord_thread: link } }),
+      blocked ? json({}, { status: 403 }) : json({ id: 12, inbox_id: 2, custom_attributes: { discord_thread: link } }),
     ),
     on("POST", "chatwoot.example.com/api/v1/accounts/3/conversations/12/custom_attributes", () => {
       link = `https://discord.com/channels/${GUILD}/${THREAD}`;
@@ -348,13 +431,13 @@ it("repairs a missing link from the complete old mapping, fresh-confirms it, and
   );
   const client = chatwootClient("https://chatwoot.example.com", "test", (request) => fetch(request));
   const rest = new DiscordRest("test", (request) => fetch(request));
-  await verifyLinks(cut(), client, rest, "discord_thread");
+  await verifyLinks(cut(), client, rest, "discord_thread", testSettings());
   expect(link).toContain(THREAD);
   const writes = requests.filter((request) => request.method === "POST").length;
   link = "https://discord.com/channels/100000000000000099/100000000000000098";
-  await expect(verifyLinks(cut(), client, rest, "discord_thread")).rejects.toThrow();
+  await expect(verifyLinks(cut(), client, rest, "discord_thread", testSettings())).rejects.toThrow();
   blocked = true;
-  await expect(verifyLinks(cut(), client, rest, "discord_thread")).rejects.toThrow();
+  await expect(verifyLinks(cut(), client, rest, "discord_thread", testSettings())).rejects.toThrow();
   expect(requests.filter((request) => request.method === "POST")).toHaveLength(writes);
 });
 
@@ -417,7 +500,7 @@ it("cleans old standalone cards through multiple pages/restarts, never a body or
   ).toEqual([null, "297", "100"]);
 });
 
-it("rejects a zero-receipt cut whose conversation cursor is beyond the common watermark", () => {
+it("rejects a historical-receipt cut whose conversation cursor is beyond the common watermark", () => {
   const manifest = cut();
   const mapping = manifest.mappings[0];
   if (!mapping) throw new Error("Missing fixture mapping");
@@ -448,7 +531,7 @@ it("refuses unfinished durable adoption when its runtime cutover configuration i
     async (_instance, state) => {
       vi.spyOn(state.storage, "setAlarm").mockResolvedValue();
       let executor = new Conversation(state, { ...env, CONFIG: settings });
-      executor.stage(owner, THREAD, "removed-cut", 101, []);
+      executor.stage(owner, THREAD, "removed-cut", 101, sampleHistory(3, 98765, THREAD));
       await executor.enqueueConversation(3, 98765);
       executor = new Conversation(state, { ...env, CONFIG: settings });
       await executor.alarm();
@@ -475,17 +558,115 @@ it("seals the original digest baseline atomically and rejects changed same-epoch
   });
 });
 
-it("reads the retained Hub inventory through the private operator binding", async () => {
-  await runInDurableObject(env.LEGACY_HUB.getByName("global"), (_instance, state) => {
+it("requires the deployed frozen boundary on private source RPCs", async () => {
+  const stub = env.LEGACY_HUB.getByName("global");
+  let boundary: FrozenSource | undefined;
+  await runInDurableObject(stub, (_instance, state) => {
     state.storage.sql.exec(legacySchema);
-    state.storage.sql.exec(
-      "INSERT INTO conversations (account_id,conversation_id,thread_id,cursor) VALUES (3,123,?,101)",
-      THREAD,
-    );
+    boundary = { sourceIdentity: state.id.toString(), epoch: "cut", drainEvidence: "settled", frozen: true };
   });
-  const page = await inventory(env);
-  expect(page.schemaVersion).toBe(9);
-  expect(page.mappings).toMatchObject([{ accountId: 3, conversationId: 123, threadId: THREAD, cursor: 101 }]);
-  expect(page.complete).toBe(true);
-  expect(page.jobs).toBe(0);
+  if (!boundary) throw new Error("Missing fixture boundary");
+  await expect(scanPage(env, boundary)).rejects.toThrow(/not deployed/);
+  await runInDurableObject(stub, async (_instance, state) => {
+    const { Hub } = await import("../src/hub.ts");
+    const deployed = {
+      sourceIdentity: state.id.toString(),
+      epoch: "cut",
+      drainEvidence: "settled",
+      frozen: true as const,
+    };
+    const shell = new Hub(state, { ...env, LEGACY_EXPORT_BOUNDARY: deployed });
+    expect((await shell.scanPage(deployed)).schemaVersion).toBe(9);
+    await expect(shell.scanPage({ ...deployed, epoch: "other" })).rejects.toThrow(/mismatch/);
+  });
+});
+
+it("refuses link repair for an excluded archive inbox without creating a link or thread", async () => {
+  const { requests } = mockFetch(
+    on("GET", "chatwoot.example.com/api/v1/accounts/3/conversations/12", () =>
+      json({ id: 12, inbox_id: 13, custom_attributes: {} }),
+    ),
+    on("GET", `discord.com/api/v10/channels/${THREAD}`, () => json({ guild_id: GUILD, parent_id: FORUM })),
+  );
+  const client = chatwootClient("https://chatwoot.example.com", "test", (request) => fetch(request));
+  const rest = new DiscordRest("test", (request) => fetch(request));
+  const settings = testSettings({ accounts: [{ id: 3, name: "Acme", forumChannelId: FORUM, inboxIds: [2] }] });
+  await expect(verifyLinks(cut(), client, rest, "discord_thread", settings)).rejects.toThrow(/inbox scope/);
+  expect(requests.every((request) => request.method === "GET")).toBe(true);
+});
+
+it("verifies all 53 mappings in durable bounded batches and rejects missing coverage, changed cuts and failed reads", async () => {
+  const manifest = cut();
+  manifest.mappings = Array.from({ length: 53 }, (_, index) => {
+    const conversationId = index + 1;
+    const threadId = String(100000000000060000n + BigInt(index));
+    return {
+      accountId: 3,
+      conversationId,
+      guildId: GUILD,
+      forumId: FORUM,
+      threadId,
+      generation: 1,
+      cursor: 101,
+      latestEligibleId: 101,
+      history: sampleHistory(3, conversationId, threadId),
+    };
+  });
+  manifest.sourceCounts = { conversations: 53, threads: 53, posted: 0, derived: 0, responses: 0 };
+  const seen: number[] = [];
+  const { requests } = mockFetch(
+    on("GET", /^chatwoot\.example\.com\/api\/v1\/accounts\/3\/conversations\/\d+$/, (request) => {
+      const id = Number(request.url.pathname.split("/").at(-1));
+      seen.push(id);
+      const mapping = manifest.mappings[id - 1];
+      if (!mapping) throw new Error("Missing expected mapping");
+      return json({
+        id,
+        inbox_id: 2,
+        custom_attributes: { discord_thread: `https://discord.com/channels/${GUILD}/${mapping.threadId}` },
+      });
+    }),
+    on("GET", /^discord\.com\/api\/v10\/channels\/\d+$/, () => json({ guild_id: GUILD, parent_id: FORUM })),
+  );
+  const stub = env.LEGACY_HUB.getByName(`verification:${crypto.randomUUID()}`);
+  const verify = (part: AdoptionCut) =>
+    verifyLinks(
+      part,
+      chatwootClient("https://chatwoot.example.com", "test", (request) => fetch(request)),
+      new DiscordRest("test", (request) => fetch(request)),
+      "discord_thread",
+      testSettings(),
+    );
+  for (let batch = 0; batch < 26; batch++) {
+    await runInDurableObject(stub, async (_instance, state) => {
+      // Reconstruct the operator store after every batch, as after a restart.
+      const store = new Store(state.storage.sql);
+      store.migrate();
+      await verifyLinkBatch(manifest, batch, store, async (part) => {
+        expect(part.mappings.length).toBeLessThanOrEqual(2);
+        await verify(part);
+      });
+    });
+  }
+  await runInDurableObject(stub, async (_instance, state) => {
+    const store = new Store(state.storage.sql);
+    await expect(assertVerifiedCut(manifest, store)).rejects.toThrow(/Complete post-drain/);
+    await expect(stageAdoption(env, manifest, store)).rejects.toThrow(/Complete post-drain/);
+    await expect(
+      verifyLinkBatch(manifest, 26, store, async () => {
+        throw new Error("read denied");
+      }),
+    ).rejects.toThrow(/denied/);
+    await expect(assertVerifiedCut(manifest, store)).rejects.toThrow();
+    await verifyLinkBatch(manifest, 26, store, verify);
+    expect(await assertVerifiedCut(manifest, new Store(state.storage.sql))).toMatchObject({
+      mappings: 53,
+      batches: 27,
+    });
+    await expect(assertVerifiedCut({ ...manifest, epoch: "changed" }, store)).rejects.toThrow();
+    await expect(assertVerifiedCut({ ...manifest, drainEvidence: "changed" }, store)).rejects.toThrow();
+    await expect(verifyLinkBatch(manifest, 27, store, verify)).rejects.toThrow(/Invalid/);
+  });
+  expect(seen).toEqual(Array.from({ length: 53 }, (_, index) => index + 1));
+  expect(requests.filter((request) => request.method !== "GET")).toEqual([]);
 });

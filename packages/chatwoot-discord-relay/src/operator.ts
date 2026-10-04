@@ -1,19 +1,22 @@
 // Operator-only preparation. No HTTP importer and no online legacy read fallback.
 import { Budget } from "../../../shared/budget.ts";
 import { chatwootClient } from "../../../shared/chatwoot/api.ts";
+import { within } from "../../../shared/deadline.ts";
 import type { RateLimitStore } from "../../../shared/rate-limit.ts";
 import { type AdoptionCut, verifyLinks } from "./adoption.ts";
 import { DiscordLimiter } from "./discord/limiter.ts";
 import { DiscordRest } from "./discord/rest.ts";
 import type { Env } from "./env.ts";
 import type { Hub } from "./hub.ts";
-import { control } from "./rpc.ts";
 import { loadSettings } from "./settings.ts";
 
 export {
   type AdoptionCut,
   type AdoptionMapping,
   cutSchema,
+  importAdoptionPage,
+  prepareAdoption,
+  sealAdoptionHistory,
   stageAdoption,
   validateCut,
   verifyLinks,
@@ -23,13 +26,17 @@ export interface OperatorEnv extends Env {
   LEGACY_HUB: DurableObjectNamespace<Hub>;
 }
 
-export function inventory(env: OperatorEnv, after = 0) {
-  return control(undefined, () => env.LEGACY_HUB.getByName("global").inventory(after));
+// This deadline bounds caller waiting only. It DOES NOT cancel a source RPC/SQLite read.
+// The source must already be frozen; retries use the identical durable checkpoint.
+function sourceRead<T>(call: () => Promise<T>): Promise<T> {
+  return within(call(), AbortSignal.timeout(10_000));
+}
+export function scanPage(env: OperatorEnv, source: FrozenSource, after?: LegacyPosition) {
+  return sourceRead(() => env.LEGACY_HUB.getByName("global").scanPage(source, after));
 }
 
-/** Verify a finite mapping page; retain the complete manifest separately for staging. */
-export async function verifyAdoptionLinks(env: Env, cut: AdoptionCut, store: RateLimitStore): Promise<void> {
-  if (cut.mappings.length > 2) throw new Error("Verify at most two mappings per call");
+/** Pass the complete immutable cut plus a zero-based batch index, never a subset cut. */
+export async function verifyAdoptionLinks(env: Env, cut: AdoptionCut, store: RateLimitStore, batch: number) {
   const settings = await loadSettings(env);
   const budget = new Budget(settings.config.relay.subrequestBudget);
   budget.startSlice();
@@ -44,5 +51,32 @@ export async function verifyAdoptionLinks(env: Env, cut: AdoptionCut, store: Rat
     budget.fetch,
     store,
   );
-  await verifyLinks(cut, chatwoot, rest, settings.config.relay.linkAttribute);
+  return verifyLinkBatch(cut, batch, store, (part) =>
+    verifyLinks(part, chatwoot, rest, settings.config.relay.linkAttribute, settings),
+  );
+}
+
+export { LegacyArchive } from "./archive.ts";
+export {
+  nextReceiptPosition,
+  type ReceiptPage,
+  type ReceiptPosition,
+  type ReceiptSeal,
+  receiptSeal,
+  validateReceiptPage,
+} from "./history.ts";
+export {
+  type FrozenSource,
+  type LegacyPosition,
+  type LegacyScanPage,
+  legacyEscalationBaseline,
+  legacyScanPage,
+  validateFrozenSource,
+} from "./legacy.ts";
+export { assertVerifiedCut, cutDigest, verifyLinkBatch } from "./verification.ts";
+
+import type { FrozenSource, LegacyPosition } from "./legacy.ts";
+import { verifyLinkBatch } from "./verification.ts";
+export function escalationBaseline(env: OperatorEnv, source: FrozenSource) {
+  return sourceRead(() => env.LEGACY_HUB.getByName("global").escalationBaseline(source));
 }

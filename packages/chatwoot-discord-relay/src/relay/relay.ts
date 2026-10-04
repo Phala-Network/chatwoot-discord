@@ -79,6 +79,8 @@ export interface ForumClient {
   editMessage(forumChannelId: string, threadId: string, messageId: string, message: WebhookMessage): Promise<boolean>;
   /** Deletes a message the forum's webhook posted; a message that is already gone counts as deleted. */
   deleteMessage(forumChannelId: string, threadId: string, messageId: string): Promise<void>;
+  /** Deletes an imported authoritative receipt with the bot, including rotated webhooks. */
+  deleteHistoricalMessage(threadId: string, messageId: string): Promise<void>;
   /** True if `threadId` is a post that still exists in the forum. */
   threadExists(forumChannelId: string, threadId: string): Promise<boolean>;
   /** Link to a post, e.g. https://discord.com/channels/<guild>/<thread>. */

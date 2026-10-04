@@ -1,34 +1,61 @@
-// Load the emitted runtime export from the installed tarball, not a source/declaration path.
+// Verify installed tarball runtime exports and the bounded private source contract.
 import assert from "node:assert/strict";
 import {
-  inventory,
+  assertVerifiedCut,
+  escalationBaseline,
+  importAdoptionPage,
+  LegacyArchive,
+  legacyScanPage,
+  nextReceiptPosition,
+  prepareAdoption,
+  receiptSeal,
+  scanPage,
+  sealAdoptionHistory,
+  stageAdoption,
+  validateCut,
+  validateReceiptPage,
+  verifyAdoptionLinks,
+  verifyLinkBatch,
+} from "chatwoot-discord-relay/operator";
+
+for (const method of [
+  LegacyArchive,
+  scanPage,
+  legacyScanPage,
+  escalationBaseline,
+  prepareAdoption,
+  importAdoptionPage,
+  sealAdoptionHistory,
+  nextReceiptPosition,
+  receiptSeal,
+  validateReceiptPage,
   stageAdoption,
   validateCut,
   verifyAdoptionLinks,
-  verifyLinks,
-} from "chatwoot-discord-relay/operator";
-
-for (const method of [inventory, stageAdoption, validateCut, verifyAdoptionLinks, verifyLinks])
+  verifyLinkBatch,
+  assertVerifiedCut,
+])
   assert.equal(typeof method, "function");
 assert.throws(() => validateCut({}), /./);
-
 const calls = [];
-const page = { schemaVersion: 9, mappings: [], complete: true };
-const actual = await inventory(
+const source = { sourceIdentity: "actual-source-id", epoch: "cut", drainEvidence: "private:settled", frozen: true };
+const page = { schemaVersion: 9, rows: [], complete: true };
+const actual = await scanPage(
   {
     LEGACY_HUB: {
       getByName(name) {
         assert.equal(name, "global");
         return {
-          async inventory(after) {
-            calls.push(after);
+          async scanPage(boundary, after) {
+            calls.push([boundary, after]);
             return page;
           },
         };
       },
     },
   },
-  100,
+  source,
+  { kind: 0, rowid: 100 },
 );
 assert.deepEqual(actual, page);
-assert.deepEqual(calls, [100]);
+assert.deepEqual(calls, [[source, { kind: 0, rowid: 100 }]]);

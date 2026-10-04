@@ -37,6 +37,14 @@ import { DiscordLimiter } from "./discord/limiter.ts";
 import { DiscordHttpError, DiscordRest } from "./discord/rest.ts";
 import { Effects } from "./effects.ts";
 import type { Env } from "./env.ts";
+import {
+  canonicalSeal,
+  ReceiptImport,
+  type ReceiptPage,
+  type ReceiptSeal,
+  receiptSealSchema,
+  validateTitleMetadata,
+} from "./history.ts";
 import { type ProcessorContext, processConversation, refreshMetadata, relayFor } from "./relay/processor.ts";
 import { processMessageUpdate } from "./relay/updates.ts";
 import { loadSettings } from "./settings.ts";
@@ -102,15 +110,30 @@ export class Conversation extends DurableObject<Env> {
     this.store.migrate();
   }
 
-  stage(
-    owner: ThreadOwner,
-    threadId: string,
-    epoch: string,
-    watermark: number,
-    responses: Array<{ messageId: number; digest: string }>,
-  ): void {
+  stage(owner: ThreadOwner, threadId: string, epoch: string, watermark: number, history: ReceiptSeal): void {
+    const parsed = receiptSealSchema.safeParse(history);
+    if (!parsed.success) throw new Error("Invalid legacy history seal");
+    history = canonicalSeal(parsed.data);
+    validateTitleMetadata(history.header);
+    if (
+      !Number.isSafeInteger(owner.generation) ||
+      owner.generation <= 0 ||
+      !/^\d{17,20}$/.test(owner.guildId) ||
+      !/^\d{17,20}$/.test(owner.forumId) ||
+      !epoch ||
+      !Number.isSafeInteger(watermark) ||
+      watermark < 0
+    )
+      throw new Error("Invalid legacy adoption identity");
+    if (
+      history.header.accountId !== owner.accountId ||
+      history.header.conversationId !== owner.conversationId ||
+      history.header.threadId !== threadId ||
+      history.header.cursor > watermark ||
+      (history.header.titleMessageId !== null && history.header.titleMessageId > history.header.cursor)
+    )
+      throw new Error("Legacy history owner or watermark conflict");
     this.bind(owner.accountId, owner.conversationId);
-    const existing = this.store.get("adoption:stage");
     const stage = JSON.stringify({
       owner: {
         accountId: owner.accountId,
@@ -122,25 +145,69 @@ export class Conversation extends DurableObject<Env> {
       threadId,
       epoch,
       watermark,
-      responses: responses
-        .map(({ messageId, digest }) => ({ messageId, digest }))
-        .sort((a, b) => a.messageId - b.messageId),
+      history,
     });
+    const existing = this.store.get("adoption:stage");
     if (existing && existing !== stage) throw new Error("Adoption stage conflict");
     if (existing === stage) return;
-    if (this.store.conversation(owner.accountId, owner.conversationId)?.threadId)
-      throw new Error("Adoption target already active");
+    if (
+      this.store.conversation(owner.accountId, owner.conversationId)?.threadId ||
+      Object.values(this.store.legacyReceiptCounts(owner.accountId, owner.conversationId)).some(Boolean)
+    )
+      throw new Error("Adoption target already contains active data");
     this.ctx.storage.transactionSync(() => {
       this.store.set("adoption:stage", stage);
       this.store.set("generation", String(owner.generation));
-      for (const response of responses) {
-        this.store.savePostedResponse(owner.accountId, owner.conversationId, response.messageId, response.digest);
-        this.store.set(
-          `observed:${owner.accountId}:${owner.conversationId}:derived:${response.messageId}`,
-          JSON.stringify({ value: response.digest, revision: 0 }),
-        );
-      }
     });
+  }
+
+  async importHistory(page: ReceiptPage): Promise<void> {
+    const stage = await this.historyStage();
+    await new ReceiptImport(this.store).page(stage.history, page);
+  }
+  async sealHistory(): Promise<void> {
+    const stage = await this.historyStage();
+    new ReceiptImport(this.store).seal(stage.history);
+  }
+  historyReady(digest: string): boolean {
+    return this.store.get("adoption:history-sealed") === digest;
+  }
+  async readyHistory(): Promise<void> {
+    const stage = await this.historyStage();
+    if (!this.historyReady(stage.history.digest)) throw new Error("Legacy history is not sealed");
+    this.store.set("adoption:ready", stage.history.digest);
+  }
+  private async historyStage(): Promise<{
+    owner: ThreadOwner;
+    threadId: string;
+    epoch: string;
+    watermark: number;
+    history: ReceiptSeal;
+  }> {
+    const stage = JSON.parse(this.store.get("adoption:stage") ?? "null");
+    const settings = await loadSettings(this.env);
+    if (
+      !stage ||
+      settings.config.cutover?.phase !== "maintenance" ||
+      settings.config.cutover.epoch !== stage.epoch ||
+      settings.config.relay.startAfterMessageId !== stage.watermark ||
+      this.store.get("adoption:complete")
+    )
+      throw new Error("Legacy import requires matching maintenance cut");
+    const owner = await control(undefined, () =>
+      this.env.THREAD_DIRECTORY.getByName(`thread:v1:${stage.threadId}`).get(),
+    );
+    if (
+      !owner ||
+      owner.accountId !== stage.owner.accountId ||
+      owner.conversationId !== stage.owner.conversationId ||
+      owner.guildId !== stage.owner.guildId ||
+      owner.forumId !== stage.owner.forumId ||
+      owner.generation !== stage.owner.generation ||
+      Number(this.store.get("generation")) !== stage.owner.generation
+    )
+      throw new Error("Legacy import Directory conflict");
+    return stage;
   }
 
   /**
@@ -302,6 +369,8 @@ export class Conversation extends DurableObject<Env> {
       }
       const cutover = services.settings.config.cutover;
       const staged = this.store.get("adoption:stage");
+      if (staged && !this.store.get("adoption:complete") && payload.type === "command")
+        throw new Error("Commands require completed historical adoption");
       if (
         (cutover || staged) &&
         payload.type !== "command" &&
@@ -310,7 +379,19 @@ export class Conversation extends DurableObject<Env> {
       ) {
         if (staged) {
           if (cutover?.phase !== "active") throw new Error("Unfinished adoption requires matching active cutover");
-          const stage: { owner: ThreadOwner; threadId: string; epoch: string; watermark: number } = JSON.parse(staged);
+          const stage: {
+            owner: ThreadOwner;
+            threadId: string;
+            epoch: string;
+            watermark: number;
+            history?: ReceiptSeal;
+          } = JSON.parse(staged);
+          if (
+            !stage.history ||
+            !this.historyReady(stage.history.digest) ||
+            this.store.get("adoption:ready") !== stage.history.digest
+          )
+            throw new Error("Legacy history is incomplete or not ready for activation");
           if (stage.epoch !== cutover.epoch || stage.watermark !== services.settings.config.relay.startAfterMessageId)
             throw new Error("Cutover epoch or watermark mismatch");
           const raw = await services.chatwoot.getConversation(stage.owner.accountId, stage.owner.conversationId);
@@ -331,6 +412,8 @@ export class Conversation extends DurableObject<Env> {
             return "yield";
           this.ctx.storage.transactionSync(() => {
             this.store.adoptThread(stage.owner.accountId, stage.owner.conversationId, stage.threadId);
+            if (!stage.history) throw new Error("Missing legacy history");
+            this.store.restoreLegacyTitle(stage.history.header);
             this.store.setCursor(stage.owner.accountId, stage.owner.conversationId, stage.watermark);
             this.store.set("adoption:complete", "1");
             this.enqueue({

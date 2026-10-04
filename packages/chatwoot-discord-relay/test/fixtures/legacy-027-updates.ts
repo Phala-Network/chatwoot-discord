@@ -1,3 +1,4 @@
+// Exact v0.27.0 (b8aaf0b) update/delete sequence, imports adapted to fixture dependencies.
 // What a Chatwoot message's state adds to its post beyond its text, when the message is relayed
 // and when Chatwoot reports it updated: a customer's response to an interactive message, a
 // notice when an agent's reply could not be delivered, and removal when the message is deleted.
@@ -5,9 +6,9 @@
 import { type ChatwootMessage, toRelayConversation } from "../../../../shared/chatwoot/api.ts";
 import { log } from "../../../../shared/log.ts";
 import type { RelayConversation } from "../../../../shared/types.ts";
-import { clip } from "./format.ts";
-import type { ProcessorContext } from "./processor.ts";
-import { interactiveMessage, responseText } from "./response.ts";
+import { clip } from "../../src/relay/format.ts";
+import type { ProcessorContext as CurrentContext } from "../../src/relay/processor.ts";
+import { interactiveMessage, responseText } from "../../src/relay/response.ts";
 
 /**
  * Acts on a message reported as updated once Chatwoot's API confirms the change: a deleted
@@ -15,6 +16,15 @@ import { interactiveMessage, responseText } from "./response.ts";
  * Only a message already relayed is acted on: before that (no post yet, or its job has not
  * reached it), its conversation's job relays it with its current state.
  */
+type ProcessorContext = Pick<CurrentContext, "settings" | "store" | "chatwoot" | "forum"> & {
+  relay: {
+    postResponse(accountId: number, conversation: RelayConversation, text: string): Promise<string | undefined>;
+    notify(accountId: number, conversation: RelayConversation, text: string): Promise<string | undefined>;
+    sync(accountId: number, conversation: RelayConversation, threadId: string): Promise<void>;
+    dropTitleSubject(accountId: number, conversation: RelayConversation, threadId: string): Promise<void>;
+  };
+};
+
 export async function processMessageUpdate(
   context: ProcessorContext,
   accountId: number,
@@ -25,7 +35,6 @@ export async function processMessageUpdate(
   const post = store.conversation(accountId, conversationId);
   const threadId = post?.threadId;
   if (!settings.account(accountId) || !threadId || post?.cursor === undefined || messageId > post.cursor) return;
-  await relay.ensureThread(accountId, conversationId, threadId);
   const message = await chatwoot.getMessage(accountId, conversationId, messageId);
   if (!message) return;
   if (message.content_attributes?.deleted === true) {
@@ -58,16 +67,14 @@ export async function relayDerived(
   if (!derived || (derived.kind === "response" && conversation.contact.blocked)) return;
   const digest = await sha256(derived.text);
   if (store.postedResponse(accountId, conversation.id, message.id) === digest) return;
-  const revision = relay.observe(accountId, conversation.id, `derived:${message.id}`, digest);
-  const sendKey = `derived:${message.id}:${revision}`;
-  if (derived.kind === "response") relay.customerEvent(accountId, conversation.id, sendKey);
   const discordId =
     derived.kind === "response"
-      ? await relay.postResponse(accountId, conversation, derived.text, sendKey)
-      : await relay.notify(accountId, conversation, derived.text, sendKey);
+      ? await relay.postResponse(accountId, conversation, derived.text)
+      : await relay.notify(accountId, conversation, derived.text);
+  if (discordId === undefined) return;
   store.savePostedResponse(accountId, conversation.id, message.id, digest);
-  if (discordId) store.saveDerivedMessage(accountId, conversation.id, message.id, discordId);
-  log.info("derived event processed", {
+  store.saveDerivedMessage(accountId, conversation.id, message.id, discordId);
+  log.info(derived.kind === "response" ? "response posted" : "delivery failure posted", {
     accountId,
     conversationId: conversation.id,
     messageId: message.id,
@@ -100,19 +107,13 @@ async function deleteRelayedMessage(
   if (!account) return;
   const parts = store.postedParts(accountId, conversationId, messageId);
   for (const discordId of parts) {
-    const legacyKey = `adoption:legacy-discord:${discordId}`;
-    if (store.get(legacyKey)) await forum.deleteHistoricalMessage(threadId, discordId);
-    else await forum.deleteMessage(account.forumChannelId, threadId, discordId);
+    await forum.deleteMessage(account.forumChannelId, threadId, discordId);
     store.deletePostedPart(accountId, conversationId, messageId, discordId);
-    store.delete(legacyKey);
   }
   const derived = store.derivedMessages(accountId, conversationId, messageId);
   for (const discordId of derived) {
-    const legacyKey = `adoption:legacy-discord:${discordId}`;
-    if (store.get(legacyKey)) await forum.deleteHistoricalMessage(threadId, discordId);
-    else await forum.deleteMessage(account.forumChannelId, threadId, discordId);
+    await forum.deleteMessage(account.forumChannelId, threadId, discordId);
     store.deleteDerivedMessage(accountId, conversationId, messageId, discordId);
-    store.delete(legacyKey);
   }
   if (parts.length + derived.length > 0) {
     log.info("deleted message removed from post", { accountId, conversationId, messageId, parts: parts.length });

@@ -228,6 +228,10 @@ export class FakeForum implements ForumClient {
     this.deleted.push(messageId);
   }
 
+  async deleteHistoricalMessage(_threadId: string, messageId: string) {
+    this.deleted.push(messageId);
+  }
+
   async threadExists() {
     return true;
   }

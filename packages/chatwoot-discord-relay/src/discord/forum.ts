@@ -174,6 +174,20 @@ export class DiscordForum implements ForumClient {
     }
   }
 
+  async deleteHistoricalMessage(threadId: string, messageId: string): Promise<void> {
+    try {
+      await this.rest.delete(Routes.channelMessage(threadId, messageId));
+    } catch (error) {
+      if (
+        error instanceof DiscordHttpError &&
+        error.status === 404 &&
+        (error.code === UNKNOWN_MESSAGE || error.code === 10003)
+      )
+        return;
+      throw error;
+    }
+  }
+
   async threadExists(forumChannelId: string, threadId: string): Promise<boolean> {
     try {
       const channel = await this.rest.get<RESTGetAPIChannelResult>(Routes.channel(threadId));

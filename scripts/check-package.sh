@@ -14,6 +14,7 @@ for package in chatwoot-discord-relay chatwoot-router; do
   cp -R "packages/$package/test/package/." "$consumer/"
   if [ "$package" = chatwoot-discord-relay ]; then
     cp "packages/$package/docs/operator.ts" "$consumer/operator-template.ts"
+    cp "packages/$package/docs/legacy-source-bridge.ts" "$consumer/legacy-source-bridge.ts"
   fi
   npm pack -w "$package" --pack-destination "$consumer"
   (
@@ -22,6 +23,7 @@ for package in chatwoot-discord-relay chatwoot-router; do
     ./node_modules/.bin/tsc -p tsconfig.json
     ./node_modules/.bin/tsc -p tsconfig.worker.json
     if [ "$package" = chatwoot-discord-relay ]; then
+      ./node_modules/.bin/tsc -p tsconfig.source-bridge.json
       node operator.mjs
       "$root/node_modules/.bin/cf" build
       node lifecycle.mjs
@@ -35,6 +37,12 @@ for package in chatwoot-discord-relay chatwoot-router; do
       cp "$root/packages/$package/docs/operator.config.ts" operator/cloudflare.config.ts
       cp vite.config.ts operator/vite.config.ts
       (cd operator; "$root/node_modules/.bin/cf" build; "$root/node_modules/.bin/cf" deploy --prebuilt --dry-run)
+      mkdir source-bridge
+      cp package.json source-bridge/package.json
+      cp legacy-source-bridge.ts source-bridge/index.ts
+      cp vite.config.ts source-bridge/vite.config.ts
+      cp "$root/packages/$package/test/package/source-bridge.config.ts" source-bridge/cloudflare.config.ts
+      (cd source-bridge; "$root/node_modules/.bin/cf" build; node ../lifecycle.mjs source-bridge; "$root/node_modules/.bin/cf" deploy --prebuilt --dry-run)
     fi
     if [ "$package" = chatwoot-router ]; then
       command=chatwoot-router-store-config
