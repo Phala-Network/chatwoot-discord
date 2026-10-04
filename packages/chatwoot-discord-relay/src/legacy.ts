@@ -32,7 +32,9 @@ export interface LegacyScanPage {
   rows: LegacyRow[];
   complete: boolean;
   digest: string;
+  escalationBaseline?: string;
 }
+export const MAX_LEGACY_PAGE_BYTES = 2 * 1024 * 1024;
 export function validateFrozenSource(input: unknown): FrozenSource {
   const result = frozenSourceSchema.safeParse(input);
   if (!result.success) throw new Error("A settled, frozen source boundary is required");
@@ -139,8 +141,21 @@ export async function legacyScanPage(
   const complete = end && after.kind === legacyTables.length - 1;
   const next =
     end && !complete ? { kind: after.kind + 1, rowid: 0 } : { kind: after.kind, rowid: last?.rowid ?? after.rowid };
-  const body = { source, schemaVersion, after, next, rows, complete };
-  return { ...body, digest: await receiptHash(body) };
+  const body = {
+    source,
+    schemaVersion,
+    after,
+    next,
+    rows,
+    complete,
+    // The terminal cache checkpoint captures the one allowed value at this same
+    // immutable boundary, even when the key is absent. Never export other values.
+    ...(after.kind === 4 && end ? { escalationBaseline: legacyEscalationBaseline(sql, source) } : {}),
+  };
+  const page = { ...body, digest: await receiptHash(body) };
+  if (new TextEncoder().encode(JSON.stringify(page)).byteLength > MAX_LEGACY_PAGE_BYTES)
+    throw new Error("Legacy scan response exceeds the private byte bound");
+  return page;
 }
 
 /** Only this named numeric coordination baseline may leave cache; never arbitrary values. */
@@ -153,9 +168,12 @@ export function legacyEscalationBaseline(sql: SqlStorage, source: FrozenSource):
     )
     .toArray()[0];
   if (row && row.value === null) throw new Error("Legacy escalation baseline exceeds the private export bound");
+  return canonicalEscalationBaseline(row?.value ?? "{}");
+}
+export function canonicalEscalationBaseline(value: string): string {
   let input: unknown;
   try {
-    input = JSON.parse(row?.value ?? "{}");
+    input = JSON.parse(value);
   } catch {
     throw new Error("Invalid legacy escalation baseline");
   }

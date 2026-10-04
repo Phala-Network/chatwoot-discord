@@ -5,24 +5,30 @@ import type { AdoptionCut } from "./adoption.ts";
 import {
   baselineLinkageSchema,
   canonicalHeader,
+  canonicalSeal,
+  nextReceiptPosition,
   type ReceiptCounts,
   type ReceiptHeader,
   type ReceiptPage,
   type ReceiptPosition,
+  type ReceiptSeal,
   receiptHash,
   receiptHeaderSchema,
   receiptPageBody,
+  receiptSeal,
   recordSchema,
   titleAssociation,
   validateReceiptPage,
   validateTitleMetadata,
 } from "./history.ts";
 import {
+  canonicalEscalationBaseline,
   type FrozenSource,
   type LegacyPosition,
   type LegacyRow,
   type LegacyScanPage,
   legacyTables,
+  MAX_LEGACY_PAGE_BYTES,
   validateFrozenSource,
 } from "./legacy.ts";
 
@@ -43,6 +49,11 @@ interface State {
   unknownGuards: number;
   unknownCards: number;
   interactionFence: string;
+  escalationBaseline?: string;
+}
+interface ReceiptProgress extends ReceiptPosition {
+  complete: boolean;
+  counts: ReceiptCounts;
 }
 const safeId = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const safeCount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -66,6 +77,9 @@ export class LegacyArchive {
       CREATE INDEX IF NOT EXISTS legacy_archive_receipt_page ON legacy_archive_rows(kind,account_id,conversation_id,rowid);
       CREATE INDEX IF NOT EXISTS legacy_archive_owner ON legacy_archive_rows(kind,account_id,conversation_id,message_id,rowid);
       CREATE INDEX IF NOT EXISTS legacy_archive_discord ON legacy_archive_rows(discord_id);
+      CREATE TABLE IF NOT EXISTS legacy_archive_owner_counts (account_id INTEGER,conversation_id INTEGER,posted INTEGER NOT NULL DEFAULT 0,derived INTEGER NOT NULL DEFAULT 0,responses INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(account_id,conversation_id));
+      CREATE TABLE IF NOT EXISTS legacy_archive_receipt_progress (account_id INTEGER,conversation_id INTEGER,value TEXT NOT NULL,PRIMARY KEY(account_id,conversation_id));
+      CREATE TABLE IF NOT EXISTS legacy_archive_receipt_pages (account_id INTEGER,conversation_id INTEGER,page_index INTEGER,value TEXT NOT NULL,PRIMARY KEY(account_id,conversation_id,page_index));
       CREATE TABLE IF NOT EXISTS legacy_archive_dispositions (account_id INTEGER,conversation_id INTEGER,message_id INTEGER,digest TEXT NOT NULL,evidence TEXT NOT NULL,PRIMARY KEY(account_id,conversation_id,message_id));
       CREATE TABLE IF NOT EXISTS legacy_archive_issues (kind INTEGER,rowid INTEGER,issue TEXT,PRIMARY KEY(kind,rowid,issue));`);
   }
@@ -106,7 +120,11 @@ export class LegacyArchive {
   }
   async collect(page: LegacyScanPage) {
     const { digest, ...body } = page;
-    if (JSON.stringify(page).length > 2 * 1024 * 1024 || page.rows.length > 100 || (await receiptHash(body)) !== digest)
+    if (
+      new TextEncoder().encode(JSON.stringify(page)).byteLength > MAX_LEGACY_PAGE_BYTES ||
+      page.rows.length > 100 ||
+      (await receiptHash(body)) !== digest
+    )
       throw new Error("Invalid frozen scan page");
     this.transaction(() => {
       const state = this.state();
@@ -149,6 +167,16 @@ export class LegacyArchive {
         );
       }
       const end = page.rows.length < 100;
+      if (page.after.kind === 4 && end) {
+        if (
+          page.escalationBaseline === undefined ||
+          canonicalEscalationBaseline(page.escalationBaseline) !== page.escalationBaseline
+        )
+          throw new Error("Missing or invalid frozen escalation baseline");
+        if (state.escalationBaseline !== undefined && state.escalationBaseline !== page.escalationBaseline)
+          throw new Error("Conflicting frozen escalation baseline");
+        state.escalationBaseline = page.escalationBaseline;
+      } else if (page.escalationBaseline !== undefined) throw new Error("Unexpected escalation checkpoint");
       const complete = end && page.after.kind === legacyTables.length - 1;
       const next = end && !complete ? { kind: page.after.kind + 1, rowid: 0 } : { kind: page.after.kind, rowid: last };
       if (
@@ -361,6 +389,12 @@ export class LegacyArchive {
             issues.add("invalid");
           }
         } else if (kind < 4) {
+          const column = kind === 1 ? "posted" : kind === 2 ? "derived" : "responses";
+          this.sql.exec(
+            `INSERT INTO legacy_archive_owner_counts (account_id,conversation_id,${column}) VALUES (?,?,1) ON CONFLICT(account_id,conversation_id) DO UPDATE SET ${column}=${column}+1`,
+            row.account_id ?? null,
+            row.conversation_id ?? null,
+          );
           if (kind === 1) state.counts.posted++;
           else if (kind === 2) state.counts.derived++;
           else state.counts.responses++;
@@ -428,6 +462,16 @@ export class LegacyArchive {
       cut.schemaVersion !== state.schemaVersion ||
       cut.mappings.length !== state.counts.threads ||
       cut.auditedUnthreaded + cut.mappings.length !== state.counts.conversations ||
+      cut.jobs !== state.jobs ||
+      state.jobs !== 0 ||
+      cut.partial !== state.partial ||
+      state.partial !== 0 ||
+      cut.interactionFence !== state.interactionFence ||
+      state.unknownCards !== 0 ||
+      state.unknownGuards !== 0 ||
+      state.routingGuards !== 0 ||
+      state.escalationBaseline === undefined ||
+      cut.escalationBaseline !== state.escalationBaseline ||
       Object.values(state.issues).some((value) => value !== 0)
     )
       throw new Error("Cut does not match the complete frozen archive");
@@ -443,18 +487,14 @@ export class LegacyArchive {
       const owner = `${mapping.accountId}:${mapping.conversationId}`;
       if (!row || owners.has(owner) || row.thread_id !== mapping.threadId || row.cursor !== mapping.cursor)
         throw new Error("Cut mapping differs from frozen expected set");
-      const counts = (kind: number) =>
-        this.sql
-          .exec<{ n: number }>(
-            "SELECT COUNT(*) AS n FROM legacy_archive_rows WHERE kind=? AND account_id=? AND conversation_id=?",
-            kind,
-            mapping.accountId,
-            mapping.conversationId,
-          )
-          .one().n;
-      const header = this.header(row, { posted: counts(1), derived: counts(2), responses: counts(3) });
+      const header = this.header(row, this.ownerCounts(mapping.accountId, mapping.conversationId));
       if (JSON.stringify(canonicalHeader(mapping.history.header)) !== JSON.stringify(header))
         throw new Error("Cut header differs from frozen receipt metadata");
+      if (
+        JSON.stringify(canonicalSeal(mapping.history)) !==
+        JSON.stringify(this.receiptSeal(mapping.accountId, mapping.conversationId))
+      )
+        throw new Error("Cut seal differs from the canonical frozen receipts");
       owners.add(owner);
     }
   }
@@ -483,6 +523,7 @@ export class LegacyArchive {
       unknownGuards: state.unknownGuards,
       unknownCards: state.unknownCards,
       interactionFence: state.interactionFence,
+      escalationBaseline: state.escalationBaseline,
     };
   }
   auditPage(after = { kind: 0, rowid: 0 }) {
@@ -540,16 +581,7 @@ export class LegacyArchive {
       throw new Error("Invalid receipt owner");
     const row = this.conversation({ rowid: 0, account_id: accountId, conversation_id: conversationId });
     if (!row) throw new Error("Missing authoritative legacy conversation");
-    const count = (kind: number) =>
-      this.sql
-        .exec<{ n: number }>(
-          "SELECT COUNT(*) AS n FROM legacy_archive_rows WHERE kind=? AND account_id=? AND conversation_id=?",
-          kind,
-          accountId,
-          conversationId,
-        )
-        .one().n;
-    const header = this.header(row, { posted: count(1), derived: count(2), responses: count(3) });
+    const header = this.header(row, this.ownerCounts(accountId, conversationId));
     const start = position ?? { index: 0, after: { kind: 0, rowid: 0 }, previous: await receiptHash(header) };
     if (
       !safeCount.safeParse(start.index).success ||
@@ -560,6 +592,20 @@ export class LegacyArchive {
       !/^[a-f0-9]{64}$/.test(start.previous)
     )
       throw new Error("Invalid receipt cursor");
+    const saved = this.savedPage(accountId, conversationId, start.index);
+    if (saved) {
+      this.assertPosition(start, { index: saved.index, after: saved.after, previous: saved.previous });
+      return saved;
+    }
+    const progress = this.receiptProgress(accountId, conversationId) ?? {
+      index: 0,
+      after: { kind: 0, rowid: 0 },
+      previous: await receiptHash(header),
+      complete: false,
+      counts: { posted: 0, derived: 0, responses: 0 },
+    };
+    this.assertPosition(start, progress);
+    if (progress.complete) throw new Error("Canonical receipt export is complete");
     const records: ReceiptPage["records"] = [];
     for (let kind = start.after.kind; kind < 3 && records.length <= 100; kind++) {
       const rows = this.sql
@@ -586,6 +632,106 @@ export class LegacyArchive {
       records,
       complete,
     };
-    return validateReceiptPage({ ...body, digest: await receiptHash(receiptPageBody(body)) });
+    const page = await validateReceiptPage({ ...body, digest: await receiptHash(receiptPageBody(body)) });
+    this.transaction(() => {
+      // Hashing yields; recheck the checkpoint before committing any advancement.
+      const replay = this.savedPage(accountId, conversationId, start.index);
+      if (replay) {
+        if (replay.digest !== page.digest) throw new Error("Conflicting canonical receipt replay");
+        return;
+      }
+      const current = this.receiptProgress(accountId, conversationId) ?? progress;
+      this.assertPosition(start, current);
+      if (current.complete) throw new Error("Canonical receipt export is complete");
+      const counts = { ...current.counts };
+      for (const record of page.records) {
+        if (record.kind === 0) counts.posted++;
+        else if (record.kind === 1) counts.derived++;
+        else counts.responses++;
+      }
+      for (const kind of ["posted", "derived", "responses"] as const)
+        if (counts[kind] > header.counts[kind] || (complete && counts[kind] !== header.counts[kind]))
+          throw new Error("Canonical receipt completeness conflict");
+      this.sql.exec(
+        "INSERT INTO legacy_archive_receipt_pages VALUES (?,?,?,?)",
+        accountId,
+        conversationId,
+        page.index,
+        JSON.stringify(page),
+      );
+      this.sql.exec(
+        "INSERT INTO legacy_archive_receipt_progress VALUES (?,?,?) ON CONFLICT(account_id,conversation_id) DO UPDATE SET value=excluded.value",
+        accountId,
+        conversationId,
+        JSON.stringify({ ...nextReceiptPosition(page), counts, complete }),
+      );
+    });
+    return page;
+  }
+  private ownerCounts(accountId: number, conversationId: number): ReceiptCounts {
+    return (
+      this.sql
+        .exec<ReceiptCounts>(
+          "SELECT posted,derived,responses FROM legacy_archive_owner_counts WHERE account_id=? AND conversation_id=?",
+          accountId,
+          conversationId,
+        )
+        .toArray()[0] ?? { posted: 0, derived: 0, responses: 0 }
+    );
+  }
+  private receiptProgress(accountId: number, conversationId: number): ReceiptProgress | undefined {
+    const row = this.sql
+      .exec<{ value: string }>(
+        "SELECT value FROM legacy_archive_receipt_progress WHERE account_id=? AND conversation_id=?",
+        accountId,
+        conversationId,
+      )
+      .toArray()[0];
+    return row ? JSON.parse(row.value) : undefined;
+  }
+  private savedPage(accountId: number, conversationId: number, index: number): ReceiptPage | undefined {
+    const row = this.sql
+      .exec<{ value: string }>(
+        "SELECT value FROM legacy_archive_receipt_pages WHERE account_id=? AND conversation_id=? AND page_index=?",
+        accountId,
+        conversationId,
+        index,
+      )
+      .toArray()[0];
+    return row ? JSON.parse(row.value) : undefined;
+  }
+  private assertPosition(actual: ReceiptPosition, expected: ReceiptPosition) {
+    if (
+      actual.index !== expected.index ||
+      actual.after.kind !== expected.after.kind ||
+      actual.after.rowid !== expected.after.rowid ||
+      actual.previous !== expected.previous
+    )
+      throw new Error("Canonical receipt checkpoint conflict");
+  }
+  /** Only a durably completed, bounded page chain may supply the operator's cut seal. */
+  receiptSeal(accountId: number, conversationId: number): ReceiptSeal {
+    this.audited();
+    const progress = this.receiptProgress(accountId, conversationId);
+    const last = progress && this.savedPage(accountId, conversationId, progress.index - 1);
+    if (
+      !progress?.complete ||
+      !last?.complete ||
+      last.digest !== progress.previous ||
+      JSON.stringify(progress.counts) !== JSON.stringify(this.ownerCounts(accountId, conversationId))
+    )
+      throw new Error("Canonical receipt seal is incomplete");
+    this.assertPosition(progress, nextReceiptPosition(last));
+    return receiptSeal(last);
+  }
+  escalationBaseline(source: FrozenSource): string {
+    const state = this.state();
+    if (
+      !state.collected ||
+      state.escalationBaseline === undefined ||
+      JSON.stringify(validateFrozenSource(source)) !== JSON.stringify(state.source)
+    )
+      throw new Error("Frozen escalation baseline is incomplete or changed");
+    return state.escalationBaseline;
   }
 }

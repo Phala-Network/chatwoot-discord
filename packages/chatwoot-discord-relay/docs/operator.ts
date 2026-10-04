@@ -2,7 +2,6 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   type AdoptionCut,
-  escalationBaseline,
   type FrozenSource,
   importAdoptionPage,
   LegacyArchive,
@@ -67,8 +66,11 @@ export class RelayAdoptionOperator extends DurableObject<OperatorEnv> {
   receiptPage(accountId: number, conversationId: number, position?: ReceiptPosition) {
     return this.archive().receiptPage(accountId, conversationId, position);
   }
+  receiptSeal(accountId: number, conversationId: number) {
+    return this.archive().receiptSeal(accountId, conversationId);
+  }
   escalationBaseline(source: FrozenSource) {
-    return escalationBaseline(this.env, source);
+    return this.archive().escalationBaseline(source);
   }
   prepare(cut: AdoptionCut) {
     this.archive().assertCut(cut);

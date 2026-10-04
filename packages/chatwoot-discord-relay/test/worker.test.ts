@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { Budget, JobDeadlineError } from "../../../shared/budget.ts";
 import { chatwootClient } from "../../../shared/chatwoot/api.ts";
+import { within } from "../../../shared/deadline.ts";
 import { executeCommand } from "../src/commands/actions.ts";
 import type { CommandJob } from "../src/commands/job.ts";
 import { configSchema } from "../src/config.ts";
@@ -1832,8 +1833,21 @@ it.for(["baseline", "headers", "body", "discord"] as const)(
       });
       let action = 0;
       let feedback = 0;
+      let measuring = false;
       let firstPost = 0;
       let jobStartedAt = 0;
+      let observedBlock = () => {};
+      const blockReady = new Promise<void>((resolve) => {
+        observedBlock = resolve;
+      });
+      let observedFeedback = () => {};
+      const feedbackReady = new Promise<void>((resolve) => {
+        observedFeedback = resolve;
+      });
+      let observedPost = () => {};
+      const postReady = new Promise<void>((resolve) => {
+        observedPost = resolve;
+      });
       const bRaw = {
         id: b,
         status: "open",
@@ -1861,6 +1875,7 @@ it.for(["baseline", "headers", "body", "discord"] as const)(
             );
           if (mode === "headers") {
             blocked = true;
+            observedBlock();
             await gate;
           }
           if (mode === "body") {
@@ -1869,6 +1884,7 @@ it.for(["baseline", "headers", "body", "discord"] as const)(
               new ReadableStream<Uint8Array>({
                 start(controller) {
                   blocked = true;
+                  observedBlock();
                   void gate.then(() => {
                     if (!canceled) {
                       controller.enqueue(encoder.encode(JSON.stringify(aRaw)));
@@ -1912,15 +1928,20 @@ it.for(["baseline", "headers", "body", "discord"] as const)(
           "PATCH",
           new RegExp(`^discord\\.com/api/v10/webhooks/100000000000000001/measure-${sample}/messages/(@|%40)original$`),
           () => {
-            feedback = performance.now();
+            if (measuring) {
+              feedback = performance.now();
+              observedFeedback();
+            }
             return json({});
           },
         ),
         (request) => {
           if (request.method !== "POST" || request.url.pathname !== "/api/v10/webhooks/1/tok") return undefined;
           const thread = request.url.searchParams.get("thread_id");
-          if (thread === bThread && String(JSON.parse(request.body).content).startsWith("Fixture body"))
+          if (thread === bThread && String(JSON.parse(request.body).content).startsWith("Fixture body")) {
             firstPost ||= performance.now();
+            observedPost();
+          }
           if (
             mode !== "discord" ||
             thread !== aThread ||
@@ -1928,6 +1949,7 @@ it.for(["baseline", "headers", "body", "discord"] as const)(
           )
             return undefined;
           blocked = true;
+          observedBlock();
           request.signal.addEventListener(
             "abort",
             () => {
@@ -1967,6 +1989,15 @@ it.for(["baseline", "headers", "body", "discord"] as const)(
         );
         for (const thread of [aThread, bThread])
           await warm((rest) => rest.patch(`/channels/${thread}`, { body: { archived: false } }));
+        // Interaction tokens each have their own capacity. A new token is a cold
+        // probe even when the application owner handled another sample's feedback.
+        await warm((rest) =>
+          rest.patch(`/webhooks/100000000000000001/measure-${sample}/messages/@original`, {
+            body: { content: "Warm" },
+            auth: false,
+            interaction: true,
+          }),
+        );
       });
       const signed = await signedInteraction(
         {
@@ -1983,9 +2014,11 @@ it.for(["baseline", "headers", "body", "discord"] as const)(
       );
       if (mode !== "baseline") {
         await hub(a).enqueueConversation(3, a);
-        await vi.waitFor(() => expect(blocked).toBe(true), { interval: 5, timeout: 3000 });
+        await within(blockReady, AbortSignal.timeout(3000));
+        expect(blocked).toBe(true);
       }
       const started = performance.now();
+      measuring = true;
       try {
         const response = await call(signed());
         const ack = performance.now() - started;
@@ -1996,9 +2029,13 @@ it.for(["baseline", "headers", "body", "discord"] as const)(
           { secret: accountId === 3 ? "secret-acme" : "secret-globex" },
         );
         expect(webhook.status).toBe(200);
-        await vi.waitFor(() => expect(feedback).toBeGreaterThan(0), { interval: 5 });
+        // The fake signals actual dispatch. Assertion polling every 5ms competes with
+        // the real 100ms permits on the same Workers runtime; keep it off this hot path.
+        await within(feedbackReady, AbortSignal.timeout(1000));
+        expect(feedback).toBeGreaterThan(0);
         if (mode !== "baseline") expect(upstreamAborted).toBe(false);
-        await vi.waitFor(() => expect(firstPost).toBeGreaterThan(0), { interval: 5, timeout: 3000 });
+        await within(postReady, AbortSignal.timeout(3000));
+        expect(firstPost).toBeGreaterThan(0);
         expect(released).toBe(false);
         expect(action - started).toBeLessThan(1000);
         expect(feedback - started).toBeLessThan(1000);

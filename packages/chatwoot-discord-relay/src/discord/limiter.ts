@@ -231,7 +231,9 @@ export class DiscordLimiter {
       performance.now() - started >=
       Math.min(permit.validForMs, globalPermit?.allowed ? globalPermit.validForMs : PERMIT_MS)
     )
-      return { allowed: false as const, retryAfterMs: 1000 };
+      // Nothing was dispatched. Yield briefly for a fresh reservation; the durable
+      // route/global windows still enforce every consumed permit and real cooldown.
+      return { allowed: false as const, retryAfterMs: PERMIT_MS };
     return { allowed: true as const, owner, globalOwner, reservation };
   }
 

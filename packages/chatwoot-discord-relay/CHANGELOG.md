@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pre-migration/unexplained outcomes unresolved. Preserve upgraded titles with historically nullable associations.
 - Extract only from a settled frozen Hub shell using bounded indexed scans and a private incremental audit;
   source drain/retirement evidence remains mandatory. Require durable whole-cut verification batches before staging.
+- Bind every cut to the archive's durably generated receipt seals, operational guards/fence and frozen escalation
+  baseline; enforce UTF-8 page byte bounds. Missing stock-0.27 settlement/deletion evidence remains a rollout hold.
+- Yield an expired, undispatched Discord permit for a fresh reservation after 100ms while retaining durable
+  bucket/global cooldowns and unknown-send guards. Warm latency fixtures now prewarm interaction capacity and
+  observe dispatch through bounded latches without assertion polling.
 
 ## [0.31.0] - 2026-10-03
 

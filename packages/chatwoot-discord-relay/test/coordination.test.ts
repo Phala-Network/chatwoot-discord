@@ -7,6 +7,7 @@ import { configSchema } from "../src/config.ts";
 import { control } from "../src/control.ts";
 import { QueueDigest } from "../src/digest.ts";
 import { DiscordLimiter, fingerprint, type LimitReport, LimitState, type Reservation } from "../src/discord/limiter.ts";
+import { DiscordRest } from "../src/discord/rest.ts";
 import { ForumRegistry } from "../src/registry.ts";
 import { AccountSweep } from "../src/sweep.ts";
 import { json, mockFetch, on } from "./helpers.ts";
@@ -228,6 +229,78 @@ it("keeps the longest shared cooldown after duplicate reports and owner restart"
   await runInDurableObject(owner, (_instance, state) =>
     expect(state.storage.sql.exec("SELECT 1 FROM state").toArray().length).toBeGreaterThan(0),
   );
+});
+
+it("yields expired dispatch permits without HTTP, then obeys warm capacity and real cooldowns on a fresh reservation", async () => {
+  let now = Date.now();
+  let elapsed = 0;
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  vi.spyOn(performance, "now").mockImplementation(() => elapsed);
+  let expire = false;
+  let cooldown = false;
+  const limits = new Map<string, LimitState>();
+  const rows = new Map<string, string>();
+  const limiter = new DiscordLimiter(
+    { get: (key) => rows.get(key), set: (key, value) => rows.set(key, value) },
+    {
+      DISCORD_RATE_LIMIT: {
+        getByName(name) {
+          let state = limits.get(name);
+          if (!state) {
+            state = new LimitState(new Memory());
+            limits.set(name, state);
+          }
+          const owner = state;
+          return {
+            async reserve(value) {
+              const permit = owner.reserve(value);
+              if (expire && permit.allowed) {
+                now += 101;
+                elapsed += 101;
+              }
+              return permit;
+            },
+            async report(value) {
+              owner.report(value);
+            },
+          };
+        },
+      },
+    },
+  );
+  const { requests } = mockFetch(
+    on("PATCH", "discord.com/api/v10/webhooks/app/fixture/messages/@original", () =>
+      cooldown ? json({ retry_after: 60 }, { status: 429 }) : json({}),
+    ),
+  );
+  const rest = new DiscordRest("fixture", fetch, limiter);
+  const patch = () =>
+    rest.patch("/webhooks/app/fixture/messages/@original", { body: {}, auth: false, interaction: true });
+  await patch(); // Real warm-up/report path.
+  expire = true;
+  await expect(patch()).rejects.toMatchObject({ status: 429, retryAfterMs: 100 });
+  expect(requests).toHaveLength(1); // Expired permit did not dispatch.
+  expire = false;
+  now += 100;
+  elapsed += 100;
+  await patch();
+  expect(requests).toHaveLength(2);
+  cooldown = true;
+  await expect(patch()).rejects.toMatchObject({ status: 429, retryAfterMs: 60000 });
+  now += 100;
+  elapsed += 100;
+  await expect(patch()).rejects.toMatchObject({ status: 429, retryAfterMs: 59900 });
+  expect(requests).toHaveLength(3); // Actual cooldown still fences HTTP.
+  expire = true;
+  await expect(
+    limiter.reserve("PATCH", "/webhooks/cold/fixture/messages/@original", "fixture", false, true),
+  ).resolves.toEqual({ allowed: false, retryAfterMs: 100 });
+  expire = false;
+  now += 100;
+  elapsed += 100;
+  const cold = await limiter.reserve("PATCH", "/webhooks/cold/fixture/messages/@original", "fixture", false, true);
+  expect(cold.allowed).toBe(false);
+  if (!cold.allowed) expect(cold.retryAfterMs).toBe(799); // Undispatched cold probe was still consumed.
 });
 
 it("does not lose a shared cooldown when a concurrent successful response omits scope", () => {

@@ -8,7 +8,7 @@ import { verifyLinkBatch } from "../../src/verification.ts";
 
 export async function withArchive<T>(
   sourceState: DurableObjectState,
-  action: (archive: LegacyArchive, source: FrozenSource) => T | Promise<T>,
+  action: (archive: LegacyArchive, source: FrozenSource, state: DurableObjectState) => T | Promise<T>,
   dispositions?: (archive: LegacyArchive, source: FrozenSource) => void,
 ) {
   const source: FrozenSource = {
@@ -37,7 +37,7 @@ export async function withArchive<T>(
         if (archive.auditNext().complete) break;
         if (pages === 99) throw new Error("Fixture audit exceeded bound");
       }
-      return action(archive, source);
+      return action(archive, source, state);
     },
   );
 }

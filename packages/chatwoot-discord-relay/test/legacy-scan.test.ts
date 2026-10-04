@@ -1,14 +1,54 @@
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { expect, it, vi } from "vitest";
-import type { AdoptionCut } from "../src/adoption.ts";
+import type { AdoptionCut, AdoptionMapping } from "../src/adoption.ts";
 import { LegacyArchive } from "../src/archive.ts";
-import { receiptSeal } from "../src/history.ts";
+import { nextReceiptPosition, receiptHash, receiptPageBody, receiptSeal } from "../src/history.ts";
 import { type FrozenSource, type LegacyScanPage, legacyScanPage, validateFrozenSource } from "../src/legacy.ts";
 import { withArchive } from "./fixtures/archive.ts";
 import legacySchema from "./fixtures/legacy-027.ts";
 
 const thread = "100000000000000012";
+function archiveCut(archive: LegacyArchive, source: FrozenSource, mappings: AdoptionMapping[] = []): AdoptionCut {
+  const inventory = archive.inventory();
+  return {
+    epoch: source.epoch,
+    watermark: 150,
+    interactionFence: inventory.interactionFence,
+    sourceIdentity: source.sourceIdentity,
+    schemaVersion: 9,
+    quiesced: true,
+    sourcesPaused: true,
+    activeCalls: 0,
+    jobs: 0,
+    held: 0,
+    partial: 0,
+    unresolved: 0,
+    routingGuardsDisposition: "never-used",
+    cooldownEndsAt: 0,
+    historyPermissionVerified: true,
+    mappings,
+    inventoryComplete: true,
+    drainEvidence: source.drainEvidence,
+    escalationBaseline: archive.escalationBaseline(source),
+    sourceCounts: inventory.sourceCounts,
+    auditedUnthreaded: inventory.sourceCounts.conversations - mappings.length,
+    receiptAudit: inventory.receiptAudit,
+  };
+}
+function mapping(history: AdoptionMapping["history"]): AdoptionMapping {
+  return {
+    accountId: history.header.accountId,
+    conversationId: history.header.conversationId,
+    threadId: history.header.threadId,
+    guildId: "100000000000000044",
+    forumId: "100000000000000055",
+    generation: 1,
+    cursor: history.header.cursor,
+    latestEligibleId: history.header.cursor,
+    history,
+  };
+}
 
 it("bounds source execution by indexed rowid pages, fences unfrozen access, and never copies overlong text", async () => {
   await runInDurableObject(env.LEGACY_HUB.getByName(`bounded:${crypto.randomUUID()}`), async (_instance, state) => {
@@ -171,7 +211,7 @@ it("binds the expected complete 53-owner set to the frozen archive before operat
         const cut: AdoptionCut = {
           epoch: source.epoch,
           watermark: 101,
-          interactionFence: "100",
+          interactionFence: inventory.interactionFence,
           sourceIdentity: source.sourceIdentity,
           schemaVersion: 9,
           quiesced: true,
@@ -210,4 +250,162 @@ it("binds the expected complete 53-owner set to the frozen archive before operat
       });
     },
   );
+});
+
+it("seals every authoritative page durably and rejects forged Discord IDs or baselines with unchanged headers/counts", async () => {
+  await runInDurableObject(env.LEGACY_HUB.getByName(`canonical:${crypto.randomUUID()}`), async (_instance, state) => {
+    const sql = state.storage.sql;
+    sql.exec(legacySchema);
+    sql.exec("INSERT INTO conversations (account_id,conversation_id,thread_id,cursor) VALUES (3,12,?,150)", thread);
+    for (let id = 1; id <= 105; id++)
+      sql.exec("INSERT INTO posted_messages VALUES (3,12,?,0,?)", id, String(100000000000020000n + BigInt(id)));
+    sql.exec("INSERT INTO derived_messages VALUES (3,12,106,'100000000000030106')");
+    sql.exec("INSERT INTO submitted_responses VALUES (3,12,106,?)", "a".repeat(64));
+    await withArchive(state, async (archive, source, archiveState) => {
+      const queries = vi.spyOn(archiveState.storage.sql, "exec");
+      const first = await archive.receiptPage(3, 12);
+      expect(queries.mock.calls.every(([query]) => !/(COUNT\(|GROUP BY|UNION|JOIN)/i.test(query))).toBe(true);
+      for (const result of queries.mock.results)
+        if (result.type === "return") expect(result.value.rowsRead).toBeLessThanOrEqual(101);
+      queries.mockRestore();
+      expect(first.records).toHaveLength(100);
+      expect(first.complete).toBe(false);
+      expect(() => archive.receiptSeal(3, 12)).toThrow(/incomplete/);
+      expect(() =>
+        archive.assertCut(
+          archiveCut(archive, source, [mapping({ header: first.header, pages: 2, digest: "f".repeat(64) })]),
+        ),
+      ).toThrow(/incomplete/);
+      await expect(archive.receiptPage(3, 12, { ...nextReceiptPosition(first), index: 2 })).rejects.toThrow(
+        /checkpoint/,
+      );
+      await expect(
+        archive.receiptPage(3, 12, { ...nextReceiptPosition(first), previous: "f".repeat(64) }),
+      ).rejects.toThrow(/checkpoint/);
+      expect(await archive.receiptPage(3, 12)).toEqual(first);
+      archiveState.storage.sql.exec(
+        "CREATE TRIGGER interrupt_receipt_export BEFORE INSERT ON legacy_archive_receipt_progress BEGIN SELECT RAISE(ABORT,'fixture interruption'); END",
+      );
+      await expect(archive.receiptPage(3, 12, nextReceiptPosition(first))).rejects.toThrow();
+      expect(() => archive.receiptSeal(3, 12)).toThrow(/incomplete/);
+      archiveState.storage.sql.exec("DROP TRIGGER interrupt_receipt_export");
+      archive = new LegacyArchive(archiveState.storage.sql, (run) => archiveState.storage.transactionSync(run));
+      const last = await archive.receiptPage(3, 12, nextReceiptPosition(first));
+      expect(last.complete).toBe(true);
+      expect(last.records).toHaveLength(7);
+      const history = archive.receiptSeal(3, 12);
+      const cut = archiveCut(archive, source, [mapping(history)]);
+      expect(() => archive.assertCut(cut)).not.toThrow();
+      expect(await archive.receiptPage(3, 12, nextReceiptPosition(first))).toEqual(last);
+      const forgedFirst = structuredClone(first);
+      const original = forgedFirst.records[0];
+      if (original?.kind !== 0) throw new Error("Missing original fixture receipt");
+      original.discordId = "100000000000099999";
+      forgedFirst.digest = await receiptHash(receiptPageBody(forgedFirst));
+      const forgedLast = { ...last, previous: forgedFirst.digest };
+      forgedLast.digest = await receiptHash(receiptPageBody(forgedLast));
+      expect(() => archive.assertCut(archiveCut(archive, source, [mapping(receiptSeal(forgedLast))]))).toThrow(
+        /seal differs/,
+      );
+      const forgedBaseline = structuredClone(last);
+      const response = forgedBaseline.records.find((record) => record.kind === 2);
+      if (response?.kind !== 2) throw new Error("Missing response fixture baseline");
+      response.digest = "b".repeat(64);
+      forgedBaseline.digest = await receiptHash(receiptPageBody(forgedBaseline));
+      expect(() => archive.assertCut(archiveCut(archive, source, [mapping(receiptSeal(forgedBaseline))]))).toThrow(
+        /seal differs/,
+      );
+      expect(() => archive.assertCut(archiveCut(archive, source, [mapping({ ...history, pages: 1 })]))).toThrow(
+        /seal differs/,
+      );
+    });
+  });
+});
+
+it.for(["jobs", "partial", "card", "send", "effect", "route", "interaction"] as const)(
+  "enforces archived %s evidence even when the caller supplies zero gates and no mappings",
+  async (kind) => {
+    await runInDurableObject(env.LEGACY_HUB.getByName(`gate:${crypto.randomUUID()}`), async (_instance, state) => {
+      const sql = state.storage.sql;
+      sql.exec(legacySchema);
+      sql.exec("INSERT INTO conversations (account_id,conversation_id,cursor) VALUES (3,12,100)");
+      if (kind === "jobs")
+        sql.exec("INSERT INTO jobs (key,priority,payload,not_before,created_at) VALUES ('fixture',1,'{}',0,0)");
+      if (kind === "partial") sql.exec("INSERT INTO posted_messages VALUES (3,12,101,0,'100000000000000101')");
+      if (kind === "card") sql.exec("UPDATE conversations SET card_id='?unknown' WHERE conversation_id=12");
+      if (kind === "send") sql.exec("INSERT INTO cache VALUES ('send:fixture','unknown',NULL)");
+      if (kind === "effect") sql.exec("INSERT INTO cache VALUES ('effect:fixture','{\"state\":\"DISPATCHING\"}',NULL)");
+      if (kind === "route") sql.exec("INSERT INTO cache VALUES ('kind-reply:3:12','1',NULL)");
+      if (kind === "interaction") sql.exec("INSERT INTO interactions VALUES ('100',0)");
+      await withArchive(state, (archive, source) => {
+        const cut = archiveCut(archive, source);
+        if (kind === "interaction") {
+          expect(() => archive.assertCut(cut)).not.toThrow();
+          expect(() => archive.assertCut({ ...cut, interactionFence: "0" })).toThrow(/complete frozen archive/);
+        } else {
+          expect(() => archive.assertCut(cut)).toThrow(/complete frozen archive/);
+          if (kind === "route")
+            expect(() => archive.assertCut({ ...cut, routingGuardsDisposition: "independent-router" })).toThrow(
+              /complete frozen archive/,
+            );
+        }
+      });
+    });
+  },
+);
+
+it("binds canonical escalation state to the frozen cache checkpoint and rejects stale baseline/replay", async () => {
+  await runInDurableObject(env.LEGACY_HUB.getByName(`escalation:${crypto.randomUUID()}`), async (_instance, state) => {
+    const sql = state.storage.sql;
+    sql.exec(legacySchema);
+    sql.exec("INSERT INTO cache VALUES ('queue:escalations',?,NULL)", '{"3:12":{"level":2,"since":100}}');
+    const source: FrozenSource = {
+      sourceIdentity: state.id.toString(),
+      epoch: "fixture",
+      drainEvidence: "fixture:settled",
+      frozen: true,
+    };
+    const original = await legacyScanPage(sql, source, { kind: 4, rowid: 0 });
+    const pages: LegacyScanPage[] = [];
+    for (let kind = 0; kind <= 4; kind++) pages.push(await legacyScanPage(sql, source, { kind, rowid: 0 }));
+    expect(original.escalationBaseline).toBe('{"3:12":{"since":100,"level":2}}');
+    await withArchive(state, (archive, boundary) => {
+      const cut = archiveCut(archive, boundary);
+      expect(() => archive.assertCut(cut)).not.toThrow();
+      expect(() => archive.assertCut({ ...cut, escalationBaseline: "{}" })).toThrow(/complete frozen archive/);
+    });
+    await runInDurableObject(
+      env.LEGACY_HUB.getByName(`baseline-replay:${crypto.randomUUID()}`),
+      async (_instance, archiveState) => {
+        const archive = new LegacyArchive(archiveState.storage.sql, (run) => archiveState.storage.transactionSync(run));
+        archive.open(source);
+        for (const page of pages) await archive.collect(page);
+        await archive.collect(original);
+        const changed = { ...original, escalationBaseline: "{}" };
+        const { digest: _digest, ...body } = changed;
+        changed.digest = await receiptHash(body);
+        await expect(archive.collect(changed)).rejects.toThrow(/Conflicting frozen scan replay/);
+      },
+    );
+  });
+});
+
+it("enforces encoded UTF-8 bytes before accepting a private collector response", async () => {
+  await runInDurableObject(env.LEGACY_HUB.getByName(`bytes:${crypto.randomUUID()}`), async (_instance, state) => {
+    state.storage.sql.exec(legacySchema);
+    const source: FrozenSource = {
+      sourceIdentity: state.id.toString(),
+      epoch: "fixture",
+      drainEvidence: "fixture:settled",
+      frozen: true,
+    };
+    const page = await legacyScanPage(state.storage.sql, source);
+    page.rows = [{ rowid: 1, title: "界".repeat(750000) }];
+    const { digest: _digest, ...body } = page;
+    page.digest = await receiptHash(body);
+    expect(JSON.stringify(page).length).toBeLessThan(2 * 1024 * 1024);
+    const archive = new LegacyArchive(state.storage.sql, (run) => state.storage.transactionSync(run));
+    archive.open(source);
+    await expect(archive.collect(page)).rejects.toThrow(/Invalid frozen scan page/);
+  });
 });
